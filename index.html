@@ -3,157 +3,155 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#151719" />
-  <meta name="description" content="手機優先的 AI 空間生成器概念工具：拍照、選取區域、材質模擬、前後比較與下載。" />
-  <style>
-:root {
-  color-scheme: dark;
-  --bg: #0e1012;
-  --surface: #171a1d;
-  --surface-2: #202429;
-  --line: #30363d;
-  --text: #f3f4f5;
-  --muted: #a5adb6;
-  --accent: #c8ff72;
-  --accent-ink: #17200c;
-  --danger: #ffb4a9;
-  --radius: 22px;
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-* { box-sizing: border-box; }
-html { background: var(--bg); }
-body {
-  margin: 0;
-  min-height: 100vh;
-  background:
-    radial-gradient(circle at 10% 0%, rgba(200,255,114,.08), transparent 34rem),
-    var(--bg);
-  color: var(--text);
-}
-button, input, select, textarea { font: inherit; }
-button, select, textarea, input[type="color"] { color: var(--text); }
-button { cursor: pointer; }
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: max(18px, env(safe-area-inset-top)) 18px 14px;
-  background: rgba(14,16,18,.88);
-  border-bottom: 1px solid rgba(255,255,255,.08);
-  backdrop-filter: blur(18px);
-}
-
-h1, h2, p { margin-top: 0; }
-h1 { margin-bottom: 0; font-size: clamp(1.45rem, 6vw, 2.25rem); letter-spacing: -.045em; }
-h2 { margin-bottom: 8px; font-size: 1.3rem; letter-spacing: -.025em; }
-.eyebrow { margin-bottom: 5px; color: var(--accent); font-size: .72rem; font-weight: 800; letter-spacing: .15em; }
-
-.app-shell {
-  width: min(100%, 880px);
-  margin: 0 auto;
-  padding: 18px 14px 80px;
-}
-
-.card {
-  margin-bottom: 14px;
-  padding: 18px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(23,26,29,.94);
-  box-shadow: 0 20px 50px rgba(0,0,0,.18);
-}
-
-.intro p { margin-bottom: 10px; line-height: 1.55; }
-.notice { color: var(--muted); font-size: .9rem; }
-
-.upload-button,
-.primary,
-button {
-  min-height: 46px;
-  border: 1px solid var(--line);
-  border-radius: 15px;
-  background: var(--surface-2);
-  padding: 10px 14px;
-  font-weight: 720;
-}
-
-.upload-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  background: var(--accent);
-  color: var(--accent-ink);
-}
-.upload-button input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
-.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
-button:disabled { opacity: .42; cursor: not-allowed; }
-.ghost { background: transparent; }
-
-.meta-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 14px;
-  color: var(--muted);
-  font-size: .82rem;
-}
-.meta-grid span { padding: 9px 10px; border-radius: 12px; background: #111416; overflow-wrap: anywhere; }
-
-.toolbar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
-.tool { padding-inline: 8px; font-size: .86rem; }
-.tool.active { border-color: var(--accent); color: var(--accent); }
-.range-row { display: grid; grid-template-columns: auto 1fr 42px; align-items: center; gap: 10px; margin-top: 16px; color: var(--muted); }
-.range-row output { text-align: right; color: var(--text); }
-input[type="range"] { accent-color: var(--accent); }
-
-.workspace-card { padding: 8px; overflow: hidden; }
-.empty-state { display: grid; place-items: center; min-height: 260px; gap: 7px; color: var(--muted); text-align: center; }
-.empty-state strong { color: var(--text); }
-.canvas-wrap { position: relative; width: 100%; touch-action: none; border-radius: 16px; overflow: hidden; background: #08090a; }
-.canvas-wrap canvas { display: block; width: 100%; height: auto; }
-#maskCanvas { position: absolute; inset: 0; }
-
-.field-grid { display: grid; grid-template-columns: 1fr 108px; gap: 10px; }
-label > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: .83rem; }
-select, textarea, input[type="color"] {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: #111416;
-}
-select { height: 48px; padding: 0 12px; }
-textarea { padding: 12px; resize: vertical; margin-bottom: 12px; }
-input[type="color"] { height: 48px; padding: 5px; }
-.action-grid { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 8px; }
-.status { min-height: 20px; margin: 12px 2px 0; color: var(--muted); font-size: .86rem; }
-
-.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.compare-box { position: relative; overflow: hidden; border-radius: 16px; background: #08090a; touch-action: none; }
-.compare-box canvas { display: block; width: 100%; height: auto; }
-.after-layer { position: absolute; inset: 0; width: 50%; overflow: hidden; }
-.after-layer canvas { width: auto; max-width: none; height: 100%; }
-.compare-line { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: white; box-shadow: 0 0 0 1px rgba(0,0,0,.3); transform: translateX(-1px); pointer-events: none; }
-.compare-line::after { content: "↔"; position: absolute; top: 50%; left: 50%; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: white; color: #111; transform: translate(-50%,-50%); font-weight: 900; }
-.compare-range { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; }
-.roadmap p:last-child { margin-bottom: 0; color: var(--muted); line-height: 1.55; }
-footer { padding: 26px 18px calc(28px + env(safe-area-inset-bottom)); color: #737b84; text-align: center; font-size: .75rem; }
-.hidden { display: none !important; }
-
-@media (min-width: 720px) {
-  .app-shell { padding-top: 28px; }
-  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
-  .upload-button, .meta-grid { grid-column: 1 / -1; }
-}
-
-  </style>
+  <meta name="theme-color" content="#111315" />
+  <meta name="description" content="手機優先的 AI 空間生成器概念工具：讀取照片資訊、選取區域、風格與材質模擬、前後比較、下載與分享。" />
   <title>AI 空間生成器</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d0f10;
+      --surface: #171a1d;
+      --surface-2: #202429;
+      --line: #30363d;
+      --text: #f4f5f6;
+      --muted: #a5adb6;
+      --accent: #c8ff72;
+      --accent-ink: #17200c;
+      --danger: #ffb4a9;
+      --radius: 22px;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(200,255,114,.09), transparent 34rem),
+        radial-gradient(circle at 100% 26%, rgba(112,168,255,.05), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+    }
+    button, input, select, textarea { font: inherit; }
+    button, select, textarea, input[type="color"] { color: var(--text); }
+    button { cursor: pointer; }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 0; font-size: clamp(1.42rem, 6vw, 2.25rem); letter-spacing: -.045em; }
+    h2 { margin-bottom: 8px; font-size: 1.24rem; letter-spacing: -.025em; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: max(18px, env(safe-area-inset-top)) 18px 14px;
+      background: rgba(13,15,16,.88);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      backdrop-filter: blur(18px);
+    }
+    .eyebrow { margin-bottom: 5px; color: var(--accent); font-size: .7rem; font-weight: 850; letter-spacing: .16em; }
+    .version { color: var(--muted); font-size: .74rem; white-space: nowrap; }
+
+    .app-shell { width: min(100%, 920px); margin: 0 auto; padding: 16px 13px 84px; }
+    .card {
+      margin-bottom: 14px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(23,26,29,.95);
+      box-shadow: 0 20px 50px rgba(0,0,0,.18);
+    }
+    .intro p { margin-bottom: 9px; line-height: 1.55; }
+    .notice { color: var(--muted); font-size: .87rem; }
+
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 14px; }
+    .step { padding: 9px 5px; border: 1px solid var(--line); border-radius: 13px; color: var(--muted); text-align: center; font-size: .72rem; }
+    .step.active { border-color: rgba(200,255,114,.55); background: rgba(200,255,114,.08); color: var(--accent); }
+
+    .upload-button, .primary, button {
+      min-height: 46px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--surface-2);
+      padding: 10px 13px;
+      font-weight: 730;
+    }
+    .upload-button { display: flex; align-items: center; justify-content: center; width: 100%; background: var(--accent); color: var(--accent-ink); }
+    .upload-button input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
+    .primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+    button:disabled { opacity: .42; cursor: not-allowed; }
+    .ghost { background: transparent; }
+
+    .meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; color: var(--muted); font-size: .78rem; }
+    .meta-grid span { padding: 9px 10px; border-radius: 12px; background: #111416; overflow-wrap: anywhere; }
+    .privacy { margin: 10px 2px 0; color: #7f8891; font-size: .76rem; line-height: 1.45; }
+
+    .toolbar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: 14px; }
+    .tool { padding-inline: 6px; font-size: .79rem; }
+    .tool.active { border-color: var(--accent); color: var(--accent); }
+    .range-row { display: grid; grid-template-columns: auto 1fr 42px; align-items: center; gap: 10px; margin-top: 15px; color: var(--muted); font-size: .86rem; }
+    .range-row output { text-align: right; color: var(--text); }
+    input[type="range"] { accent-color: var(--accent); width: 100%; }
+
+    .workspace-card { padding: 8px; overflow: hidden; }
+    .empty-state { display: grid; place-items: center; min-height: 270px; gap: 7px; color: var(--muted); text-align: center; }
+    .empty-state strong { color: var(--text); }
+    .canvas-wrap { position: relative; width: 100%; touch-action: none; border-radius: 16px; overflow: hidden; background: #08090a; }
+    .canvas-wrap canvas { display: block; width: 100%; height: auto; }
+    #maskCanvas { position: absolute; inset: 0; }
+    .canvas-hint { position: absolute; left: 10px; bottom: 10px; padding: 7px 9px; border-radius: 11px; background: rgba(0,0,0,.62); color: #dfe3e6; font-size: .73rem; pointer-events: none; backdrop-filter: blur(8px); }
+
+    .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .field-grid.three { grid-template-columns: 1fr 1fr 100px; }
+    label > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: .81rem; }
+    select, textarea, input[type="color"] { width: 100%; border: 1px solid var(--line); border-radius: 14px; background: #111416; }
+    select { height: 48px; padding: 0 11px; }
+    textarea { padding: 12px; resize: vertical; margin-bottom: 12px; line-height: 1.45; }
+    input[type="color"] { height: 48px; padding: 5px; }
+
+    .preset-title { margin: 16px 0 8px; color: var(--muted); font-size: .81rem; }
+    .preset-row { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+    .preset-row::-webkit-scrollbar { display: none; }
+    .preset { flex: 0 0 auto; min-height: 40px; padding: 8px 12px; border-radius: 999px; font-size: .8rem; white-space: nowrap; }
+    .preset.active { border-color: var(--accent); background: rgba(200,255,114,.09); color: var(--accent); }
+
+    .action-grid { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 8px; }
+    .status { min-height: 20px; margin: 12px 2px 0; color: var(--muted); font-size: .84rem; line-height: 1.4; }
+
+    .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .result-actions { display: flex; gap: 7px; }
+    .result-actions button { min-height: 40px; padding: 8px 10px; font-size: .78rem; }
+    .compare-box { position: relative; overflow: hidden; border-radius: 16px; background: #08090a; touch-action: none; }
+    .compare-box canvas { display: block; width: 100%; height: auto; }
+    .after-layer { position: absolute; inset: 0; width: 50%; overflow: hidden; }
+    .after-layer canvas { width: auto; max-width: none; height: 100%; }
+    .compare-line { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: white; box-shadow: 0 0 0 1px rgba(0,0,0,.3); transform: translateX(-1px); pointer-events: none; }
+    .compare-line::after { content: "↔"; position: absolute; top: 50%; left: 50%; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: white; color: #111; transform: translate(-50%,-50%); font-weight: 900; }
+    .compare-range { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; }
+    .compare-label { position: absolute; top: 9px; z-index: 2; padding: 6px 8px; border-radius: 9px; background: rgba(0,0,0,.55); color: white; font-size: .7rem; pointer-events: none; }
+    .compare-label.before { left: 9px; }
+    .compare-label.after { right: 9px; }
+
+    .roadmap p:last-child { margin-bottom: 0; color: var(--muted); line-height: 1.55; }
+    footer { padding: 26px 18px calc(28px + env(safe-area-inset-bottom)); color: #737b84; text-align: center; font-size: .73rem; }
+    .hidden { display: none !important; }
+
+    @media (max-width: 460px) {
+      .field-grid.three { grid-template-columns: 1fr 1fr; }
+      .field-grid.three label:last-child { grid-column: 1 / -1; }
+      .action-grid { grid-template-columns: 1.4fr 1fr 1fr; }
+      .action-grid button { padding-inline: 7px; font-size: .8rem; }
+    }
+    @media (min-width: 720px) {
+      .app-shell { padding-top: 26px; }
+      .photo-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
+      .upload-button, .meta-grid, .privacy, .toolbar, .range-row { grid-column: 1 / -1; }
+    }
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -161,52 +159,73 @@ footer { padding: 26px 18px calc(28px + env(safe-area-inset-bottom)); color: #73
       <p class="eyebrow">AI SPACE GENERATOR</p>
       <h1>AI 空間生成器</h1>
     </div>
-    <button id="installBtn" class="ghost hidden" type="button">安裝</button>
+    <span class="version">Concept v2</span>
   </header>
 
   <main class="app-shell">
+    <div class="steps" aria-label="使用流程">
+      <div class="step active" data-step="1">1 照片</div>
+      <div class="step" data-step="2">2 選取</div>
+      <div class="step" data-step="3">3 設計</div>
+      <div class="step" data-step="4">4 結果</div>
+    </div>
+
     <section class="card intro">
-      <p>上傳或拍攝空間照片，在畫面上塗選需要修改的位置，再套用移除、顏色或材質模擬。</p>
-      <p class="notice">目前為手機端概念生成版本；不會上傳照片，也不是精確施工或結構判斷工具。</p>
+      <p>拍攝或選擇空間照片，塗選需要修改的位置，再套用顏色、材質或空間調整概念。</p>
+      <p class="notice">照片只在此裝置內處理。這是設計概念模擬，不是精確施工、結構判斷或真正的生成式 AI。</p>
     </section>
 
-    <section class="card controls">
+    <section class="card photo-controls">
       <label class="upload-button" for="imageInput">
-        <span>拍攝／選擇照片</span>
-        <input id="imageInput" type="file" accept="image/*" capture="environment" />
+        <span>拍攝／選擇空間照片</span>
+        <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" />
       </label>
 
       <div id="fileMeta" class="meta-grid" aria-live="polite">
         <span>尚未載入照片</span>
       </div>
+      <p class="privacy">GPS 僅在照片本身含有定位資料時顯示；本頁不會傳送或保存定位。</p>
 
-      <div class="toolbar" aria-label="編輯工具">
-        <button type="button" data-tool="brush" class="tool active">筆刷選取</button>
-        <button type="button" data-tool="eraser" class="tool">擦除選取</button>
-        <button id="clearMaskBtn" type="button" class="tool">清除選取</button>
+      <div class="toolbar" aria-label="選取工具">
+        <button type="button" data-tool="brush" class="tool active">筆刷</button>
+        <button type="button" data-tool="eraser" class="tool">擦除</button>
+        <button id="selectAllBtn" type="button" class="tool">全選</button>
+        <button id="clearMaskBtn" type="button" class="tool">清除</button>
       </div>
 
       <label class="range-row">
         <span>筆刷大小</span>
-        <input id="brushSize" type="range" min="8" max="120" value="44" />
-        <output id="brushSizeValue">44</output>
+        <input id="brushSize" type="range" min="8" max="150" value="48" />
+        <output id="brushSizeValue">48</output>
       </label>
     </section>
 
     <section class="card workspace-card">
       <div id="emptyState" class="empty-state">
         <strong>先加入一張空間照片</strong>
-        <span>照片只在你的裝置中處理。</span>
+        <span>支援 JPEG、PNG 與 WebP。</span>
       </div>
-
       <div id="canvasWrap" class="canvas-wrap hidden">
         <canvas id="photoCanvas"></canvas>
         <canvas id="maskCanvas"></canvas>
+        <span class="canvas-hint">綠色區域會被修改</span>
       </div>
     </section>
 
     <section class="card generation-panel">
-      <div class="field-grid">
+      <div class="field-grid three">
+        <label>
+          <span>空間類型</span>
+          <select id="roomType">
+            <option value="living room">客廳</option>
+            <option value="bedroom">臥室</option>
+            <option value="kitchen">廚房</option>
+            <option value="bathroom">浴室</option>
+            <option value="workspace">工作空間</option>
+            <option value="commercial">商業空間</option>
+            <option value="exterior">外部空間</option>
+          </select>
+        </label>
         <label>
           <span>操作</span>
           <select id="operation">
@@ -218,16 +237,31 @@ footer { padding: 26px 18px calc(28px + env(safe-area-inset-bottom)); color: #73
             <option value="light">提亮空間</option>
           </select>
         </label>
-
         <label id="colorField">
           <span>顏色</span>
           <input id="fillColor" type="color" value="#d6c4aa" />
         </label>
       </div>
 
+      <p class="preset-title">風格預設</p>
+      <div class="preset-row" id="presetRow">
+        <button class="preset active" data-preset="japandi" type="button">Japandi</button>
+        <button class="preset" data-preset="midcentury" type="button">Mid-century</button>
+        <button class="preset" data-preset="wabisabi" type="button">侘寂</button>
+        <button class="preset" data-preset="minimal" type="button">極簡</button>
+        <button class="preset" data-preset="industrial" type="button">工業</button>
+        <button class="preset" data-preset="tropical" type="button">熱帶自然</button>
+      </div>
+
+      <label class="range-row">
+        <span>生成強度</span>
+        <input id="strength" type="range" min="20" max="100" value="72" />
+        <output id="strengthValue">72</output>
+      </label>
+
       <label>
         <span>設計描述</span>
-        <textarea id="prompt" rows="3" placeholder="例如：溫暖木質、乾淨留白、自然採光、低飽和色系"></textarea>
+        <textarea id="prompt" rows="3" placeholder="例如：溫暖木質、乾淨留白、自然採光、低飽和色系">溫暖木質、自然採光、低飽和色系、乾淨留白</textarea>
       </label>
 
       <div class="action-grid">
@@ -244,14 +278,16 @@ footer { padding: 26px 18px calc(28px + env(safe-area-inset-bottom)); color: #73
           <p class="eyebrow">COMPARE</p>
           <h2>修改前後比較</h2>
         </div>
-        <button id="downloadBtn" type="button" class="ghost">下載 PNG</button>
-      </div>
-
-      <div id="compareBox" class="compare-box">
-        <canvas id="beforeCanvas"></canvas>
-        <div id="afterLayer" class="after-layer">
-          <canvas id="afterCanvas"></canvas>
+        <div class="result-actions">
+          <button id="shareBtn" type="button" class="ghost">分享</button>
+          <button id="downloadBtn" type="button" class="ghost">下載</button>
         </div>
+      </div>
+      <div id="compareBox" class="compare-box">
+        <span class="compare-label before">原始</span>
+        <span class="compare-label after">概念</span>
+        <canvas id="beforeCanvas"></canvas>
+        <div id="afterLayer" class="after-layer"><canvas id="afterCanvas"></canvas></div>
         <div id="compareLine" class="compare-line" aria-hidden="true"></div>
         <input id="compareRange" class="compare-range" type="range" min="0" max="100" value="50" aria-label="前後比較位置" />
       </div>
@@ -259,291 +295,539 @@ footer { padding: 26px 18px calc(28px + env(safe-area-inset-bottom)); color: #73
 
     <section class="card roadmap">
       <p class="eyebrow">NEXT</p>
-      <h2>後續可接入</h2>
-      <p>物件辨識、語意分割、真正的局部生成、2D 平面圖轉 3D、多視角一致性與 AR 預覽。</p>
+      <h2>下一階段</h2>
+      <p>接入物件辨識、語意分割與真正的局部生成 API；再加入 2D 平面圖理解、多視角一致性與概念 3D。</p>
     </section>
   </main>
 
-  <footer>AI Space Generator · Local-first prototype</footer>
+  <footer>AI Space Generator · Local-first concept prototype</footer>
+
   <script>
-'use strict';
+  'use strict';
 
-const $ = (id) => document.getElementById(id);
-const state = {
-  original: null,
-  current: null,
-  history: [],
-  tool: 'brush',
-  drawing: false,
-  scale: 1,
-  deferredInstall: null,
-};
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    original: null,
+    current: null,
+    history: [],
+    tool: 'brush',
+    drawing: false,
+    previousPoint: null,
+    preset: 'japandi',
+  };
 
-const imageInput = $('imageInput');
-const photoCanvas = $('photoCanvas');
-const maskCanvas = $('maskCanvas');
-const beforeCanvas = $('beforeCanvas');
-const afterCanvas = $('afterCanvas');
-const photoCtx = photoCanvas.getContext('2d', { willReadFrequently: true });
-const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
-const beforeCtx = beforeCanvas.getContext('2d');
-const afterCtx = afterCanvas.getContext('2d');
+  const presets = {
+    japandi: { color: '#d6c4aa', prompt: '溫暖木質、自然採光、低飽和色系、乾淨留白' },
+    midcentury: { color: '#b86f45', prompt: '中世紀現代、俐落線條、胡桃木、雕塑感家具、溫暖電影光線' },
+    wabisabi: { color: '#a99c87', prompt: '侘寂、自然肌理、手工質感、不完美、安靜柔和的光線' },
+    minimal: { color: '#d9d9d3', prompt: '極簡、純淨幾何、隱藏收納、中性色、均勻自然光' },
+    industrial: { color: '#777a78', prompt: '工業風、裸露結構、深色金屬、混凝土、粗獷材質' },
+    tropical: { color: '#7f9a70', prompt: '熱帶自然、植物、藤編、淺木色、通風明亮、自然陰影' },
+  };
 
-function setStatus(message, error = false) {
-  $('status').textContent = message;
-  $('status').style.color = error ? 'var(--danger)' : '';
-}
+  const imageInput = $('imageInput');
+  const photoCanvas = $('photoCanvas');
+  const maskCanvas = $('maskCanvas');
+  const beforeCanvas = $('beforeCanvas');
+  const afterCanvas = $('afterCanvas');
+  const photoCtx = photoCanvas.getContext('2d', { willReadFrequently: true });
+  const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
+  const beforeCtx = beforeCanvas.getContext('2d');
+  const afterCtx = afterCanvas.getContext('2d');
 
-function setButtons(enabled) {
-  $('generateBtn').disabled = !enabled;
-  $('resetBtn').disabled = !enabled;
-  $('undoBtn').disabled = state.history.length === 0;
-}
-
-function fitDimensions(width, height, max = 1600) {
-  const ratio = Math.min(1, max / Math.max(width, height));
-  return { width: Math.round(width * ratio), height: Math.round(height * ratio) };
-}
-
-async function loadFile(file) {
-  if (!file || !file.type.startsWith('image/')) {
-    setStatus('請選擇有效的圖片檔案。', true);
-    return;
+  function setStatus(message, error = false) {
+    $('status').textContent = message;
+    $('status').style.color = error ? 'var(--danger)' : '';
   }
 
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    const fitted = fitDimensions(img.naturalWidth, img.naturalHeight);
-    [photoCanvas, maskCanvas, beforeCanvas, afterCanvas].forEach((canvas) => {
-      canvas.width = fitted.width;
-      canvas.height = fitted.height;
+  function setStep(step) {
+    document.querySelectorAll('[data-step]').forEach((item) => {
+      item.classList.toggle('active', Number(item.dataset.step) <= step);
     });
+  }
 
-    photoCtx.drawImage(img, 0, 0, fitted.width, fitted.height);
-    state.original = photoCtx.getImageData(0, 0, fitted.width, fitted.height);
-    state.current = new ImageData(new Uint8ClampedArray(state.original.data), fitted.width, fitted.height);
-    state.history = [];
-    clearMask();
+  function setButtons(enabled) {
+    $('generateBtn').disabled = !enabled;
+    $('resetBtn').disabled = !enabled;
+    $('undoBtn').disabled = state.history.length === 0;
+  }
+
+  function fitDimensions(width, height, max = 1600) {
+    const ratio = Math.min(1, max / Math.max(width, height));
+    return { width: Math.round(width * ratio), height: Math.round(height * ratio) };
+  }
+
+  async function loadFile(file) {
+    if (!file || !/^image\/(jpeg|png|webp)$/.test(file.type)) {
+      setStatus('請選擇 JPEG、PNG 或 WebP 圖片。', true);
+      return;
+    }
+
+    setStatus('正在讀取照片與拍攝資訊…');
+    const [url, exif] = [URL.createObjectURL(file), await readExif(file).catch(() => ({}))];
+    const img = new Image();
+
+    img.onload = () => {
+      const fitted = fitDimensions(img.naturalWidth, img.naturalHeight);
+      [photoCanvas, maskCanvas, beforeCanvas, afterCanvas].forEach((canvas) => {
+        canvas.width = fitted.width;
+        canvas.height = fitted.height;
+      });
+
+      photoCtx.drawImage(img, 0, 0, fitted.width, fitted.height);
+      state.original = photoCtx.getImageData(0, 0, fitted.width, fitted.height);
+      state.current = cloneImageData(state.original);
+      state.history = [];
+      clearMask();
+      renderCurrent();
+      renderMeta(file, img, fitted, exif);
+      $('emptyState').classList.add('hidden');
+      $('canvasWrap').classList.remove('hidden');
+      $('resultSection').classList.add('hidden');
+      setButtons(true);
+      setStep(2);
+      setStatus('照片已載入。請塗選需要修改的區域。');
+      URL.revokeObjectURL(url);
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      setStatus('無法讀取圖片；iPhone 的 HEIC 請先轉成 JPEG。', true);
+    };
+    img.src = url;
+  }
+
+  function renderMeta(file, img, fitted, exif) {
+    const kb = Math.round(file.size / 1024).toLocaleString('zh-TW');
+    const fallbackDate = new Date(file.lastModified).toLocaleString('zh-TW');
+    const device = [exif.make, exif.model].filter(Boolean).join(' ') || '未提供';
+    const location = exif.gps ? `${exif.gps.latitude.toFixed(5)}, ${exif.gps.longitude.toFixed(5)}` : '未提供';
+    $('fileMeta').innerHTML = `
+      <span>檔名：${escapeHtml(file.name)}</span>
+      <span>大小：${kb} KB</span>
+      <span>原始：${img.naturalWidth} × ${img.naturalHeight}</span>
+      <span>處理：${fitted.width} × ${fitted.height}</span>
+      <span>日期：${escapeHtml(exif.date || fallbackDate)}</span>
+      <span>裝置：${escapeHtml(device)}</span>
+      <span>GPS：${escapeHtml(location)}</span>
+      <span>格式：${escapeHtml(file.type)}</span>
+    `;
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char]));
+  }
+
+  function cloneImageData(source) {
+    return new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+  }
+
+  function renderCurrent() {
+    if (state.current) photoCtx.putImageData(state.current, 0, 0);
+  }
+
+  function clearMask() {
+    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    state.previousPoint = null;
+  }
+
+  function selectAll() {
+    if (!state.current) return;
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = 'source-over';
+    maskCtx.fillStyle = 'rgba(200,255,114,.58)';
+    maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+    maskCtx.restore();
+    setStep(3);
+    setStatus('已選取整張照片。');
+  }
+
+  function canvasPoint(event) {
+    const rect = maskCanvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (maskCanvas.width / rect.width),
+      y: (event.clientY - rect.top) * (maskCanvas.height / rect.height),
+    };
+  }
+
+  function paintLine(from, to) {
+    const size = Number($('brushSize').value);
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = state.tool === 'eraser' ? 'destination-out' : 'source-over';
+    maskCtx.strokeStyle = 'rgba(200,255,114,.58)';
+    maskCtx.fillStyle = 'rgba(200,255,114,.58)';
+    maskCtx.lineWidth = size;
+    maskCtx.lineCap = 'round';
+    maskCtx.lineJoin = 'round';
+    maskCtx.beginPath();
+    maskCtx.moveTo(from.x, from.y);
+    maskCtx.lineTo(to.x, to.y);
+    maskCtx.stroke();
+    maskCtx.beginPath();
+    maskCtx.arc(to.x, to.y, size / 2, 0, Math.PI * 2);
+    maskCtx.fill();
+    maskCtx.restore();
+  }
+
+  function beginDraw(event) {
+    if (!state.current) return;
+    event.preventDefault();
+    state.drawing = true;
+    maskCanvas.setPointerCapture?.(event.pointerId);
+    const point = canvasPoint(event);
+    state.previousPoint = point;
+    paintLine(point, point);
+    setStep(3);
+  }
+
+  function moveDraw(event) {
+    if (!state.drawing || !state.current) return;
+    event.preventDefault();
+    const point = canvasPoint(event);
+    paintLine(state.previousPoint || point, point);
+    state.previousPoint = point;
+  }
+
+  function endDraw(event) {
+    if (!state.drawing) return;
+    state.drawing = false;
+    state.previousPoint = null;
+    try { maskCanvas.releasePointerCapture?.(event.pointerId); } catch (_) {}
+  }
+
+  function hasMask(maskData) {
+    for (let i = 3; i < maskData.length; i += 4) if (maskData[i] > 15) return true;
+    return false;
+  }
+
+  function maskCoverage(maskData) {
+    let selected = 0;
+    const pixels = maskData.length / 4;
+    for (let i = 3; i < maskData.length; i += 4) if (maskData[i] > 15) selected++;
+    return Math.round((selected / pixels) * 100);
+  }
+
+  function saveHistory() {
+    state.history.push(cloneImageData(state.current));
+    if (state.history.length > 12) state.history.shift();
+  }
+
+  function generate() {
+    if (!state.current) return;
+    const mask = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+    if (!hasMask(mask.data)) {
+      setStatus('請先用筆刷塗選，或按「全選」。', true);
+      return;
+    }
+
+    saveHistory();
+    const output = cloneImageData(state.current);
+    const operation = $('operation').value;
+    const color = hexToRgb($('fillColor').value);
+    const userStrength = Number($('strength').value) / 100;
+    const width = output.width;
+    const height = output.height;
+    const source = state.current.data;
+    const data = output.data;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        const alpha = mask.data[i + 3] / 255;
+        if (alpha <= 0.04) continue;
+        const strength = Math.min(.96, alpha * userStrength);
+        let target;
+
+        if (operation === 'remove') {
+          target = neighborhoodAverage(source, width, height, x, y, 22);
+        } else if (operation === 'color') {
+          const lum = (source[i] + source[i+1] + source[i+2]) / (255 * 3);
+          target = [color.r * (.50 + lum * .58), color.g * (.50 + lum * .58), color.b * (.50 + lum * .58)];
+        } else if (operation === 'wood') {
+          const grain = 21 * Math.sin(y * .18 + Math.sin(x * .03)) + 9 * Math.sin(y * .035);
+          target = [161 + grain, 116 + grain * .55, 73 + grain * .25];
+        } else if (operation === 'stone') {
+          const noise = ((x * 17 + y * 31) % 29) - 14;
+          const vein = Math.abs(Math.sin(x * .018 + y * .027)) > .965 ? -45 : 0;
+          target = [176 + noise + vein, 178 + noise + vein, 174 + noise + vein];
+        } else if (operation === 'fabric') {
+          const weave = ((x % 7 < 2) || (y % 7 < 2)) ? -26 : 8;
+          target = [154 + weave, 144 + weave, 132 + weave];
+        } else {
+          target = [Math.min(255, source[i] * 1.28 + 18), Math.min(255, source[i+1] * 1.25 + 18), Math.min(255, source[i+2] * 1.18 + 14)];
+        }
+
+        data[i] = mix(source[i], target[0], strength);
+        data[i+1] = mix(source[i+1], target[1], strength);
+        data[i+2] = mix(source[i+2], target[2], strength);
+      }
+    }
+
+    state.current = output;
     renderCurrent();
-    renderMeta(file, img, fitted);
-    $('emptyState').classList.add('hidden');
-    $('canvasWrap').classList.remove('hidden');
+    const coverage = maskCoverage(mask.data);
+    clearMask();
+    renderComparison();
+    setButtons(true);
+    setStep(4);
+    saveSettings();
+    const room = $('roomType').selectedOptions[0].textContent;
+    const prompt = $('prompt').value.trim();
+    setStatus(`已完成 ${room} 概念模擬；修改範圍約 ${coverage}%${prompt ? `。風格：${prompt}` : ''}`);
+    $('resultSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function neighborhoodAverage(data, width, height, x, y, radius) {
+    const samples = [[-radius,0],[radius,0],[0,-radius],[0,radius],[-radius,-radius],[radius,radius],[-radius,radius],[radius,-radius]];
+    let r = 0, g = 0, b = 0, count = 0;
+    for (const [dx,dy] of samples) {
+      const sx = Math.max(0, Math.min(width - 1, x + dx));
+      const sy = Math.max(0, Math.min(height - 1, y + dy));
+      const j = (sy * width + sx) * 4;
+      r += data[j]; g += data[j+1]; b += data[j+2]; count++;
+    }
+    return [r/count, g/count, b/count];
+  }
+
+  function mix(a, b, t) { return Math.round(a * (1 - t) + b * t); }
+  function hexToRgb(hex) {
+    const value = parseInt(hex.replace('#',''), 16);
+    return { r: (value >> 16) & 255, g: (value >> 8) & 255, b: value & 255 };
+  }
+
+  function renderComparison() {
+    beforeCtx.putImageData(state.original, 0, 0);
+    afterCtx.putImageData(state.current, 0, 0);
+    $('resultSection').classList.remove('hidden');
+    updateComparison($('compareRange').value);
+  }
+
+  function updateComparison(value) {
+    $('afterLayer').style.width = `${value}%`;
+    $('compareLine').style.left = `${value}%`;
+  }
+
+  function undo() {
+    if (!state.history.length) return;
+    state.current = state.history.pop();
+    renderCurrent();
+    renderComparison();
+    setButtons(true);
+    setStatus('已復原上一個修改。');
+  }
+
+  function reset() {
+    if (!state.original) return;
+    state.current = cloneImageData(state.original);
+    state.history = [];
+    renderCurrent();
+    clearMask();
     $('resultSection').classList.add('hidden');
     setButtons(true);
-    setStatus('照片已載入。請塗選需要修改的區域。');
-    URL.revokeObjectURL(url);
-  };
-  img.onerror = () => {
-    URL.revokeObjectURL(url);
-    setStatus('無法讀取這張圖片。', true);
-  };
-  img.src = url;
-}
-
-function renderMeta(file, img, fitted) {
-  const kb = Math.round(file.size / 1024).toLocaleString('zh-TW');
-  const modified = new Date(file.lastModified).toLocaleString('zh-TW');
-  $('fileMeta').innerHTML = `
-    <span>檔名：${escapeHtml(file.name)}</span>
-    <span>大小：${kb} KB</span>
-    <span>原始：${img.naturalWidth} × ${img.naturalHeight}</span>
-    <span>處理：${fitted.width} × ${fitted.height}</span>
-    <span>格式：${escapeHtml(file.type || '未知')}</span>
-    <span>修改：${escapeHtml(modified)}</span>
-  `;
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>'"]/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char]));
-}
-
-function renderCurrent() {
-  if (!state.current) return;
-  photoCtx.putImageData(state.current, 0, 0);
-}
-
-function clearMask() {
-  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-}
-
-function canvasPoint(event) {
-  const rect = maskCanvas.getBoundingClientRect();
-  const source = event.touches ? event.touches[0] : event;
-  return {
-    x: (source.clientX - rect.left) * (maskCanvas.width / rect.width),
-    y: (source.clientY - rect.top) * (maskCanvas.height / rect.height),
-  };
-}
-
-function drawMask(event) {
-  if (!state.drawing || !state.current) return;
-  event.preventDefault();
-  const { x, y } = canvasPoint(event);
-  const size = Number($('brushSize').value);
-  maskCtx.save();
-  maskCtx.globalCompositeOperation = state.tool === 'eraser' ? 'destination-out' : 'source-over';
-  maskCtx.fillStyle = 'rgba(200,255,114,.58)';
-  maskCtx.beginPath();
-  maskCtx.arc(x, y, size / 2, 0, Math.PI * 2);
-  maskCtx.fill();
-  maskCtx.restore();
-}
-
-function hasMask(maskData) {
-  for (let i = 3; i < maskData.length; i += 4) if (maskData[i] > 15) return true;
-  return false;
-}
-
-function saveHistory() {
-  state.history.push(new ImageData(new Uint8ClampedArray(state.current.data), state.current.width, state.current.height));
-  if (state.history.length > 12) state.history.shift();
-}
-
-function generate() {
-  if (!state.current) return;
-  const mask = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-  if (!hasMask(mask.data)) {
-    setStatus('請先用筆刷塗選要修改的區域。', true);
-    return;
+    setStep(2);
+    setStatus('已回到原始照片。');
   }
 
-  saveHistory();
-  const output = new ImageData(new Uint8ClampedArray(state.current.data), state.current.width, state.current.height);
-  const operation = $('operation').value;
-  const color = hexToRgb($('fillColor').value);
-  const width = output.width;
-  const height = output.height;
-  const source = state.current.data;
-  const data = output.data;
+  function resultCanvas() {
+    const canvas = document.createElement('canvas');
+    canvas.width = state.current.width;
+    canvas.height = state.current.height;
+    canvas.getContext('2d').putImageData(state.current, 0, 0);
+    return canvas;
+  }
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      const alpha = mask.data[i + 3] / 255;
-      if (alpha <= 0.04) continue;
-      const strength = Math.min(.92, alpha * .92);
-      let target;
+  function download() {
+    if (!state.current) return;
+    const link = document.createElement('a');
+    link.download = `ai-space-generator-${Date.now()}.png`;
+    link.href = resultCanvas().toDataURL('image/png');
+    link.click();
+  }
 
-      if (operation === 'remove') {
-        target = neighborhoodAverage(source, width, height, x, y, 20);
-      } else if (operation === 'color') {
-        const lum = (source[i] + source[i+1] + source[i+2]) / (255 * 3);
-        target = [color.r * (.55 + lum * .55), color.g * (.55 + lum * .55), color.b * (.55 + lum * .55)];
-      } else if (operation === 'wood') {
-        const grain = 22 * Math.sin(y * .18 + Math.sin(x * .03)) + 10 * Math.sin(y * .035);
-        target = [161 + grain, 116 + grain * .55, 73 + grain * .25];
-      } else if (operation === 'stone') {
-        const noise = ((x * 17 + y * 31) % 29) - 14;
-        const vein = Math.abs(Math.sin(x * .018 + y * .027)) > .965 ? -45 : 0;
-        target = [176 + noise + vein, 178 + noise + vein, 174 + noise + vein];
-      } else if (operation === 'fabric') {
-        const weave = ((x % 7 < 2) || (y % 7 < 2)) ? -26 : 8;
-        target = [154 + weave, 144 + weave, 132 + weave];
-      } else {
-        target = [Math.min(255, source[i] * 1.28 + 18), Math.min(255, source[i+1] * 1.25 + 18), Math.min(255, source[i+2] * 1.18 + 14)];
+  async function shareResult() {
+    if (!state.current) return;
+    const blob = await new Promise((resolve) => resultCanvas().toBlob(resolve, 'image/png'));
+    const file = new File([blob], 'ai-space-generator.png', { type: 'image/png' });
+    if (navigator.share && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ title: 'AI 空間生成器', text: $('prompt').value.trim(), files: [file] });
+        setStatus('已開啟分享選單。');
+      } catch (error) {
+        if (error.name !== 'AbortError') setStatus('分享失敗，已改用下載。', true);
       }
-
-      data[i] = mix(source[i], target[0], strength);
-      data[i+1] = mix(source[i+1], target[1], strength);
-      data[i+2] = mix(source[i+2], target[2], strength);
+    } else {
+      download();
+      setStatus('此瀏覽器不支援直接分享，已下載 PNG。');
     }
   }
 
-  state.current = output;
-  renderCurrent();
-  clearMask();
-  renderComparison();
-  setButtons(true);
-  const prompt = $('prompt').value.trim();
-  setStatus(prompt ? `已產生概念模擬：「${prompt}」` : '已產生概念模擬。');
-}
-
-function neighborhoodAverage(data, width, height, x, y, radius) {
-  const samples = [[-radius,0],[radius,0],[0,-radius],[0,radius],[-radius,-radius],[radius,radius]];
-  let r = 0, g = 0, b = 0, count = 0;
-  for (const [dx,dy] of samples) {
-    const sx = Math.max(0, Math.min(width - 1, x + dx));
-    const sy = Math.max(0, Math.min(height - 1, y + dy));
-    const j = (sy * width + sx) * 4;
-    r += data[j]; g += data[j+1]; b += data[j+2]; count++;
+  function applyPreset(name) {
+    const preset = presets[name];
+    if (!preset) return;
+    state.preset = name;
+    $('fillColor').value = preset.color;
+    $('prompt').value = preset.prompt;
+    document.querySelectorAll('.preset').forEach((button) => button.classList.toggle('active', button.dataset.preset === name));
+    saveSettings();
   }
-  return [r/count, g/count, b/count];
-}
 
-function mix(a, b, t) { return Math.round(a * (1 - t) + b * t); }
-function hexToRgb(hex) {
-  const value = parseInt(hex.replace('#',''), 16);
-  return { r: (value >> 16) & 255, g: (value >> 8) & 255, b: value & 255 };
-}
+  function saveSettings() {
+    try {
+      localStorage.setItem('ai-space-generator-settings', JSON.stringify({
+        roomType: $('roomType').value,
+        operation: $('operation').value,
+        color: $('fillColor').value,
+        strength: $('strength').value,
+        prompt: $('prompt').value,
+        preset: state.preset,
+      }));
+    } catch (_) {}
+  }
 
-function renderComparison() {
-  beforeCtx.putImageData(state.original, 0, 0);
-  afterCtx.putImageData(state.current, 0, 0);
-  $('resultSection').classList.remove('hidden');
-  updateComparison($('compareRange').value);
-}
+  function restoreSettings() {
+    try {
+      const settings = JSON.parse(localStorage.getItem('ai-space-generator-settings') || 'null');
+      if (!settings) return;
+      if (settings.roomType) $('roomType').value = settings.roomType;
+      if (settings.operation) $('operation').value = settings.operation;
+      if (settings.color) $('fillColor').value = settings.color;
+      if (settings.strength) $('strength').value = settings.strength;
+      if (settings.prompt) $('prompt').value = settings.prompt;
+      $('strengthValue').value = $('strength').value;
+      if (settings.preset) {
+        state.preset = settings.preset;
+        document.querySelectorAll('.preset').forEach((button) => button.classList.toggle('active', button.dataset.preset === settings.preset));
+      }
+    } catch (_) {}
+  }
 
-function updateComparison(value) {
-  $('afterLayer').style.width = `${value}%`;
-  $('compareLine').style.left = `${value}%`;
-}
+  async function readExif(file) {
+    if (file.type !== 'image/jpeg') return {};
+    const buffer = await file.arrayBuffer();
+    const view = new DataView(buffer);
+    if (view.getUint16(0, false) !== 0xFFD8) return {};
+    let offset = 2;
 
-function undo() {
-  if (!state.history.length) return;
-  state.current = state.history.pop();
-  renderCurrent();
-  renderComparison();
-  setButtons(true);
-  setStatus('已復原上一個修改。');
-}
+    while (offset + 4 < view.byteLength) {
+      const marker = view.getUint16(offset, false);
+      offset += 2;
+      if ((marker & 0xFF00) !== 0xFF00) break;
+      const length = view.getUint16(offset, false);
+      if (marker === 0xFFE1 && length >= 8 && ascii(view, offset + 2, 4) === 'Exif') {
+        return parseTiff(view, offset + 8);
+      }
+      offset += length;
+    }
+    return {};
+  }
 
-function reset() {
-  if (!state.original) return;
-  state.current = new ImageData(new Uint8ClampedArray(state.original.data), state.original.width, state.original.height);
-  state.history = [];
-  renderCurrent();
-  clearMask();
-  $('resultSection').classList.add('hidden');
-  setButtons(true);
-  setStatus('已回到原始照片。');
-}
+  function parseTiff(view, tiff) {
+    const endianMark = view.getUint16(tiff, false);
+    const little = endianMark === 0x4949;
+    if (!little && endianMark !== 0x4D4D) return {};
+    const u16 = (o) => view.getUint16(o, little);
+    const u32 = (o) => view.getUint32(o, little);
+    if (u16(tiff + 2) !== 42) return {};
+    const result = {};
+    const ifd0 = tiff + u32(tiff + 4);
+    const pointers = readIfd(view, tiff, ifd0, little, result, 'ifd0');
+    if (pointers.exif) readIfd(view, tiff, tiff + pointers.exif, little, result, 'exif');
+    if (pointers.gps) {
+      const gps = {};
+      readIfd(view, tiff, tiff + pointers.gps, little, gps, 'gps');
+      if (gps.latitude && gps.longitude) result.gps = gps;
+    }
+    return result;
+  }
 
-function download() {
-  if (!state.current) return;
-  const canvas = document.createElement('canvas');
-  canvas.width = state.current.width;
-  canvas.height = state.current.height;
-  canvas.getContext('2d').putImageData(state.current, 0, 0);
-  const link = document.createElement('a');
-  link.download = `ai-space-generator-${Date.now()}.png`;
-  link.href = canvas.toDataURL('image/png');
-  link.click();
-}
+  function readIfd(view, tiff, offset, little, target, mode) {
+    const u16 = (o) => view.getUint16(o, little);
+    const u32 = (o) => view.getUint32(o, little);
+    const count = u16(offset);
+    const pointers = {};
+    for (let n = 0; n < count; n++) {
+      const entry = offset + 2 + n * 12;
+      const tag = u16(entry);
+      const type = u16(entry + 2);
+      const valueCount = u32(entry + 4);
+      const valueOffset = valueCount * typeSize(type) <= 4 ? entry + 8 : tiff + u32(entry + 8);
 
-imageInput.addEventListener('change', (event) => loadFile(event.target.files?.[0]));
-$('brushSize').addEventListener('input', (event) => $('brushSizeValue').value = event.target.value);
-$('clearMaskBtn').addEventListener('click', () => { clearMask(); setStatus('選取區域已清除。'); });
-$('generateBtn').addEventListener('click', generate);
-$('undoBtn').addEventListener('click', undo);
-$('resetBtn').addEventListener('click', reset);
-$('downloadBtn').addEventListener('click', download);
-$('compareRange').addEventListener('input', (event) => updateComparison(event.target.value));
+      if (mode === 'ifd0') {
+        if (tag === 0x010F) target.make = readAscii(view, valueOffset, valueCount);
+        if (tag === 0x0110) target.model = readAscii(view, valueOffset, valueCount);
+        if (tag === 0x0132 && !target.date) target.date = readAscii(view, valueOffset, valueCount);
+        if (tag === 0x8769) pointers.exif = u32(entry + 8);
+        if (tag === 0x8825) pointers.gps = u32(entry + 8);
+      } else if (mode === 'exif') {
+        if (tag === 0x9003 || tag === 0x9004) target.date = readAscii(view, valueOffset, valueCount);
+      } else if (mode === 'gps') {
+        if (tag === 1) target.latRef = readAscii(view, valueOffset, valueCount);
+        if (tag === 2) target.latValues = readRationals(view, valueOffset, valueCount, little);
+        if (tag === 3) target.lonRef = readAscii(view, valueOffset, valueCount);
+        if (tag === 4) target.lonValues = readRationals(view, valueOffset, valueCount, little);
+      }
+    }
 
-document.querySelectorAll('[data-tool]').forEach((button) => {
-  button.addEventListener('click', () => {
-    state.tool = button.dataset.tool;
-    document.querySelectorAll('[data-tool]').forEach((item) => item.classList.toggle('active', item === button));
+    if (mode === 'gps' && target.latValues && target.lonValues) {
+      target.latitude = dms(target.latValues) * (target.latRef === 'S' ? -1 : 1);
+      target.longitude = dms(target.lonValues) * (target.lonRef === 'W' ? -1 : 1);
+      delete target.latValues; delete target.lonValues; delete target.latRef; delete target.lonRef;
+    }
+    return pointers;
+  }
+
+  function typeSize(type) {
+    return ({ 1:1, 2:1, 3:2, 4:4, 5:8, 7:1, 9:4, 10:8 })[type] || 1;
+  }
+  function readAscii(view, offset, count) {
+    let value = '';
+    for (let i = 0; i < count && offset + i < view.byteLength; i++) {
+      const code = view.getUint8(offset + i);
+      if (!code) break;
+      value += String.fromCharCode(code);
+    }
+    return value.trim();
+  }
+  function ascii(view, offset, count) { return readAscii(view, offset, count); }
+  function readRationals(view, offset, count, little) {
+    const values = [];
+    for (let i = 0; i < count; i++) {
+      const numerator = view.getUint32(offset + i * 8, little);
+      const denominator = view.getUint32(offset + i * 8 + 4, little);
+      values.push(denominator ? numerator / denominator : 0);
+    }
+    return values;
+  }
+  function dms(values) { return (values[0] || 0) + (values[1] || 0) / 60 + (values[2] || 0) / 3600; }
+
+  imageInput.addEventListener('change', (event) => loadFile(event.target.files?.[0]));
+  $('brushSize').addEventListener('input', (event) => $('brushSizeValue').value = event.target.value);
+  $('strength').addEventListener('input', (event) => { $('strengthValue').value = event.target.value; saveSettings(); });
+  $('clearMaskBtn').addEventListener('click', () => { clearMask(); setStatus('選取區域已清除。'); });
+  $('selectAllBtn').addEventListener('click', selectAll);
+  $('generateBtn').addEventListener('click', generate);
+  $('undoBtn').addEventListener('click', undo);
+  $('resetBtn').addEventListener('click', reset);
+  $('downloadBtn').addEventListener('click', download);
+  $('shareBtn').addEventListener('click', shareResult);
+  $('compareRange').addEventListener('input', (event) => updateComparison(event.target.value));
+
+  document.querySelectorAll('[data-tool]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.tool = button.dataset.tool;
+      document.querySelectorAll('[data-tool]').forEach((item) => item.classList.toggle('active', item === button));
+    });
   });
-});
 
-['pointerdown','touchstart'].forEach((name) => maskCanvas.addEventListener(name, (event) => { state.drawing = true; drawMask(event); }, { passive: false }));
-['pointermove','touchmove'].forEach((name) => maskCanvas.addEventListener(name, drawMask, { passive: false }));
-['pointerup','pointercancel','pointerleave','touchend','touchcancel'].forEach((name) => maskCanvas.addEventListener(name, () => { state.drawing = false; }));
+  document.querySelectorAll('.preset').forEach((button) => button.addEventListener('click', () => applyPreset(button.dataset.preset)));
+  ['roomType','operation','fillColor','prompt'].forEach((id) => $(id).addEventListener('change', saveSettings));
+  $('prompt').addEventListener('input', saveSettings);
 
+  maskCanvas.addEventListener('pointerdown', beginDraw, { passive: false });
+  maskCanvas.addEventListener('pointermove', moveDraw, { passive: false });
+  ['pointerup','pointercancel','pointerleave'].forEach((name) => maskCanvas.addEventListener(name, endDraw));
 
-// 單檔 GitHub Pages 版本：不註冊 Service Worker。
-
+  restoreSettings();
   </script>
 </body>
 </html>
