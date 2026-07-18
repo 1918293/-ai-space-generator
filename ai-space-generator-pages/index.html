@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#151719" />
+  <meta name="description" content="手機優先的 AI 空間生成器概念工具：拍照、選取區域、材質模擬、前後比較與下載。" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>AI 空間生成器</title>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">AI SPACE GENERATOR</p>
+      <h1>AI 空間生成器</h1>
+    </div>
+    <button id="installBtn" class="ghost hidden" type="button">安裝</button>
+  </header>
+
+  <main class="app-shell">
+    <section class="card intro">
+      <p>上傳或拍攝空間照片，在畫面上塗選需要修改的位置，再套用移除、顏色或材質模擬。</p>
+      <p class="notice">目前為手機端概念生成版本；不會上傳照片，也不是精確施工或結構判斷工具。</p>
+    </section>
+
+    <section class="card controls">
+      <label class="upload-button" for="imageInput">
+        <span>拍攝／選擇照片</span>
+        <input id="imageInput" type="file" accept="image/*" capture="environment" />
+      </label>
+
+      <div id="fileMeta" class="meta-grid" aria-live="polite">
+        <span>尚未載入照片</span>
+      </div>
+
+      <div class="toolbar" aria-label="編輯工具">
+        <button type="button" data-tool="brush" class="tool active">筆刷選取</button>
+        <button type="button" data-tool="eraser" class="tool">擦除選取</button>
+        <button id="clearMaskBtn" type="button" class="tool">清除選取</button>
+      </div>
+
+      <label class="range-row">
+        <span>筆刷大小</span>
+        <input id="brushSize" type="range" min="8" max="120" value="44" />
+        <output id="brushSizeValue">44</output>
+      </label>
+    </section>
+
+    <section class="card workspace-card">
+      <div id="emptyState" class="empty-state">
+        <strong>先加入一張空間照片</strong>
+        <span>照片只在你的裝置中處理。</span>
+      </div>
+
+      <div id="canvasWrap" class="canvas-wrap hidden">
+        <canvas id="photoCanvas"></canvas>
+        <canvas id="maskCanvas"></canvas>
+      </div>
+    </section>
+
+    <section class="card generation-panel">
+      <div class="field-grid">
+        <label>
+          <span>操作</span>
+          <select id="operation">
+            <option value="remove">移除／弱化物件</option>
+            <option value="color">更換顏色</option>
+            <option value="wood">木質材質</option>
+            <option value="stone">石材質感</option>
+            <option value="fabric">織物質感</option>
+            <option value="light">提亮空間</option>
+          </select>
+        </label>
+
+        <label id="colorField">
+          <span>顏色</span>
+          <input id="fillColor" type="color" value="#d6c4aa" />
+        </label>
+      </div>
+
+      <label>
+        <span>設計描述</span>
+        <textarea id="prompt" rows="3" placeholder="例如：溫暖木質、乾淨留白、自然採光、低飽和色系"></textarea>
+      </label>
+
+      <div class="action-grid">
+        <button id="generateBtn" type="button" class="primary" disabled>生成概念</button>
+        <button id="undoBtn" type="button" disabled>復原</button>
+        <button id="resetBtn" type="button" disabled>重設</button>
+      </div>
+      <p id="status" class="status" aria-live="polite"></p>
+    </section>
+
+    <section id="resultSection" class="card hidden">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">COMPARE</p>
+          <h2>修改前後比較</h2>
+        </div>
+        <button id="downloadBtn" type="button" class="ghost">下載 PNG</button>
+      </div>
+
+      <div id="compareBox" class="compare-box">
+        <canvas id="beforeCanvas"></canvas>
+        <div id="afterLayer" class="after-layer">
+          <canvas id="afterCanvas"></canvas>
+        </div>
+        <div id="compareLine" class="compare-line" aria-hidden="true"></div>
+        <input id="compareRange" class="compare-range" type="range" min="0" max="100" value="50" aria-label="前後比較位置" />
+      </div>
+    </section>
+
+    <section class="card roadmap">
+      <p class="eyebrow">NEXT</p>
+      <h2>後續可接入</h2>
+      <p>物件辨識、語意分割、真正的局部生成、2D 平面圖轉 3D、多視角一致性與 AR 預覽。</p>
+    </section>
+  </main>
+
+  <footer>AI Space Generator · Local-first prototype</footer>
+  <script src="app.js" defer></script>
+</body>
+</html>
