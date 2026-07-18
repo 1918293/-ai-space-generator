@@ -1,0 +1,5 @@
+gradio>=6.5,<7
+huggingface_hub>=0.34,<2
+numpy>=2.0,<3
+opencv-python-headless>=4.10,<5
+Pillow>=11,<13
