@@ -1,0 +1,1 @@
+This branch is prepared for Codex execution. Read `.codex/CODEX_TASK.md` and apply it exactly. Do not merge until implementation and validation are complete.
