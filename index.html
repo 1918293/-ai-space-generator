@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#151719" />
-  <meta name="description" content="手機優先的 AI 空間生成器概念工具：拍照、選取區域、材質模擬、前後比較與下載。" />
+  <meta name="description" content="本地端、原圖鎖定、雙遮罩與可驗證 QA 的 AI 空間生成器概念工具。" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
@@ -14,7 +14,7 @@
 <body>
   <header class="topbar">
     <div>
-      <p class="eyebrow">AI SPACE GENERATOR</p>
+      <p class="eyebrow">AI SPACE GENERATOR · v0.3</p>
       <h1>AI 空間生成器</h1>
     </div>
     <button id="installBtn" class="ghost hidden" type="button">安裝</button>
@@ -22,8 +22,8 @@
 
   <main class="app-shell">
     <section class="card intro">
-      <p>上傳或拍攝空間照片，在畫面上塗選需要修改的位置，再套用移除、顏色或材質模擬。</p>
-      <p class="notice">目前為手機端概念生成版本；不會上傳照片，也不是精確施工或結構判斷工具。</p>
+      <p>每一個候選版本都直接從最初原圖建立；每次執行會凍結遮罩快照，Edit Mask 以外與 Protected Mask 內的像素獨立驗證。</p>
+      <p class="notice">目前仍是本地端概念工具；每個新候選會自動重設 Visual QA，不能沿用上一輪 PASS，也不能用 Pixel QA 取代。</p>
     </section>
 
     <section class="card controls">
@@ -32,19 +32,24 @@
         <input id="imageInput" type="file" accept="image/*" capture="environment" />
       </label>
 
-      <div id="fileMeta" class="meta-grid" aria-live="polite">
-        <span>尚未載入照片</span>
+      <div id="fileMeta" class="meta-grid" aria-live="polite"><span>尚未載入照片</span></div>
+
+      <div class="toolbar" aria-label="遮罩工具">
+        <button type="button" data-tool="edit-brush" class="tool active">Edit 畫筆</button>
+        <button type="button" data-tool="edit-erase" class="tool">Edit 擦除</button>
+        <button type="button" data-tool="protect-brush" class="tool protect">Protected 畫筆</button>
+        <button type="button" data-tool="protect-erase" class="tool protect">Protected 擦除</button>
       </div>
 
-      <div class="toolbar" aria-label="編輯工具">
-        <button type="button" data-tool="brush" class="tool active">筆刷選取</button>
-        <button type="button" data-tool="eraser" class="tool">擦除選取</button>
-        <button id="clearMaskBtn" type="button" class="tool">清除選取</button>
+      <div class="mask-actions">
+        <button id="clearEditMaskBtn" type="button">清除 Edit</button>
+        <button id="clearProtectedMaskBtn" type="button">清除 Protected</button>
+        <button id="clearMaskBtn" type="button">清除全部</button>
       </div>
 
       <label class="range-row">
         <span>筆刷大小</span>
-        <input id="brushSize" type="range" min="8" max="120" value="44" />
+        <input id="brushSize" type="range" min="8" max="160" value="44" />
         <output id="brushSizeValue">44</output>
       </label>
     </section>
@@ -52,12 +57,12 @@
     <section class="card workspace-card">
       <div id="emptyState" class="empty-state">
         <strong>先加入一張空間照片</strong>
-        <span>照片只在你的裝置中處理。</span>
+        <span>照片只在你的裝置中處理；Canvas backing store 保留原始像素尺寸。</span>
       </div>
-
       <div id="canvasWrap" class="canvas-wrap hidden">
         <canvas id="photoCanvas"></canvas>
-        <canvas id="maskCanvas"></canvas>
+        <canvas id="protectedCanvas" aria-label="Protected Mask"></canvas>
+        <canvas id="maskCanvas" aria-label="Edit Mask"></canvas>
       </div>
     </section>
 
@@ -74,49 +79,52 @@
             <option value="light">提亮空間</option>
           </select>
         </label>
-
-        <label id="colorField">
-          <span>顏色</span>
-          <input id="fillColor" type="color" value="#d6c4aa" />
-        </label>
+        <label id="colorField" class="hidden"><span>顏色</span><input id="fillColor" type="color" value="#d6c4aa" /></label>
       </div>
 
-      <label>
-        <span>設計描述</span>
-        <textarea id="prompt" rows="3" placeholder="例如：溫暖木質、乾淨留白、自然採光、低飽和色系"></textarea>
-      </label>
-
+      <label><span>設計描述</span><textarea id="prompt" rows="3" placeholder="例如：溫暖木質、乾淨留白、自然採光、低飽和色系"></textarea></label>
       <div class="action-grid">
-        <button id="generateBtn" type="button" class="primary" disabled>生成概念</button>
-        <button id="undoBtn" type="button" disabled>復原</button>
+        <button id="generateBtn" type="button" class="primary" disabled>建立候選</button>
+        <button id="undoBtn" type="button" disabled>復原候選</button>
         <button id="resetBtn" type="button" disabled>重設</button>
       </div>
       <p id="status" class="status" aria-live="polite"></p>
     </section>
 
+    <section class="card qa-panel">
+      <div class="section-heading">
+        <div><p class="eyebrow">QA GATE</p><h2>候選驗證</h2></div>
+        <label class="visual-qa-field">
+          <span>Visual QA</span>
+          <select id="visualQa" disabled><option value="PENDING">PENDING</option><option value="PASS">PASS</option><option value="FAIL">FAIL</option></select>
+        </label>
+      </div>
+      <div id="qaResults" class="qa-grid"></div>
+      <p class="qa-note">遮罩在候選建立後仍可繼續修改；現有候選與 QA 永遠使用建立當下的凍結遮罩快照。</p>
+      <div class="download-grid">
+        <button id="downloadManifestBtn" type="button" disabled>下載 Manifest JSON</button>
+        <button id="downloadEditMaskBtn" type="button" disabled>下載 Run Edit Mask</button>
+        <button id="downloadProtectedMaskBtn" type="button" disabled>下載 Run Protected Mask</button>
+      </div>
+    </section>
+
     <section id="resultSection" class="card hidden">
       <div class="section-heading">
-        <div>
-          <p class="eyebrow">COMPARE</p>
-          <h2>修改前後比較</h2>
-        </div>
-        <button id="downloadBtn" type="button" class="ghost">下載 PNG</button>
+        <div><p class="eyebrow">COMPARE</p><h2>原圖／候選比較</h2></div>
+        <button id="downloadBtn" type="button" class="ghost" disabled>下載 PNG</button>
       </div>
-
       <div id="compareBox" class="compare-box">
         <canvas id="beforeCanvas"></canvas>
-        <div id="afterLayer" class="after-layer">
-          <canvas id="afterCanvas"></canvas>
-        </div>
+        <div id="afterLayer" class="after-layer"><canvas id="afterCanvas"></canvas></div>
         <div id="compareLine" class="compare-line" aria-hidden="true"></div>
         <input id="compareRange" class="compare-range" type="range" min="0" max="100" value="50" aria-label="前後比較位置" />
       </div>
     </section>
 
     <section class="card roadmap">
-      <p class="eyebrow">NEXT</p>
-      <h2>後續可接入</h2>
-      <p>物件辨識、語意分割、真正的局部生成、2D 平面圖轉 3D、多視角一致性與 AR 預覽。</p>
+      <p class="eyebrow">BOUNDARY</p>
+      <h2>目前定位</h2>
+      <p>此版本完成 Source Lock、雙遮罩、原圖重跑、凍結 Run Snapshot、Pixel QA 與 Run Manifest。高品質生成式局部修補仍應由可驗證的外部編修能力處理，並回到同一套 QA Gate 驗證。</p>
     </section>
   </main>
 
