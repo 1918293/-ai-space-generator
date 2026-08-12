@@ -5,6 +5,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+VALID_OBJECT_ROLES = {"REMOVE", "PRESERVE_OCCLUDER", "FIXED_STRUCTURE"}
+
 
 def _binary_mask(mask: Image.Image | np.ndarray) -> np.ndarray:
     """Return a boolean mask without changing the caller's image."""
@@ -17,46 +19,76 @@ def _binary_mask(mask: Image.Image | np.ndarray) -> np.ndarray:
     return array > 8
 
 
-def validate_remove_target_contract(
+def validate_object_role_contract(
     edit_mask: Image.Image | np.ndarray,
     protected_mask: Image.Image | np.ndarray,
-    remove_target_mask: Image.Image | np.ndarray,
+    object_mask: Image.Image | np.ndarray,
+    object_role: str,
 ) -> dict[str, Any]:
-    """Validate that a requested removal target is editable, never protected.
+    """Validate mask placement against the object's task-specific semantic role."""
+    role = str(object_role).upper()
+    if role not in VALID_OBJECT_ROLES:
+        raise ValueError(f"Unsupported object_role: {object_role}")
 
-    This is a preflight gate. It prevents a false PASS where an object that must be
-    removed is accidentally placed inside Protected Mask and then rewarded for being
-    pixel-identical to the source.
-    """
     edit = _binary_mask(edit_mask)
     protected = _binary_mask(protected_mask)
-    target = _binary_mask(remove_target_mask)
+    target = _binary_mask(object_mask)
 
     if edit.shape != protected.shape or edit.shape != target.shape:
-        raise ValueError("Edit, Protected, and remove-target masks must have identical dimensions.")
+        raise ValueError("Edit, Protected, and object masks must have identical dimensions.")
 
     target_pixels = int(np.count_nonzero(target))
     overlap_pixels = int(np.count_nonzero(edit & protected))
     target_editable_pixels = int(np.count_nonzero(target & edit))
     target_protected_pixels = int(np.count_nonzero(target & protected))
-    target_edit_coverage_ratio = (
-        float(target_editable_pixels) / float(target_pixels) if target_pixels else 0.0
-    )
 
+    if role == "REMOVE":
+        expected_pixels = target_editable_pixels
+        conflicting_pixels = target_protected_pixels
+    else:
+        expected_pixels = target_protected_pixels
+        conflicting_pixels = target_editable_pixels
+
+    expected_coverage_ratio = (
+        float(expected_pixels) / float(target_pixels) if target_pixels else 0.0
+    )
     hard_gate_pass = bool(
         target_pixels > 0
         and overlap_pixels == 0
-        and target_protected_pixels == 0
-        and target_editable_pixels == target_pixels
+        and conflicting_pixels == 0
+        and expected_pixels == target_pixels
     )
 
     return {
-        "remove_target_pixels": target_pixels,
+        "object_role": role,
+        "object_pixels": target_pixels,
         "edit_protected_overlap_pixels": overlap_pixels,
-        "remove_target_in_edit_pixels": target_editable_pixels,
-        "remove_target_in_protected_pixels": target_protected_pixels,
-        "remove_target_edit_coverage_ratio": target_edit_coverage_ratio,
+        "object_in_edit_pixels": target_editable_pixels,
+        "object_in_protected_pixels": target_protected_pixels,
+        "expected_mask_coverage_ratio": expected_coverage_ratio,
         "hard_gate_pass": hard_gate_pass,
+    }
+
+
+def validate_remove_target_contract(
+    edit_mask: Image.Image | np.ndarray,
+    protected_mask: Image.Image | np.ndarray,
+    remove_target_mask: Image.Image | np.ndarray,
+) -> dict[str, Any]:
+    """Validate that a requested removal target is editable, never protected."""
+    qa = validate_object_role_contract(
+        edit_mask,
+        protected_mask,
+        remove_target_mask,
+        object_role="REMOVE",
+    )
+    return {
+        "remove_target_pixels": qa["object_pixels"],
+        "edit_protected_overlap_pixels": qa["edit_protected_overlap_pixels"],
+        "remove_target_in_edit_pixels": qa["object_in_edit_pixels"],
+        "remove_target_in_protected_pixels": qa["object_in_protected_pixels"],
+        "remove_target_edit_coverage_ratio": qa["expected_mask_coverage_ratio"],
+        "hard_gate_pass": qa["hard_gate_pass"],
     }
 
 
