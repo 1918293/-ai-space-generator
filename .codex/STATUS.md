@@ -1,0 +1,1 @@
+Status: awaiting Codex implementation on `auto/chenghe428-v0.3`. The branch currently contains only task handoff metadata and must not be merged until the requested app changes and validations are complete.
