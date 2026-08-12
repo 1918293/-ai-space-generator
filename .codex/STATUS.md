@@ -1,1 +1,1 @@
-Status: awaiting Codex implementation on `auto/chenghe428-v0.3`. The branch currently contains only task handoff metadata and must not be merged until the requested app changes and validations are complete.
+Status: RECOVERY_TASK_READY on `auto/chenghe428-v0.3`. The historical v0.2 patch must not be force-applied to current main. `.codex/CODEX_TASK.md` now defines the current-main-compatible v0.3 recovery implementation. Keep DO_NOT_MERGE until application validation is complete and the original runtime self-test boundary is resolved.

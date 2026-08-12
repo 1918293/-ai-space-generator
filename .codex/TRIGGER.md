@@ -1,1 +1,1 @@
-This branch is prepared for Codex execution. Read `.codex/CODEX_TASK.md` and apply it exactly. Do not merge until implementation and validation are complete.
+Codex: execute the revised `.codex/CODEX_TASK.md` on `auto/chenghe428-v0.3`. It is now rebased to the actual current `main`; do not force-apply the historical v0.2 patch. Keep the do-not-merge guard and report `ORIGINAL_SELFTEST_MISSING` if the original runtime self-test is unavailable.
