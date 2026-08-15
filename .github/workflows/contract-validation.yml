@@ -4,13 +4,17 @@ on:
   push:
     branches:
       - fam/contracts-v0.1
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  contracts:
+  promotion-gate:
+    name: promotion-gate
     runs-on: ubuntu-latest
     defaults:
       run:
