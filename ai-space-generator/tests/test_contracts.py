@@ -53,8 +53,3 @@ def test_relation_integrity_fails_when_subject_does_not_exist():
     assert result["invalid_subject_rows"] == [
         {"row": 0, "subject_id": "INTAKE-MISSING"}
     ]
-
-
-def test_fam_negative_gate_probe():
-    """Intentional FAM-only failure to verify that the PR gate turns red."""
-    assert False, "intentional FAM promotion-gate failure probe"
