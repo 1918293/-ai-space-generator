@@ -34,6 +34,11 @@ def main():
     ap.add_argument("--output", required=True)
     ap.add_argument("--short-edge-target", type=int, default=1600)
     ap.add_argument("--bokeh-review-ratio", type=float, default=0.35)
+    ap.add_argument(
+        "--object-removal-requested",
+        action="store_true",
+        help="Declare that object removal is an actual job intent. Routing alone never infers this intent.",
+    )
     args = ap.parse_args()
 
     src_path = Path(args.source)
@@ -66,11 +71,11 @@ def main():
 
     needs_sr = short_edge < args.short_edge_target
     tone_review = highlight_clip > 0.010 or black_clip > 0.005
+    object_removal = "MANUAL_DEFECT_MASK_REQUIRED" if args.object_removal_requested else "NOT_REQUESTED"
 
     route = []
     route.append("SR" if needs_sr else "SKIP_SR")
-    # Object removal is intentionally never inferred from generic pixel statistics.
-    route.append("DEFECT_MASK_REVIEW")
+    route.append("DEFECT_MASK_REVIEW" if args.object_removal_requested else "SKIP_OBJECT_REMOVAL")
     route.append("BOKEH_REVIEW" if bokeh_review == "REVIEW" else "SKIP_BOKEH" if bokeh_review == "SKIP" else "BOKEH_UNKNOWN")
     route.append("TONE_REVIEW" if tone_review else "SKIP_TONE_CORRECTION")
     route.append("HAIR_QA")
@@ -87,9 +92,12 @@ def main():
             "highlight_clip_fraction": highlight_clip,
             "black_clip_fraction": black_clip,
         },
+        "intent": {
+            "object_removal_requested": bool(args.object_removal_requested),
+        },
         "decisions": {
             "sr": "RUN" if needs_sr else "SKIP",
-            "object_removal": "MANUAL_DEFECT_MASK_REQUIRED",
+            "object_removal": object_removal,
             "bokeh": bokeh_review,
             "tone": "REVIEW" if tone_review else "SKIP",
         },
@@ -102,6 +110,7 @@ def main():
         },
         "route": route,
         "policy": {
+            "object_removal_intent_is_never_inferred": True,
             "no_automatic_inpainting_without_explicit_defect_mask": True,
             "skip_unneeded_expensive_stages": True,
             "preflight_is_a_router_not_a_visual_acceptance_gate": True,
@@ -118,6 +127,7 @@ def main():
     if gh_out:
         with open(gh_out, "a", encoding="utf-8") as f:
             f.write(f"needs_sr={'true' if needs_sr else 'false'}\n")
+            f.write(f"object_removal_requested={'true' if args.object_removal_requested else 'false'}\n")
             f.write(f"bokeh_review={bokeh_review}\n")
             f.write(f"tone_review={'true' if tone_review else 'false'}\n")
             f.write("route=" + "->".join(route) + "\n")
