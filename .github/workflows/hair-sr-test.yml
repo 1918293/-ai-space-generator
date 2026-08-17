@@ -1,0 +1,85 @@
+name: Hao Hair SR Fidelity Test
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-sr-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  realesrgan-x2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
+
+      - name: Fetch original source image
+        run: |
+          mkdir -p hair_sr/input hair_sr/output
+          curl -L --fail --retry 3 -o hair_sr/input/source.jpg 'https://at.adobe.com/Rk6GAssWozJREKvk'
+          file hair_sr/input/source.jpg
+          python - <<'PY'
+          from PIL import Image
+          im=Image.open('hair_sr/input/source.jpg')
+          print('SOURCE_SIZE', im.size)
+          assert im.size == (1180, 2096), im.size
+          PY
+
+      - name: Install Real-ESRGAN
+        run: |
+          git clone --depth 1 https://github.com/xinntao/Real-ESRGAN.git /tmp/Real-ESRGAN
+          python -m pip install --upgrade pip
+          cd /tmp/Real-ESRGAN
+          pip install basicsr facexlib gfpgan -r requirements.txt
+          python setup.py develop
+
+      - name: Run fidelity-first 2x restoration
+        run: |
+          cd /tmp/Real-ESRGAN
+          python inference_realesrgan.py \
+            -n RealESRGAN_x2plus \
+            -i "$GITHUB_WORKSPACE/hair_sr/input/source.jpg" \
+            -o "$GITHUB_WORKSPACE/hair_sr/output" \
+            -s 2 \
+            --tile 128 \
+            --tile_pad 16 \
+            --fp32 \
+            --suffix RealESRGAN_x2_fidelity \
+            --ext png
+
+      - name: Verify output geometry
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          files=list(Path('hair_sr/output').glob('*.png'))
+          assert files, 'No PNG output found'
+          for p in files:
+              im=Image.open(p)
+              print('OUTPUT', p, im.size)
+              assert im.size == (2360, 4192), im.size
+          PY
+
+      - name: Upload SR result
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-realesrgan-x2
+          path: hair_sr/output/*.png
+          if-no-files-found: error
+          retention-days: 7
