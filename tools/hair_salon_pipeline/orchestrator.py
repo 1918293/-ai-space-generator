@@ -31,10 +31,12 @@ def main():
         plan.append(stage('SR',sr,'REVIEW','Unknown SR route.'))
 
     obj=d.get('object_removal','UNKNOWN')
-    if args.defect_mask:
+    if obj=='NOT_REQUESTED' and not args.defect_mask:
+        plan.append(stage('OBJECT_REMOVAL',obj,'SKIP','Object removal is not part of the declared job intent.'))
+    elif args.defect_mask:
         plan.append(stage('OBJECT_REMOVAL',obj,'CONTROLLED_REVIEW_WITH_MASK','Explicit defect-mask authority exists, but inpainting/background reconstruction remains visual-review only.'))
     else:
-        plan.append(stage('OBJECT_REMOVAL',obj,'BLOCK_NO_EXPLICIT_DEFECT_MASK','Never infer object-removal masks from generic pixel statistics.'))
+        plan.append(stage('OBJECT_REMOVAL',obj,'BLOCK_NO_EXPLICIT_DEFECT_MASK','Object removal was requested, but no explicit defect-mask authority exists. Never infer the mask from generic pixel statistics.'))
 
     b=d.get('bokeh','UNKNOWN')
     if b=='SKIP':
@@ -59,14 +61,16 @@ def main():
     report={
       'status':'ORCHESTRATION_PLAN_READY',
       'source_preflight_status':p.get('status'),
+      'declared_intent':p.get('intent',{}),
       'plan':plan,
       'auto_execute_eligible_stages':auto,
       'review_stages':reviews,
       'blocked_stages':blocked,
       'policy':{
         'router_never_equals_permission':True,
+        'undeclared_object_removal_is_skipped_not_blocked':True,
         'only_non_destructive_sr_and_deterministic_qa_can_be_auto_eligible':True,
-        'object_removal_requires_explicit_mask_and_visual_review':True,
+        'requested_object_removal_requires_explicit_mask_and_visual_review':True,
         'bokeh_and_tone_remain_visual_review':True,
         'never_overwrite_source':True,
         'candidate_promotion_requires_fidelity_qa_and_visual_acceptance':True
