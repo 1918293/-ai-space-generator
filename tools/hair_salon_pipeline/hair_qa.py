@@ -12,10 +12,10 @@ def rgb(path: Path) -> np.ndarray:
     return np.asarray(Image.open(path).convert("RGB"))
 
 
-def matte_u01(path: Path, size) -> np.ndarray:
+def mask_u01(path: Path, size) -> np.ndarray:
     im = Image.open(path).convert("L")
     if im.size != size:
-        raise ValueError(f"matte size {im.size} != image size {size}")
+        raise ValueError(f"mask size {im.size} != image size {size}")
     return np.asarray(im).astype(np.float32) / 255.0
 
 
@@ -36,7 +36,8 @@ def main():
     ap = argparse.ArgumentParser(description="Hair-focused fidelity QA for salon portrait candidates")
     ap.add_argument("--authority", required=True, help="Source/authority image used as fidelity reference")
     ap.add_argument("--candidate", required=True)
-    ap.add_argument("--matte", required=True)
+    ap.add_argument("--matte", required=True, help="Verified subject matte")
+    ap.add_argument("--hair-mask", help="Optional dedicated source-derived hair mask. If absent, use conservative proxy fallback.")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
@@ -47,7 +48,7 @@ def main():
     if a.shape != c.shape:
         raise ValueError(f"authority shape {a.shape} != candidate shape {c.shape}")
     h, w = a.shape[:2]
-    m = matte_u01(Path(args.matte), (w, h))
+    m = mask_u01(Path(args.matte), (w, h))
 
     core = m >= 0.65
     if not np.any(core):
@@ -56,23 +57,42 @@ def main():
     x0, x1 = int(xs.min()), int(xs.max()) + 1
     y0, y1 = int(ys.min()), int(ys.max()) + 1
 
-    # Without a dedicated hair segmentation mask, use the upper 50% of the
-    # high-confidence subject as a conservative hair/face proxy and label it as such.
-    # This intentionally avoids letting hands/lower-shirt highlights dominate hair QA.
-    hair_y1 = y0 + max(1, int((y1 - y0) * 0.50))
-    yy = np.arange(h)[:, None]
-    hair_proxy = core & (yy >= y0) & (yy < hair_y1)
-    if np.count_nonzero(hair_proxy) < 1000:
-        hair_proxy = core
+    if args.hair_mask:
+        hm = mask_u01(Path(args.hair_mask), (w, h))
+        hair_region = (hm >= 0.50) & (m >= 0.05)
+        if np.count_nonzero(hair_region) < 1000:
+            raise ValueError("dedicated hair mask is empty or invalid")
+        mask_authority = {
+            "type": "dedicated source-derived hair segmentation",
+            "dedicated_hair_mask": True,
+            "hair_mask": str(Path(args.hair_mask)),
+            "hair_pixels": int(np.count_nonzero(hair_region)),
+            "subject_bbox_xyxy": [x0, y0, x1, y1],
+        }
+    else:
+        # Backward-compatible fallback when a dedicated hair mask is not available.
+        hair_y1 = y0 + max(1, int((y1 - y0) * 0.50))
+        yy = np.arange(h)[:, None]
+        hair_region = core & (yy >= y0) & (yy < hair_y1)
+        if np.count_nonzero(hair_region) < 1000:
+            hair_region = core
+        mask_authority = {
+            "type": "MODNet upper-subject proxy fallback",
+            "dedicated_hair_mask": False,
+            "note": "Fallback only; provide --hair-mask for true hair-specific QA.",
+            "subject_bbox_xyxy": [x0, y0, x1, y1],
+            "hair_proxy_y_range": [y0, hair_y1],
+            "hair_pixels": int(np.count_nonzero(hair_region)),
+        }
 
     ga = grad(a)
     gc = grad(c)
-    g_corr = corr(ga[hair_proxy], gc[hair_proxy])
-    edge_ratio = float(np.mean(gc[hair_proxy]) / max(float(np.mean(ga[hair_proxy])), 1e-6))
+    g_corr = corr(ga[hair_region], gc[hair_region])
+    edge_ratio = float(np.mean(gc[hair_region]) / max(float(np.mean(ga[hair_region])), 1e-6))
 
     ha = cv2.cvtColor(a, cv2.COLOR_RGB2HSV).astype(np.float32)
     hc = cv2.cvtColor(c, cv2.COLOR_RGB2HSV).astype(np.float32)
-    chroma = hair_proxy & (ha[:, :, 1] >= 35) & (ha[:, :, 2] >= 25)
+    chroma = hair_region & (ha[:, :, 1] >= 35) & (ha[:, :, 2] >= 25)
     if np.any(chroma):
         hd = np.abs(hc[:, :, 0] - ha[:, :, 0])
         hd = np.minimum(hd, 180 - hd) * 2.0
@@ -85,22 +105,21 @@ def main():
 
     auth_clip_core = float(np.mean(np.any(a >= 255, axis=2)[core]))
     cand_clip_core = float(np.mean(np.any(c >= 255, axis=2)[core]))
-    auth_clip_hair = float(np.mean(np.any(a >= 255, axis=2)[hair_proxy]))
-    cand_clip_hair = float(np.mean(np.any(c >= 255, axis=2)[hair_proxy]))
+    auth_clip_hair = float(np.mean(np.any(a >= 255, axis=2)[hair_region]))
+    cand_clip_hair = float(np.mean(np.any(c >= 255, axis=2)[hair_region]))
 
-    # Transition-band diagnostics are informative only; intentional bokeh can change them.
     transition = (m >= 0.20) & (m < 0.65)
     diff = np.mean(np.abs(c.astype(np.int16) - a.astype(np.int16)), axis=2)
     transition_mae = float(np.mean(diff[transition])) if np.any(transition) else 0.0
     transition_p95 = float(np.percentile(diff[transition], 95)) if np.any(transition) else 0.0
 
     gates = {
-        "hair_proxy_structure": g_corr >= 0.995,
-        "hair_proxy_edge_integrity": 0.90 <= edge_ratio <= 1.15,
+        "hair_structure": g_corr >= 0.995,
+        "hair_edge_integrity": 0.90 <= edge_ratio <= 1.15,
         "hair_color_median_hue": hue_med <= 2.0,
         "hair_color_p95_hue": hue_p95 <= 6.0,
         "hair_color_saturation": sat_med <= 4.0,
-        "hair_proxy_highlight_clip_within_limit": cand_clip_hair <= 0.015,
+        "hair_highlight_clip_within_limit": cand_clip_hair <= 0.015,
     }
     hard_pass = all(gates.values())
 
@@ -108,25 +127,18 @@ def main():
         "status": "PASS_HAIR_FIDELITY" if hard_pass else "REVIEW_HAIR_FIDELITY",
         "authority": str(authority_p),
         "candidate": str(candidate_p),
-        "mask_authority": {
-            "type": "MODNet upper-subject proxy",
-            "dedicated_hair_mask": False,
-            "note": "Hair-specific metrics are conservative proxies until a dedicated hair segmentation mask is supplied.",
-            "subject_bbox_xyxy": [x0, y0, x1, y1],
-            "hair_proxy_y_range": [y0, hair_y1],
-            "hair_proxy_pixels": int(np.count_nonzero(hair_proxy)),
-        },
+        "mask_authority": mask_authority,
         "gates": gates,
         "metrics": {
-            "hair_proxy_gradient_correlation": g_corr,
-            "hair_proxy_edge_energy_ratio_candidate_over_authority": edge_ratio,
+            "hair_gradient_correlation": g_corr,
+            "hair_edge_energy_ratio_candidate_over_authority": edge_ratio,
             "median_hue_shift_degrees": hue_med,
             "p95_hue_shift_degrees": hue_p95,
             "median_saturation_shift_8bit": sat_med,
             "authority_subject_core_highlight_clip_fraction": auth_clip_core,
             "candidate_subject_core_highlight_clip_fraction": cand_clip_core,
-            "authority_hair_proxy_highlight_clip_fraction": auth_clip_hair,
-            "candidate_hair_proxy_highlight_clip_fraction": cand_clip_hair,
+            "authority_hair_highlight_clip_fraction": auth_clip_hair,
+            "candidate_hair_highlight_clip_fraction": cand_clip_hair,
             "transition_band_mean_abs_error": transition_mae,
             "transition_band_p95_abs_error": transition_p95,
         },
@@ -137,11 +149,12 @@ def main():
             "median_hue_shift_degrees_max": 2.0,
             "p95_hue_shift_degrees_max": 6.0,
             "median_saturation_shift_8bit_max": 4.0,
-            "hair_proxy_highlight_clip_fraction_max": 0.015,
+            "hair_highlight_clip_fraction_max": 0.015,
         },
         "policy": {
+            "dedicated_hair_mask_preferred": True,
+            "proxy_fallback_allowed_when_hair_mask_absent": True,
             "transition_band_is_diagnostic_not_hard_gate": True,
-            "subject_core_highlight_is_diagnostic_not_hair_gate": True,
             "candidate_cannot_be_promoted_by_metrics_alone": True,
             "visual_hair_edge_review_required_for_final_acceptance": True,
         },
