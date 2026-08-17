@@ -1,0 +1,86 @@
+name: Hao Hair SR Fast Fidelity Backup
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-sr-fast-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  realesr-general-x2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install CPU stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
+          python -m pip install --upgrade pip
+          pip install numpy==1.26.4 pillow
+          pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install basicsr==1.4.2 --no-deps
+          pip install opencv-python==4.10.0.84 tqdm pyyaml scipy==1.11.4 scikit-image==0.22.0 lmdb requests==2.31.0 tb-nightly yapf future addict
+          pip install numpy==1.26.4 --force-reinstall
+          git clone --depth 1 https://github.com/xinntao/Real-ESRGAN.git /tmp/Real-ESRGAN
+          cd /tmp/Real-ESRGAN
+          pip install -e . --no-deps
+
+      - name: Fetch and validate source
+        run: |
+          mkdir -p hair_sr_fast/input hair_sr_fast/output
+          curl -L --fail --retry 3 -o hair_sr_fast/input/source.jpg 'https://at.adobe.com/Rk6GAssWozJREKvk'
+          python - <<'PY'
+          from PIL import Image
+          im=Image.open('hair_sr_fast/input/source.jpg')
+          print('SOURCE_SIZE', im.size)
+          assert im.size == (1180, 2096), im.size
+          PY
+
+      - name: Run conservative small-model 2x restoration
+        run: |
+          cd /tmp/Real-ESRGAN
+          python inference_realesrgan.py \
+            -n realesr-general-x4v3 \
+            -dn 0.20 \
+            -i "$GITHUB_WORKSPACE/hair_sr_fast/input/source.jpg" \
+            -o "$GITHUB_WORKSPACE/hair_sr_fast/output" \
+            -s 2 \
+            --tile 128 \
+            --tile_pad 16 \
+            --fp32 \
+            --suffix realesr_general_x2_dn020 \
+            --ext png
+
+      - name: Verify output geometry
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          files=list(Path('hair_sr_fast/output').glob('*.png'))
+          assert files, 'No PNG output found'
+          for p in files:
+              im=Image.open(p)
+              print('OUTPUT', p, im.size)
+              assert im.size == (2360, 4192), im.size
+          PY
+
+      - name: Upload SR result
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: hair_sr_fast/output/*.png
+          if-no-files-found: error
+          retention-days: 7
