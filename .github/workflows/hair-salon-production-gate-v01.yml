@@ -1,4 +1,4 @@
-name: Hao Hair Salon Production Gate v01
+name: Hao Hair Salon Production Gate v02
 
 on:
   workflow_dispatch:
@@ -20,11 +20,11 @@ on:
         required: false
         default: 'hao-hair-commercial-final-v11'
       matte_run_id:
-        description: GitHub Actions run containing the MODNet matte
+        description: GitHub Actions run containing the matte authority
         required: false
         default: '32009172839'
       matte_artifact:
-        description: MODNet artifact name
+        description: Matte artifact name
         required: false
         default: 'hao-hair-commercial-modnet-hairsafe-bokeh-v02'
   push:
@@ -44,11 +44,9 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Download source authority
         uses: actions/download-artifact@v4
         with:
@@ -56,7 +54,6 @@ jobs:
           path: work/source
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.inputs.source_run_id || '32003834720' }}
-
       - name: Download candidate
         uses: actions/download-artifact@v4
         with:
@@ -64,7 +61,6 @@ jobs:
           path: work/candidate
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.inputs.candidate_run_id || '32038938614' }}
-
       - name: Download matte authority
         uses: actions/download-artifact@v4
         with:
@@ -72,121 +68,54 @@ jobs:
           path: work/matte
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.inputs.matte_run_id || '32009172839' }}
-
       - name: Install minimal QA stack
         run: |
           python -m pip install --disable-pip-version-check --quiet pillow==10.4.0 numpy==1.26.4 opencv-python-headless==4.10.0.84
-          python -m py_compile tools/hair_salon_pipeline/preflight.py tools/hair_salon_pipeline/hair_qa.py
-
+          python -m py_compile tools/hair_salon_pipeline/preflight.py tools/hair_salon_pipeline/hair_qa.py tools/hair_salon_pipeline/gate.py
       - name: Resolve artifact inputs
         run: |
           python - <<'PY'
           from pathlib import Path
           import os
           from PIL import Image
-
-          def largest_fullres(root):
+          def largest_image(root):
               hits=[]
-              for p in Path(root).rglob('*.png'):
+              for p in Path(root).rglob('*'):
+                  if p.suffix.lower() not in {'.png','.jpg','.jpeg'}: continue
                   try:
                       im=Image.open(p)
                       if all(k not in p.name.lower() for k in ['mask','matte','protect','qa']):
                           hits.append((im.size[0]*im.size[1],p.stat().st_size,p))
-                  except Exception:
-                      pass
+                  except Exception: pass
               assert hits, root
               return max(hits)[2]
-
-          source=largest_fullres('work/source')
+          source=largest_image('work/source')
           candidate_hits=list(Path('work/candidate').rglob('*PrimaryCandidate*.png'))
-          candidate=max(candidate_hits,key=lambda p:p.stat().st_size) if candidate_hits else largest_fullres('work/candidate')
+          candidate=max(candidate_hits,key=lambda p:p.stat().st_size) if candidate_hits else largest_image('work/candidate')
           matte_hits=list(Path('work/matte').rglob('modnet_matte_768_v02.png'))
           if not matte_hits:
               matte_hits=[p for p in Path('work/matte').rglob('*.png') if 'matte' in p.name.lower()]
           assert matte_hits,'matte not found'
           matte=matte_hits[0]
           with open(os.environ['GITHUB_ENV'],'a') as f:
-              f.write(f'SOURCE_IMAGE={source}\n')
-              f.write(f'CANDIDATE_IMAGE={candidate}\n')
-              f.write(f'MATTE_IMAGE={matte}\n')
-          print('SOURCE',source)
-          print('CANDIDATE',candidate)
-          print('MATTE',matte)
+              f.write(f'SOURCE_IMAGE={source}\nCANDIDATE_IMAGE={candidate}\nMATTE_IMAGE={matte}\n')
           PY
-
-      - name: Defect-driven preflight
-        id: preflight
-        run: |
-          mkdir -p work/reports
-          python tools/hair_salon_pipeline/preflight.py \
-            --source "$SOURCE_IMAGE" \
-            --matte "$MATTE_IMAGE" \
-            --output work/reports/preflight.json
-
-      - name: Hair-specific fidelity QA
-        id: hairqa
+      - name: Run single-command production gate
+        id: gate
         continue-on-error: true
         run: |
-          python tools/hair_salon_pipeline/hair_qa.py \
-            --authority "$SOURCE_IMAGE" \
-            --candidate "$CANDIDATE_IMAGE" \
-            --matte "$MATTE_IMAGE" \
-            --output work/reports/hair_qa.json
-
-      - name: Build production decision summary
-        if: always()
-        env:
-          HAIR_QA_OUTCOME: ${{ steps.hairqa.outcome }}
-          PREFLIGHT_ROUTE: ${{ steps.preflight.outputs.route }}
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import json, os
-          out=Path('work/reports')
-          pre=json.loads((out/'preflight.json').read_text()) if (out/'preflight.json').exists() else {}
-          hair=json.loads((out/'hair_qa.json').read_text()) if (out/'hair_qa.json').exists() else {}
-          status='PASS_PRODUCTION_GATE' if os.environ.get('HAIR_QA_OUTCOME')=='success' else 'REVIEW_PRODUCTION_GATE'
-          summary={
-            'status':status,
-            'route':pre.get('route'),
-            'hair_qa_status':hair.get('status'),
-            'rules':{
-              'expensive_steps_run_only_when_preflight_or_explicit_visual_direction_requires_them':True,
-              'object_removal_requires_explicit_defect_mask':True,
-              'hair_fidelity_must_pass_before_candidate_promotion':True,
-              'metrics_do_not_replace_visual_acceptance':True
-            }
-          }
-          (out/'production_decision.json').write_text(json.dumps(summary,indent=2))
-          md=[
-            '# Salon Production Gate v01',
-            '',
-            f"Status: **{status}**",
-            f"Route: `{ ' -> '.join(pre.get('route') or []) }`",
-            f"Hair QA: **{hair.get('status','UNKNOWN')}**",
-            '',
-            '## Core policy',
-            '- Skip unnecessary expensive stages.',
-            '- Never auto-inpaint without an explicit defect mask.',
-            '- Preserve source authority and run hair-fidelity QA before promotion.',
-            '- Visual acceptance remains separate from automated metrics.'
-          ]
-          (out/'PRODUCTION_DECISION.md').write_text('\n'.join(md))
-          print(json.dumps(summary,indent=2))
-          PY
-
+          python tools/hair_salon_pipeline/gate.py --source "$SOURCE_IMAGE" --candidate "$CANDIDATE_IMAGE" --matte "$MATTE_IMAGE" --output-dir work/reports
       - name: Upload production gate evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-salon-production-gate-v01
+          name: hao-hair-salon-production-gate-v02
           path: work/reports/*
           if-no-files-found: error
           retention-days: 14
-
-      - name: Enforce hair fidelity gate
+      - name: Enforce production gate
         if: always()
         env:
-          HAIR_QA_OUTCOME: ${{ steps.hairqa.outcome }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
         run: |
-          test "$HAIR_QA_OUTCOME" = "success"
+          test "$GATE_OUTCOME" = "success"
