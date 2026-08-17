@@ -19,6 +19,7 @@ def main():
 
     root=Path(__file__).resolve().parent; out=Path(args.output_dir); out.mkdir(parents=True,exist_ok=True)
     preflight=out/'preflight.json'; plan=out/'orchestration_plan.json'; hairqa=out/'hair_qa.json'
+    production_json=out/'production_decision.json'; decision_json=out/'decision_packet.json'; decision_md=out/'DECISION_PACKET.md'
     object_removal_requested=bool(args.object_removal_requested or args.defect_mask)
 
     pre_cmd=[sys.executable,str(root/'preflight.py'),'--source',args.source,'--output',str(preflight),'--short-edge-target',str(args.short_edge_target)]
@@ -55,9 +56,15 @@ def main():
       'hair_mask_mode':'DEDICATED' if args.hair_mask else 'PROXY_FALLBACK',
       'policy':{'private_local_files_supported':True,'no_repo_upload_required':True,'router_never_equals_execution_permission':True,'undeclared_object_removal_is_skipped_not_blocked':True,'no_auto_inpainting_without_explicit_defect_mask':True,'bokeh_and_tone_remain_visual_review':True,'skip_unneeded_expensive_stages':True,'dedicated_source_derived_hair_mask_preferred':True,'candidate_promotion_requires_hair_qa_when_candidate_present':True,'visual_acceptance_is_separate':True}
     }
-    (out/'production_decision.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+    production_json.write_text(json.dumps(summary,indent=2),encoding='utf-8')
     md=['# Salon Production Gate','',f"Status: **{status}**",f"Route: `{' -> '.join(pre.get('route',[]))}`",f"Hair QA: **{hair_status}**",f"Hair mask mode: **{summary['hair_mask_mode']}**",f"Object removal requested: **{object_removal_requested}**",f"Auto-eligible: `{', '.join(summary['auto_execute_eligible_stages']) or 'NONE'}`",f"Review: `{', '.join(summary['review_stages']) or 'NONE'}`",f"Blocked: `{', '.join(summary['blocked_stages']) or 'NONE'}`",'', 'Router decisions never equal execution permission; source overwrite and blind generative edits remain prohibited.']
-    (out/'PRODUCTION_DECISION.md').write_text('\n'.join(md),encoding='utf-8'); print(json.dumps(summary,indent=2))
+    (out/'PRODUCTION_DECISION.md').write_text('\n'.join(md),encoding='utf-8')
+
+    packet_cmd=[sys.executable,str(root/'decision_packet.py'),'--production-decision',str(production_json),'--orchestration',str(plan),'--output',str(decision_json),'--markdown-output',str(decision_md)]
+    if hairqa.exists(): packet_cmd += ['--hair-qa',str(hairqa)]
+    if run(packet_cmd)!=0: raise SystemExit('decision packet failed')
+
+    print(json.dumps(summary,indent=2))
     if status=='REVIEW_PRODUCTION_GATE': raise SystemExit(2)
 
 if __name__=='__main__': main()
