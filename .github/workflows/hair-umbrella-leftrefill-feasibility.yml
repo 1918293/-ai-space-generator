@@ -58,7 +58,7 @@ jobs:
           PY
           } 2>&1 | tee work/environment.log
 
-      - name: Patch wrapper for CPU-safe execution, variable probe size, and grayscale masks
+      - name: Patch wrapper for CPU-safe execution, variable probe size, grayscale masks, and encoder device
         if: always()
         run: |
           cd work/simple-leftrefill
@@ -74,6 +74,10 @@ jobs:
           old="im_padded = Image.fromarray(np.pad(np.array(input_image), ((0, pad_h), (0, pad_w), (0, 0)), mode='edge'))"
           new="arr = np.array(input_image)\n        pad_spec = ((0, pad_h), (0, pad_w), (0, 0)) if arr.ndim == 3 else ((0, pad_h), (0, pad_w))\n        im_padded = Image.fromarray(np.pad(arr, pad_spec, mode='edge'))"
           assert old in s, 'expected upstream RGB-only pad_image implementation not found'
+          s=s.replace(old,new)
+          old="model = model.to(device)\n        model.eval()"
+          new="model = model.to(device)\n        if hasattr(model, 'cond_stage_model') and hasattr(model.cond_stage_model, 'device'):\n            model.cond_stage_model.device = device\n        model.eval()"
+          assert old in s, 'expected upstream model.to(device) block not found'
           s=s.replace(old,new)
           p.write_text(s)
           PY
@@ -123,7 +127,7 @@ jobs:
           print(json.dumps(rep,indent=2))
           PY
 
-      - name: Restore or seed Hugging Face model cache
+      - name: Restore Hugging Face model cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface/hub
@@ -146,6 +150,7 @@ jobs:
           model=LeftRefillGuidance()
           model.target_image_size=256
           print('MODEL_READY target',model.target_image_size)
+          print('COND_STAGE_DEVICE',getattr(model.sampler.model.cond_stage_model,'device',None))
           result=model.predict(
               Image.open(root/'target.png').convert('RGB'),
               Image.open(root/'model_mask.png').convert('L'),
@@ -201,7 +206,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-leftrefill-probe-v02
+          name: hao-hair-leftrefill-probe-v03
           path: |
             work/leftrefill_wrapper_commit.txt
             work/environment.log
