@@ -1,0 +1,202 @@
+name: Hao Hair Commercial Edge-safe Bokeh v11
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-commercial-edge-bokeh-v11.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  edge-bokeh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified v10 final package
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-final-v10
+          path: work/v10
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32038358919
+
+      - name: Download verified MODNet matte
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-modnet-hairsafe-bokeh-v02
+          path: work/modnet
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32009172839
+
+      - name: Install minimal deterministic image stack
+        run: |
+          python -m pip install --disable-pip-version-check --quiet pillow==10.4.0 numpy==1.26.4 opencv-python-headless==4.10.0.84
+
+      - name: Build background-only normalized bokeh and full QA
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import numpy as np, cv2, json, hashlib, shutil
+
+          ROOT=Path('work'); OUT=ROOT/'final'; OUT.mkdir(parents=True,exist_ok=True)
+          def exact(root,name):
+              hits=list(Path(root).rglob(name)); assert len(hits)==1,(name,hits); return hits[0]
+          def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+          def grad(a):
+              g=cv2.cvtColor(a,cv2.COLOR_RGB2GRAY).astype(np.float32)
+              gx=cv2.Sobel(g,cv2.CV_32F,1,0,ksize=3); gy=cv2.Sobel(g,cv2.CV_32F,0,1,ksize=3)
+              return np.sqrt(gx*gx+gy*gy)
+
+          clean_p=exact(ROOT/'v10','Hao_Hair_UmbrellaClean_LeftRefill_v10.png')
+          old_bokeh_p=exact(ROOT/'v10','Hao_Hair_Commercial_HairSafe_Bokeh_Final_v10.png')
+          old_primary_p=exact(ROOT/'v10','Hao_Hair_Commercial_PrimaryCandidate_v10.png')
+          matte_p=exact(ROOT/'modnet','modnet_matte_768_v02.png')
+
+          clean=np.asarray(Image.open(clean_p).convert('RGB'))
+          old_bokeh=np.asarray(Image.open(old_bokeh_p).convert('RGB'))
+          old_primary=np.asarray(Image.open(old_primary_p).convert('RGB'))
+          matte=np.asarray(Image.open(matte_p).convert('L')).astype(np.float32)/255.0
+          assert clean.shape==old_bokeh.shape==old_primary.shape==(4192,2360,3)
+          assert matte.shape==(4192,2360)
+          H,W=matte.shape
+
+          # Same v10 subject/background blend authority.
+          core=matte>=0.65
+          t=np.clip((0.65-matte)/(0.65-0.05),0,1)
+          bg_mix=(t*t*(3-2*t)).astype(np.float32)
+
+          # v10 blur used all pixels as Gaussian donors. That can bleed subject color into nearby background.
+          # v11 uses only high-confidence background pixels as donors, normalized by blurred support.
+          sigma=12.0
+          donor_threshold=0.20
+          donor_w=np.clip((donor_threshold-matte)/donor_threshold,0,1).astype(np.float32)
+          support=cv2.GaussianBlur(donor_w,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101)
+          bg_only=np.empty_like(clean,dtype=np.float32)
+          for c in range(3):
+              num=cv2.GaussianBlur(clean[:,:,c].astype(np.float32)*donor_w,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101)
+              bg_only[:,:,c]=num/np.maximum(support,1e-4)
+
+          # Fallback is only relevant where background support is extremely low; those pixels are inside/near subject and not used as full background.
+          ordinary=cv2.GaussianBlur(clean,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101).astype(np.float32)
+          support_alpha=np.clip(support/0.05,0,1)[...,None]
+          bg_only=bg_only*support_alpha+ordinary*(1-support_alpha)
+
+          bokeh=np.clip(clean.astype(np.float32)*(1-bg_mix[...,None])+bg_only*bg_mix[...,None]+0.5,0,255).astype(np.uint8)
+          bokeh[core]=clean[core]
+          bokeh_p=OUT/'Hao_Hair_Commercial_HairSafe_Bokeh_EdgeSafe_v11.png'
+          Image.fromarray(bokeh,'RGB').save(bokeh_p)
+
+          # Measure theoretical foreground donor contamination on the background side of the subject edge.
+          bg_binary=(~core).astype(np.uint8)
+          dist_to_core=cv2.distanceTransform(bg_binary,cv2.DIST_L2,5)
+          edge_ring=(matte<0.08)&(dist_to_core>0)&(dist_to_core<=30)
+          assert int(edge_ring.sum())>50000
+          old_donor_matte=cv2.GaussianBlur(matte.astype(np.float32),(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101)
+          donor_matte_num=cv2.GaussianBlur((matte*donor_w).astype(np.float32),(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101)
+          new_donor_matte=donor_matte_num/np.maximum(support,1e-4)
+          old_med=float(np.median(old_donor_matte[edge_ring])); new_med=float(np.median(new_donor_matte[edge_ring]))
+          old_p95=float(np.percentile(old_donor_matte[edge_ring],95)); new_p95=float(np.percentile(new_donor_matte[edge_ring],95))
+          med_reduction=float(1-new_med/max(old_med,1e-12)); p95_reduction=float(1-new_p95/max(old_p95,1e-12))
+          low_support=float(np.mean(support[edge_ring]<0.05))
+
+          # Reapply exactly the v10 studio-tone recipe: key +0.05 stop.
+          arr=bokeh.astype(np.float32)/255.0
+          def s2l(x): return np.where(x<=0.04045,x/12.92,((x+0.055)/1.055)**2.4)
+          def l2s(x):
+              x=np.clip(x,0,1); return np.where(x<=0.0031308,12.92*x,1.055*np.power(x,1/2.4)-0.055)
+          def smooth(e0,e1,x):
+              z=np.clip((x-e0)/(e1-e0),0,1); return z*z*(3-2*z)
+          yy,xx=np.indices((H,W),dtype=np.float32); xn=xx/(W-1); yn=yy/(H-1)
+          subject=smooth(0.20,0.80,matte); background=1-subject
+          key=np.exp(-0.5*(((xn-0.50)/0.30)**2+((yn-0.39)/0.24)**2))*subject
+          rr=((xn-0.50)/0.72)**2+((yn-0.43)/0.78)**2; vignette=np.clip(rr-0.55,0,1)*background
+          stops=(-0.10*background)+(0.05*key)+(-0.03*vignette)
+          tone=np.clip(l2s(np.clip(s2l(arr)*np.exp2(stops)[...,None],0,1))*255.0+0.5,0,255).astype(np.uint8)
+          primary=OUT/'Hao_Hair_Commercial_PrimaryCandidate_v11.png'; Image.fromarray(tone,'RGB').save(primary)
+          portfolio=Image.fromarray(tone,'RGB').crop((280,560,2080,2810))
+          portfolio_p=OUT/'Hao_Hair_Commercial_Portfolio4x5_v11.png'; portfolio.save(portfolio_p)
+          shutil.copyfile(clean_p,OUT/'Hao_Hair_UmbrellaClean_LeftRefill_v11.png')
+
+          # Hard preservation: subject core must remain exactly the same as v10 after tone.
+          core_primary_exact=bool(np.array_equal(tone[core],old_primary[core]))
+          bokeh_core_exact=bool(np.array_equal(bokeh[core],clean[core]))
+
+          # Same tone fidelity checks used previously.
+          x0,y0,x1,y1=(350,800,1900,2600)
+          rb=bokeh[y0:y1,x0:x1]; rt=tone[y0:y1,x0:x1]; rm=matte[y0:y1,x0:x1]
+          evalm=rm>=0.20; core_roi=rm>=0.65
+          g0=grad(rb)[evalm]; g1=grad(rt)[evalm]; gc=float(np.corrcoef(g0,g1)[0,1])
+          hb=cv2.cvtColor(rb,cv2.COLOR_RGB2HSV).astype(np.float32); ht=cv2.cvtColor(rt,cv2.COLOR_RGB2HSV).astype(np.float32)
+          chroma=core_roi&(hb[:,:,1]>=35)&(hb[:,:,2]>=25)
+          hd=np.abs(ht[:,:,0]-hb[:,:,0]); hd=np.minimum(hd,180-hd)*2.0
+          hue_med=float(np.median(hd[chroma])); hue_p95=float(np.percentile(hd[chroma],95)); sat_med=float(np.median(np.abs(ht[:,:,1]-hb[:,:,1])[chroma]))
+
+          old_clip=float(np.mean(np.any(old_primary>=255,axis=2))); new_clip=float(np.mean(np.any(tone>=255,axis=2)))
+          tone_ok=bool(gc>0.995 and hue_med<=2 and hue_p95<=6 and sat_med<=4 and new_clip<=old_clip+0.0005)
+          edge_ok=bool(med_reduction>=0.65 and p95_reduction>=0.70 and low_support<=0.001)
+          hard_pass=bool(core_primary_exact and bokeh_core_exact and tone_ok and edge_ok)
+
+          # QA sheets: current v10 vs v11 at hair and arm boundaries, plus full/4:5.
+          qa_boxes=[('hair_left',(450,600,1250,2300)),('hair_right',(1250,600,2150,2300)),('arms',(100,2350,2300,3650))]
+          panels=[]
+          for label,box in qa_boxes:
+              a=Image.fromarray(old_primary,'RGB').crop(box); b=Image.fromarray(tone,'RGB').crop(box)
+              a.thumbnail((420,760)); b.thumbnail((420,760))
+              pair=Image.new('RGB',(a.width+b.width,max(a.height,b.height)),(255,255,255)); pair.paste(a,(0,0)); pair.paste(b,(a.width,0)); panels.append(pair)
+          width=max(p.width for p in panels); height=sum(p.height for p in panels)
+          sheet=Image.new('RGB',(width,height),(255,255,255)); py=0
+          for p in panels: sheet.paste(p,(0,py)); py+=p.height
+          sheet.save(OUT/'QA_v10_v11_edge_bokeh.jpg',quality=95)
+
+          p1=Image.fromarray(tone,'RGB'); p1.thumbnail((700,1240)); p2=portfolio.copy(); p2.thumbnail((700,1240))
+          fs=Image.new('RGB',(p1.width+p2.width,max(p1.height,p2.height)),(255,255,255)); fs.paste(p1,(0,0)); fs.paste(p2,(p1.width,0)); fs.save(OUT/'QA_Final_Full_4x5_v11.jpg',quality=95)
+
+          report={
+            'status':'TECHNICAL_PASS_PRIMARY_CANDIDATE' if hard_pass else 'TECHNICAL_FAIL',
+            'change':'background-only normalized Gaussian bokeh donors; no inpainting, no MODNet rerun, no subject-core edit',
+            'authority':{'v10_final_run':32038358919,'modnet_run':32009172839,'donor_threshold':donor_threshold,'sigma':sigma},
+            'hard_gates':{
+              'v11_toned_subject_core_bit_identical_to_v10':core_primary_exact,
+              'v11_bokeh_subject_core_bit_identical_to_clean':bokeh_core_exact,
+              'edge_foreground_donor_contamination_median_reduced_ge65pct':med_reduction>=0.65,
+              'edge_foreground_donor_contamination_p95_reduced_ge70pct':p95_reduction>=0.70,
+              'edge_low_background_support_le0_1pct':low_support<=0.001,
+              'tone_fidelity':tone_ok
+            },
+            'metrics':{
+              'edge_ring_pixels':int(edge_ring.sum()),
+              'v10_donor_matte_median':old_med,'v11_donor_matte_median':new_med,'donor_matte_median_reduction':med_reduction,
+              'v10_donor_matte_p95':old_p95,'v11_donor_matte_p95':new_p95,'donor_matte_p95_reduction':p95_reduction,
+              'edge_low_support_fraction':low_support,
+              'tone_subject_gradient_correlation':gc,'median_hue_shift_degrees':hue_med,'p95_hue_shift_degrees':hue_p95,'median_saturation_shift_8bit':sat_med,
+              'v10_highlight_clip_fraction':old_clip,'v11_highlight_clip_fraction':new_clip
+            },
+            'outputs':{
+              'bokeh':{'name':bokeh_p.name,'size':[2360,4192],'sha256':sha(bokeh_p)},
+              'primary':{'name':primary.name,'size':[2360,4192],'sha256':sha(primary)},
+              'portfolio':{'name':portfolio_p.name,'size':[1800,2250],'sha256':sha(portfolio_p)}
+            },
+            'promotion':'PRIMARY_CANDIDATE_PENDING_VISUAL_QA' if hard_pass else 'NOT_PROMOTED'
+          }
+          (OUT/'verification_final_v11.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2))
+          if not hard_pass: raise SystemExit('v11 edge-bokeh gate failed')
+          PY
+
+      - name: Upload v11 candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-commercial-final-v11
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
