@@ -43,15 +43,16 @@ jobs:
         run: |
           set -o pipefail
           {
-            python -m pip install --upgrade 'pip<25' 'setuptools<70' wheel
+            python -m pip install --upgrade pip==24.0 'setuptools<70' wheel
             python -m pip install numpy==1.21.6 pillow==9.5.0 six==1.16.0
             python -m pip install torch==1.9.1+cpu torchvision==0.10.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
             python -m pip install pytorch-lightning==1.2.9 torchmetrics==0.2.0 tensorboard==2.4.1 protobuf==3.20.3
             python -m pip install PyYAML==6.0 yacs==0.1.8 tqdm==4.59.0 timm==0.3.2 opencv-python-headless==4.5.5.64 scipy==1.7.3 scikit-image==0.19.3 lpips==0.1.4 omegaconf==2.0.6
             python - <<'PY'
           from pathlib import Path
-          import timm
-          helper=Path(timm.__file__).parent/'models'/'layers'/'helpers.py'
+          import site
+          helper=Path(site.getsitepackages()[0])/'timm'/'models'/'layers'/'helpers.py'
+          assert helper.exists(), helper
           s=helper.read_text()
           old='from torch._six import container_abcs'
           if old in s:
@@ -60,7 +61,7 @@ jobs:
           print('TIMM_HELPER_PATCHED', old not in helper.read_text())
           PY
             python - <<'PY'
-          import numpy, PIL, six, torch, torchvision, pytorch_lightning, cv2, scipy, skimage, omegaconf
+          import numpy, PIL, six, torch, torchvision, pytorch_lightning, cv2, scipy, skimage, omegaconf, timm
           print('NUMPY',numpy.__version__)
           print('PIL',PIL.__version__)
           print('SIX',six.__version__)
@@ -72,6 +73,7 @@ jobs:
           print('SCIPY',scipy.__version__)
           print('SKIMAGE',skimage.__version__)
           print('OMEGACONF',omegaconf.__version__)
+          print('TIMM',timm.__version__)
           PY
           } 2>&1 | tee work/environment.log
 
@@ -234,7 +236,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-zitspp-cpu-smoke-v03
+          name: hao-hair-zitspp-cpu-smoke-v04
           path: |
             work/zitspp_commit.txt
             work/environment.log
