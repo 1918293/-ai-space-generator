@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgl1 libglib2.0-0
           python -m pip install --upgrade pip
-          pip install 'numpy<2' pillow
+          pip install numpy==1.26.4 pillow
 
       - name: Fetch original source image
         run: |
@@ -46,12 +46,15 @@ jobs:
       - name: Install compatible CPU Real-ESRGAN stack
         run: |
           pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cpu
-          pip install basicsr==1.4.2 facexlib==0.3.0 gfpgan==1.3.8 opencv-python-headless==4.10.0.84 tqdm pyyaml scipy scikit-image lmdb requests tb-nightly yapf future addict
+          pip install basicsr==1.4.2 --no-deps
+          pip install opencv-python==4.10.0.84 tqdm pyyaml scipy==1.11.4 scikit-image==0.22.0 lmdb requests==2.31.0 tb-nightly yapf future addict
+          pip install numpy==1.26.4 --force-reinstall
           git clone --depth 1 https://github.com/xinntao/Real-ESRGAN.git /tmp/Real-ESRGAN
           cd /tmp/Real-ESRGAN
           pip install -e . --no-deps
           python - <<'PY'
-          import torch, torchvision
+          import numpy, torch, torchvision
+          print('NUMPY', numpy.__version__)
           print('TORCH', torch.__version__, 'CUDA', torch.cuda.is_available())
           print('TORCHVISION', torchvision.__version__)
           PY
