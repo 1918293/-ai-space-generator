@@ -38,11 +38,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install 'numpy<2' pillow opencv-python-headless==4.10.0.84
 
-      - name: Build source-grounded clean plate and protected mask
+      - name: Build seamless source-grounded clean plate and protected mask
         run: |
           python - <<'PY'
           from pathlib import Path
-          from PIL import Image, ImageFilter, ImageDraw
+          from PIL import Image, ImageFilter
           import numpy as np
           import cv2, json, hashlib
 
@@ -66,8 +66,7 @@ jobs:
           assert len(xs)>50,'Insufficient trim samples'
           trim_fit=np.polyfit(ys,xs,1)
 
-          # 2. Use only clean pixels from this same photo to build a background plate.
-          #    Clean source: upper-right wood + dark trim + white wall.
+          # 2. Rebuild wood + dark trim using only clean upper-right pixels from this same photo.
           x0,x1=1650,2360
           bg=arr[0:1800,x0:x1].copy()
           bg_gray=cv2.cvtColor(bg,cv2.COLOR_RGB2GRAY)
@@ -80,7 +79,7 @@ jobs:
           src_trim=np.asarray(src_trim,dtype=np.float32)
           src_trim=cv2.blur(src_trim.reshape(-1,1),(1,51)).ravel()
 
-          plate=arr.copy()
+          plate=arr.copy().astype(np.float32)
           for y in range(2300,H):
               t=(y-2300)/(H-2300-1)
               sy=int(t*(bg.shape[0]-1))
@@ -91,7 +90,28 @@ jobs:
               sample_x=np.clip((out_x+delta-x0).astype(np.int32),0,bg.shape[1]-1)
               plate[y,x0:x1]=bg[sy,sample_x]
 
-          # 3. Continue the visible floor/threshold under the wall using another clean source crop.
+          # 3. Seamless white-wall continuation.
+          # Anchor at y=3100, where the original wall is clean and unobstructed. Extrapolate
+          # only a very low-frequency vertical luminance/color trend, while shifting source
+          # columns with the observed trim perspective so newly exposed wall remains coherent.
+          smooth=cv2.GaussianBlur(arr,(7,31),sigmaX=2,sigmaY=8).astype(np.float32)
+          white_anchor_y=3100
+          earlier_y=2880
+          white_base=smooth[white_anchor_y].copy()
+          white_slope=(white_base-smooth[earlier_y])/(white_anchor_y-earlier_y)
+          white_slope=np.clip(white_slope,-0.02,0.02)
+          trim_anchor=float(np.polyval(trim_fit,white_anchor_y))
+
+          for y in range(white_anchor_y,H):
+              target_trim=float(np.polyval(trim_fit,y))
+              start=max(x0,min(W-1,int(target_trim+28)))
+              delta=trim_anchor-target_trim
+              out_x=np.arange(start,W)
+              source_x=np.clip((out_x+delta).astype(np.int32),0,W-1)
+              wall=white_base[source_x]+white_slope[source_x]*(y-white_anchor_y)
+              plate[y,start:W]=np.clip(wall,0,255)
+
+          # 4. Continue the visible floor/threshold under the reconstructed wall.
           floor_src=np.asarray(src.crop((1700,4080,2000,4192)))
           for x in range(1660,2360):
               y_floor=int(4025+0.23*(x-1680))
@@ -100,7 +120,7 @@ jobs:
                   floor=np.asarray(Image.fromarray(floor_src).resize((710,H-y_floor),Image.Resampling.BICUBIC))
                   plate[y_floor:H,x]=floor[:,min(709,max(0,x-1650))]
 
-          # 4. Local edit mask: lower-right umbrella area only.
+          # 5. Local edit mask: lower-right umbrella area only.
           mask=np.zeros((H,W),dtype=np.uint8)
           cv2.rectangle(mask,(1660,3100),(2359,4191),255,-1)
 
@@ -120,31 +140,34 @@ jobs:
           cv2.rectangle(protect,(0,3100),(1665,4191),255,-1)
           mask[protect>0]=0
 
-          # 5. Feather only inward. Every pixel outside the binary mask remains source-identical.
+          # 6. Feather only inward. Every pixel outside the binary mask remains source-identical.
           mask_img=Image.fromarray(mask)
           blurred=np.asarray(mask_img.filter(ImageFilter.GaussianBlur(radius=12)),dtype=np.float32)/255.0
           hard=mask.astype(np.float32)/255.0
           alpha=np.minimum(hard,blurred)[...,None]
-          out=np.clip(plate.astype(np.float32)*alpha+arr.astype(np.float32)*(1-alpha),0,255).astype(np.uint8)
+          out=np.clip(plate*alpha+arr.astype(np.float32)*(1-alpha),0,255).astype(np.uint8)
 
           Path('work/final').mkdir(parents=True,exist_ok=True)
-          out_path=Path('work/final/Hao_Hair_SR_x2_umbrella_source_plate_v13.png')
+          out_path=Path('work/final/Hao_Hair_SR_x2_umbrella_source_plate_v15.png')
           Image.fromarray(out,'RGB').save(out_path)
-          Image.fromarray(mask).save('work/final/edit_mask_v13.png')
-          Image.fromarray(protect).save('work/final/person_protect_v13.png')
+          Image.fromarray(mask).save('work/final/edit_mask_v15.png')
+          Image.fromarray(protect).save('work/final/person_protect_v15.png')
 
-          # Visual QA crop and mask overlay for review.
+          # Visual QA views.
           crop_box=(1200,2300,2360,4192)
           qa=Image.fromarray(out,'RGB').crop(crop_box)
           qa.thumbnail((858,1400))
-          qa.save('work/final/qa_lower_right_v13.jpg',quality=94)
+          qa.save('work/final/qa_lower_right_v15.jpg',quality=94)
+          full=Image.fromarray(out,'RGB').copy()
+          full.thumbnail((900,1600))
+          full.save('work/final/qa_full_v15.jpg',quality=94)
           overlay=arr.copy()
           overlay[mask>0]=(0.55*overlay[mask>0]+0.45*np.array([255,0,0])).astype(np.uint8)
           ov=Image.fromarray(overlay,'RGB').crop(crop_box)
           ov.thumbnail((858,1400))
-          ov.save('work/final/mask_overlay_v13.jpg',quality=92)
+          ov.save('work/final/mask_overlay_v15.jpg',quality=92)
 
-          # 6. Hard verification gates.
+          # 7. Hard verification gates.
           outside=mask==0
           outside_identical=bool(np.array_equal(arr[outside],out[outside]))
           protected_identical=bool(np.array_equal(arr[protect>0],out[protect>0]))
@@ -154,10 +177,12 @@ jobs:
 
           changed=int(np.count_nonzero(np.any(arr!=out,axis=2)))
           report={
-              'method':'source-grounded clean plate; no generative model',
+              'method':'source-grounded clean plate with perspective-aligned white-wall continuation; no generative model',
               'source_size':[2360,4192],
               'output_size':[2360,4192],
               'background_source_upper_right':[1650,0,2360,1800],
+              'white_wall_anchor_y':white_anchor_y,
+              'white_wall_trend_source':[earlier_y,white_anchor_y],
               'floor_source':[1700,4080,2000,4192],
               'trim_fit_coefficients':[float(trim_fit[0]),float(trim_fit[1])],
               'edit_mask_pixels':int(np.count_nonzero(mask)),
@@ -167,14 +192,14 @@ jobs:
               'protected_person_bit_identical':protected_identical,
               'output_sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
           }
-          Path('work/final/verification_v13.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          Path('work/final/verification_v15.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
           print(json.dumps(report,indent=2))
           PY
 
       - name: Upload source-grounded candidate
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-umbrella-source-plate-v13
+          name: hao-hair-umbrella-source-plate-v15
           path: work/final/*
           if-no-files-found: error
           retention-days: 7
