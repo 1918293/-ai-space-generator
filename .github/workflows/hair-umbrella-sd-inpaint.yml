@@ -18,19 +18,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install CPU diffusion stack
         run: |
           python -m pip install --upgrade pip
           pip install numpy==1.26.4 Pillow==9.5.0 opencv-python-headless==4.10.0.84
           pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cpu
           pip install diffusers==0.27.2 huggingface_hub==0.25.2 transformers==4.39.3 accelerate==0.29.3 safetensors
-
       - name: Fetch verified 2x SR source and Adobe umbrella mask
         run: |
           mkdir -p umbrella_sd/input umbrella_sd/output
@@ -38,45 +35,43 @@ jobs:
           curl -L --fail --retry 2 -o umbrella_sd/input/adobe_mask.png 'https://photoshop-api.adobe.io/v2/short-url/urn:aaid:ps:US:ac780920-be9f-4308-8ea3-9cb2e60c5e95'
           python - <<'PY'
           from PIL import Image
-          src=Image.open('umbrella_sd/input/source.png')
-          m=Image.open('umbrella_sd/input/adobe_mask.png')
+          src=Image.open('umbrella_sd/input/source.png'); m=Image.open('umbrella_sd/input/adobe_mask.png')
+          assert src.size==(2360,4192) and m.size==(2360,4192)
           print('SOURCE_SIZE',src.size,'MASK_SIZE',m.size)
-          assert src.size==(2360,4192)
-          assert m.size==(2360,4192)
           PY
-
-      - name: Run text-guided masked inpainting
+      - name: Run wall-only text-guided inpainting v05
         env:
           HF_HUB_DISABLE_TELEMETRY: '1'
         run: |
           python - <<'PY'
           from pathlib import Path
-          import cv2
-          import numpy as np
-          import torch
+          import cv2, numpy as np, torch
           from PIL import Image, ImageFilter
           from diffusers import StableDiffusionInpaintPipeline, DDIMScheduler
 
           torch.set_num_threads(2)
           src=np.array(Image.open('umbrella_sd/input/source.png').convert('RGB'))
           H,W=src.shape[:2]
-          mask=np.array(Image.open('umbrella_sd/input/adobe_mask.png').convert('L'))
-          mask=(mask>127).astype(np.uint8)*255
-          print('RAW_MASK_PIXELS',int(np.count_nonzero(mask)))
+          mask=(np.array(Image.open('umbrella_sd/input/adobe_mask.png').convert('L'))>127).astype(np.uint8)*255
 
-          # Cover thin red/black umbrella borders while retaining a strict local edit region.
+          # Adobe object mask + explicit remnants seen in v04 QA.
           mask=cv2.dilate(mask,np.ones((21,21),np.uint8),iterations=1)
-          ys,xs=np.where(mask>0)
-          assert len(xs)>0
-          margin=220
+          # Hanging black strap below the cluster.
+          cv2.fillPoly(mask,[np.array([[1885,3490],[2045,3470],[2060,4020],[1910,4050]],np.int32)],255)
+          # Right-edge red/black umbrella remnant; keep the architectural divider left of this region intact.
+          cv2.rectangle(mask,(2280,3090),(2359,3670),255,-1)
+          # Small top red handle/trim remnants immediately behind the sleeve, background side only.
+          cv2.fillPoly(mask,[np.array([[1995,3100],[2100,3100],[2130,3370],[2025,3390]],np.int32)],255)
+          mask=cv2.dilate(mask,np.ones((11,11),np.uint8),iterations=1)
+
+          ys,xs=np.where(mask>0); assert len(xs)>0
+          margin=240
           x0=max(0,int(xs.min())-margin); x1=min(W,int(xs.max())+1+margin)
           y0=max(0,int(ys.min())-margin); y1=min(H,int(ys.max())+1+margin)
-          crop=src[y0:y1,x0:x1].copy()
-          cmask=mask[y0:y1,x0:x1].copy()
+          crop=src[y0:y1,x0:x1].copy(); cmask=mask[y0:y1,x0:x1].copy()
           oh,ow=crop.shape[:2]
-          print('CROP',x0,y0,x1,y1,'SIZE',ow,oh)
+          print('CROP',x0,y0,x1,y1,'SIZE',ow,oh,'MASK_PIXELS',int(np.count_nonzero(cmask)))
 
-          # Fit crop into 512 square with symmetric context padding.
           scale=min(512.0/max(ow,oh),1.0)
           nw=max(1,int(round(ow*scale))); nh=max(1,int(round(oh*scale)))
           rimg=cv2.resize(crop,(nw,nh),interpolation=cv2.INTER_AREA if scale<1 else cv2.INTER_CUBIC)
@@ -86,82 +81,61 @@ jobs:
           pimg=np.pad(rimg,((t,b),(l,r),(0,0)),mode='symmetric')
           pmask=np.pad(rmask,((t,b),(l,r)),mode='constant')
 
-          init_image=Image.fromarray(pimg)
-          mask_image=Image.fromarray(pmask)
-
-          model_id='stable-diffusion-v1-5/stable-diffusion-inpainting'
           pipe=StableDiffusionInpaintPipeline.from_pretrained(
-              model_id,
+              'stable-diffusion-v1-5/stable-diffusion-inpainting',
               torch_dtype=torch.float32,
               safety_checker=None,
               requires_safety_checker=False,
           )
           pipe.scheduler=DDIMScheduler.from_config(pipe.scheduler.config)
-          pipe.enable_attention_slicing()
-          pipe=pipe.to('cpu')
+          pipe.enable_attention_slicing(); pipe=pipe.to('cpu')
 
           prompt=(
-              'empty realistic modern hair salon interior background, '
-              'continuous light natural oak wood wall panels with vertical grain, '
-              'clean white wall panel on the right, narrow dark vertical architectural frame, '
-              'subtle salon lighting, photorealistic interior photography, clean empty background, '
-              'straight panel geometry, natural perspective'
+              'close-up photograph of a plain architectural wall surface only, '
+              'continuous pale blond natural oak veneer wall panels on the left with subtle vertical wood grain, '
+              'smooth light gray white wall panel on the right, one narrow straight dark brown vertical divider, '
+              'flat wall background, realistic indoor soft light, accurate straight geometry, photorealistic wall texture, '
+              'empty clean surface, no room depth'
           )
           negative=(
-              'umbrella, parasol, red trim, red object, bag, fabric, clothing, person, arm, hand, '
-              'furniture, tools, rack, duplicate object, warped wall, distorted geometry, text, logo, '
-              'painting, illustration, surreal, colorful artifact, smudge'
+              'umbrella, parasol, red, red trim, bag, strap, fabric, clothing, person, arm, hand, chair, salon chair, '
+              'furniture, window, door opening, room, hallway, mirror, tools, rack, object, plant, lamp, floor, '
+              'warped geometry, curved architecture, duplicated edge, text, logo, painting, illustration, surreal, smudge'
           )
-
-          gen=torch.Generator(device='cpu').manual_seed(240)
           result=pipe(
-              prompt=prompt,
-              negative_prompt=negative,
-              image=init_image,
-              mask_image=mask_image,
-              num_inference_steps=18,
-              guidance_scale=7.0,
-              generator=gen,
+              prompt=prompt, negative_prompt=negative,
+              image=Image.fromarray(pimg), mask_image=Image.fromarray(pmask),
+              num_inference_steps=16, guidance_scale=8.5,
+              generator=torch.Generator(device='cpu').manual_seed(902),
           ).images[0]
-          pred=np.array(result.convert('RGB'))
-          pred=pred[t:t+nh,l:l+nw]
+          pred=np.array(result.convert('RGB'))[t:t+nh,l:l+nw]
           pred=cv2.resize(pred,(ow,oh),interpolation=cv2.INTER_CUBIC)
 
-          # Hard authority lock: only mask pixels may change.
           feather=np.array(Image.fromarray(cmask).filter(ImageFilter.GaussianBlur(radius=3)),dtype=np.float32)/255.0
-          feather*= (cmask>0).astype(np.float32)
-          alpha=feather[...,None]
+          feather*=(cmask>0).astype(np.float32); alpha=feather[...,None]
           blend=np.clip(crop.astype(np.float32)*(1-alpha)+pred.astype(np.float32)*alpha,0,255).astype(np.uint8)
 
-          final=src.copy()
-          roi=final[y0:y1,x0:x1]
-          inside=cmask>0
-          roi[inside]=blend[inside]
-          final[y0:y1,x0:x1]=roi
-
+          final=src.copy(); roi=final[y0:y1,x0:x1]; inside=cmask>0
+          roi[inside]=blend[inside]; final[y0:y1,x0:x1]=roi
           global_mask=np.zeros((H,W),np.uint8); global_mask[y0:y1,x0:x1]=cmask
           diff=np.any(final!=src,axis=2)
-          outside=int(np.count_nonzero(diff & (global_mask==0)))
-          inside_changes=int(np.count_nonzero(diff & (global_mask>0)))
-          print('OUTSIDE_MASK_CHANGED_PIXELS',outside)
-          print('INSIDE_MASK_CHANGED_PIXELS',inside_changes)
-          assert outside==0
-          assert inside_changes>0
+          outside=int(np.count_nonzero(diff & (global_mask==0))); inside_changes=int(np.count_nonzero(diff & (global_mask>0)))
+          print('OUTSIDE_MASK_CHANGED_PIXELS',outside,'INSIDE_MASK_CHANGED_PIXELS',inside_changes)
+          assert outside==0 and inside_changes>0
 
           out=Path('umbrella_sd/output'); out.mkdir(parents=True,exist_ok=True)
-          Image.fromarray(final).save(out/'Hao_Hair_SR_x2_UmbrellaRemoved_SD_v04.png',compress_level=2)
-          Image.fromarray(global_mask).save(out/'umbrella_edit_mask_SD_v04.png',compress_level=2)
+          final_path=out/'Hao_Hair_SR_x2_UmbrellaRemoved_SD_v05.png'
+          Image.fromarray(final).save(final_path,compress_level=2)
+          Image.fromarray(global_mask).save(out/'umbrella_edit_mask_SD_v05.png',compress_level=2)
           before=Image.fromarray(src[y0:y1,x0:x1]); after=Image.fromarray(final[y0:y1,x0:x1])
-          qa=Image.new('RGB',(ow*2,oh)); qa.paste(before,(0,0)); qa.paste(after,(ow,0))
-          qa.save(out/'umbrella_before_after_SD_v04.png',compress_level=2)
-          print('FINAL_SIZE',Image.open(out/'Hao_Hair_SR_x2_UmbrellaRemoved_SD_v04.png').size)
-          assert Image.open(out/'Hao_Hair_SR_x2_UmbrellaRemoved_SD_v04.png').size==(2360,4192)
+          qa=Image.new('RGB',(ow*2,oh)); qa.paste(before,(0,0)); qa.paste(after,(ow,0)); qa.save(out/'umbrella_before_after_SD_v05.png',compress_level=2)
+          assert Image.open(final_path).size==(2360,4192)
+          print('FINAL_SIZE',(2360,4192))
           PY
-
-      - name: Upload SD result and QA
+      - name: Upload SD v05 result and QA
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-umbrella-sd-v04
+          name: hao-hair-umbrella-sd-v05
           path: umbrella_sd/output/*.png
           if-no-files-found: error
           retention-days: 7
