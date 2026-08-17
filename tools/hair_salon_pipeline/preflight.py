@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--matte")
     ap.add_argument("--output", required=True)
     ap.add_argument("--short-edge-target", type=int, default=1600)
+    ap.add_argument("--bokeh-review-ratio", type=float, default=0.35)
     args = ap.parse_args()
 
     src_path = Path(args.source)
@@ -59,8 +60,9 @@ def main():
             subject_edge = float(np.mean(edges[subject]))
             background_edge = float(np.mean(edges[background]))
             edge_ratio = float(background_edge / max(subject_edge, 1e-6))
-            # Review only: a busy background relative to the subject may benefit from separation.
-            bokeh_review = "REVIEW" if edge_ratio > 0.72 else "SKIP"
+            # Review only: a relatively busy background may benefit from separation.
+            # This is a routing heuristic, not an automatic visual decision.
+            bokeh_review = "REVIEW" if edge_ratio > args.bokeh_review_ratio else "SKIP"
 
     needs_sr = short_edge < args.short_edge_target
     tone_review = highlight_clip > 0.010 or black_clip > 0.005
@@ -95,6 +97,7 @@ def main():
             "subject_edge_energy": subject_edge,
             "background_edge_energy": background_edge,
             "background_to_subject_edge_ratio": edge_ratio,
+            "bokeh_review_ratio_threshold": args.bokeh_review_ratio,
             "matte_available": matte is not None,
         },
         "route": route,
@@ -102,6 +105,7 @@ def main():
             "no_automatic_inpainting_without_explicit_defect_mask": True,
             "skip_unneeded_expensive_stages": True,
             "preflight_is_a_router_not_a_visual_acceptance_gate": True,
+            "explicit_visual_direction_can_override_router": True,
         },
     }
 
