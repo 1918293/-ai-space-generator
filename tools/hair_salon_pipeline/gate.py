@@ -16,6 +16,7 @@ def main():
     ap.add_argument("--source", required=True)
     ap.add_argument("--candidate")
     ap.add_argument("--matte")
+    ap.add_argument("--hair-mask", help="Optional dedicated source-derived hair mask")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--short-edge-target", type=int, default=1600)
     args = ap.parse_args()
@@ -49,6 +50,8 @@ def main():
             "--matte", args.matte,
             "--output", str(hairqa),
         ]
+        if args.hair_mask:
+            hair_cmd += ["--hair-mask", args.hair_mask]
         hair_rc = run(hair_cmd)
         if hairqa.exists():
             hair_status = json.loads(hairqa.read_text(encoding="utf-8")).get("status", "UNKNOWN")
@@ -73,12 +76,15 @@ def main():
             "source": str(Path(args.source)),
             "candidate": str(Path(args.candidate)) if args.candidate else None,
             "matte": str(Path(args.matte)) if args.matte else None,
+            "hair_mask": str(Path(args.hair_mask)) if args.hair_mask else None,
         },
+        "hair_mask_mode": "DEDICATED" if args.hair_mask else "PROXY_FALLBACK",
         "policy": {
             "private_local_files_supported": True,
             "no_repo_upload_required": True,
             "no_auto_inpainting_without_explicit_defect_mask": True,
             "skip_unneeded_expensive_stages": True,
+            "dedicated_source_derived_hair_mask_preferred": True,
             "candidate_promotion_requires_hair_qa_when_candidate_present": True,
             "visual_acceptance_is_separate": True,
         },
@@ -91,10 +97,12 @@ def main():
         f"Status: **{status}**",
         f"Route: `{' -> '.join(pre.get('route', []))}`",
         f"Hair QA: **{hair_status}**",
+        f"Hair mask mode: **{summary['hair_mask_mode']}**",
         "",
         "## Policy",
         "- Run preflight first and skip unnecessary expensive stages.",
         "- Never auto-inpaint without an explicit defect mask.",
+        "- Prefer a dedicated source-derived hair mask; fallback proxy remains supported.",
         "- Candidate promotion requires hair-fidelity QA when a candidate is supplied.",
         "- Local/private files can be evaluated without committing them to GitHub.",
         "- Visual acceptance remains separate from automated metrics.",
