@@ -1,0 +1,187 @@
+name: Hao Hair Masked Umbrella Removal
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-lama-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  lama-umbrella-mask:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified primary SR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
+      - name: Install CPU LaMa stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'numpy<2' 'Pillow==9.5.0' opencv-python-headless==4.10.0.84
+          pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install 'IOPaint==1.6.0'
+          python - <<'PY'
+          import torch, numpy, PIL
+          print('TORCH', torch.__version__, 'CUDA', torch.cuda.is_available())
+          print('NUMPY', numpy.__version__, 'PIL', PIL.__version__)
+          PY
+
+      - name: Prepare protected local mask and patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          import json
+
+          files=list(Path('work/source_artifact').rglob('*.png'))
+          assert files, 'Primary SR PNG not found in downloaded artifact'
+          src_path=files[0]
+          src=Image.open(src_path).convert('RGB')
+          assert src.size == (2360, 4192), src.size
+
+          crop_box=(1400,2700,2360,4192)
+          patch=src.crop(crop_box)
+          assert patch.size == (960,1492), patch.size
+
+          mask=Image.new('L', patch.size, 0)
+          d=ImageDraw.Draw(mask)
+
+          # Conservative local edit region covering only the umbrella cluster/background clutter.
+          # The subject's arm and clothing are explicitly excluded from the mask.
+          d.rectangle((610,480,959,660), fill=255)
+          umbrella_region=[
+              (610,600),(650,620),(700,640),(760,660),(820,650),(900,640),(959,650),
+              (959,1491),(600,1491),(560,1440),(540,1360),(500,1300),(470,1220),
+              (430,1160),(390,1110),(380,1040),(340,980),(310,920),(340,860),
+              (390,800),(440,750),(490,710),(540,680),(580,650)
+          ]
+          d.polygon(umbrella_region, fill=255)
+
+          person_protect=[
+              (0,350),(300,350),(450,390),(560,440),(600,490),(610,570),(600,650),
+              (560,700),(500,735),(400,760),(250,765),(100,750),(0,730)
+          ]
+          d.polygon(person_protect, fill=0)
+
+          Path('work/patch_input').mkdir(parents=True, exist_ok=True)
+          Path('work/patch_mask').mkdir(parents=True, exist_ok=True)
+          Path('work/patch_output').mkdir(parents=True, exist_ok=True)
+          Path('work/final').mkdir(parents=True, exist_ok=True)
+
+          patch.save('work/patch_input/input.png')
+          mask.save('work/patch_mask/input.png')
+
+          overlay=patch.copy()
+          red=Image.new('RGB', patch.size, (255,0,0))
+          overlay=Image.composite(Image.blend(patch, red, 0.45), patch, mask)
+          overlay.save('work/final/mask_overlay.png')
+
+          meta={
+              'source_file': str(src_path),
+              'source_size': src.size,
+              'crop_box': crop_box,
+              'patch_size': patch.size,
+              'mask_nonzero_pixels': sum(1 for v in mask.getdata() if v),
+              'person_protection': 'explicit polygon exclusion; final compositing preserves every pixel outside global mask'
+          }
+          Path('work/final/mask_metadata.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
+          print(meta)
+          PY
+
+      - name: Run LaMa only on masked patch
+        run: |
+          iopaint run --model=lama --device=cpu \
+            --image=work/patch_input \
+            --mask=work/patch_mask \
+            --output=work/patch_output
+
+      - name: Composite into source and verify untouched pixels
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageFilter
+          import numpy as np, json, hashlib
+
+          src_path=list(Path('work/source_artifact').rglob('*.png'))[0]
+          src=Image.open(src_path).convert('RGB')
+          crop_box=(1400,2700,2360,4192)
+          patch_src=src.crop(crop_box)
+          mask=Image.open('work/patch_mask/input.png').convert('L')
+
+          outs=list(Path('work/patch_output').rglob('*.png')) + list(Path('work/patch_output').rglob('*.jpg')) + list(Path('work/patch_output').rglob('*.jpeg'))
+          assert outs, 'LaMa output not found'
+          patch_out=Image.open(outs[0]).convert('RGB')
+          if patch_out.size != patch_src.size:
+              patch_out=patch_out.resize(patch_src.size, Image.Resampling.LANCZOS)
+
+          # Feather only INSIDE the mask; pixels outside the mask remain exactly source-identical.
+          blurred=mask.filter(ImageFilter.GaussianBlur(radius=3))
+          m=np.asarray(mask, dtype=np.float32)/255.0
+          b=np.asarray(blurred, dtype=np.float32)/255.0
+          a=np.minimum(m,b)[...,None]
+          s=np.asarray(patch_src, dtype=np.float32)
+          o=np.asarray(patch_out, dtype=np.float32)
+          comp=np.clip(o*a + s*(1-a),0,255).astype(np.uint8)
+          comp_img=Image.fromarray(comp,'RGB')
+
+          final=src.copy()
+          final.paste(comp_img, crop_box[:2])
+          out_path=Path('work/final/Hao_Hair_SR_x2_masked_umbrella_lama_v01.png')
+          final.save(out_path)
+
+          src_np=np.asarray(src)
+          final_np=np.asarray(final)
+          gm=np.zeros((4192,2360), dtype=bool)
+          gm[2700:4192,1400:2360]=np.asarray(mask)>0
+          unchanged_exact=bool(np.array_equal(src_np[~gm], final_np[~gm]))
+          changed_pixels=int(np.count_nonzero(np.any(src_np != final_np, axis=2)))
+          mask_pixels=int(np.count_nonzero(gm))
+          assert unchanged_exact, 'Pixels outside mask changed'
+          assert final.size == (2360,4192), final.size
+
+          def sha256(p):
+              h=hashlib.sha256()
+              with open(p,'rb') as f:
+                  for chunk in iter(lambda:f.read(1024*1024),b''):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          report={
+              'source_size':[2360,4192],
+              'output_size':list(final.size),
+              'outside_mask_bit_identical': unchanged_exact,
+              'mask_pixels':mask_pixels,
+              'changed_pixels':changed_pixels,
+              'output_sha256':sha256(out_path),
+              'method':'IOPaint 1.6.0 / LaMa CPU on local patch; composited only inside explicit mask'
+          }
+          Path('work/final/verification.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(report)
+          PY
+
+      - name: Upload masked removal candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-umbrella-lama-v01
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
