@@ -38,10 +38,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libopencv-dev
           python -m pip install --upgrade pip
-          pip install 'numpy<2' pillow
+          pip install 'numpy<2' pillow opencv-python-headless==4.10.0.84
           pip install 'git+https://github.com/invoke-ai/PyPatchMatch.git@master'
           python - <<'PY'
+          import cv2
           from patchmatch import patch_match
+          print('OPENCV', cv2.__version__)
           print('PATCHMATCH_AVAILABLE', patch_match.patchmatch_available)
           assert patch_match.patchmatch_available
           PY
