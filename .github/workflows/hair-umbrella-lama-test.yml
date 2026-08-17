@@ -45,7 +45,7 @@ jobs:
           print('NUMPY', numpy.__version__, 'PIL', PIL.__version__)
           PY
 
-      - name: Prepare content-aware protected mask and patch
+      - name: Prepare content-aware protected mask and full-context patch
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -63,64 +63,61 @@ jobs:
           patch=np.asarray(patch_img)
           assert patch_img.size == (960,1492), patch_img.size
 
-          gray=cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
+          gray=cv2.cvtColor(patch,cv2.COLOR_RGB2GRAY)
           R,G,B=[patch[:,:,i].astype(np.int16) for i in range(3)]
           yy,xx=np.indices(gray.shape)
 
-          # Umbrellas are predominantly very dark fabric with saturated red piping.
-          # Restrict classification to the lower-right clutter zone so black clothing is not selected.
-          dark=gray < 125
-          red=(R>80) & (R>G*1.22) & (R>B*1.12)
-          roi=(xx>260) & (yy>420)
-          candidate=(dark | red) & roi
+          dark=gray < 135
+          red=(R>75)&(R>G*1.18)&(R>B*1.08)
+          roi=(xx>250)&(yy>400)
+          candidate=(dark|red)&roi
 
-          # Protect the person's skin from the edit using a connected skin-color component,
-          # then add spatial protection for the sleeve and left-side clothing.
-          skin=((R>130)&(G>70)&(B<140)&((R-G)>25)&((G-B)>10)&(yy<820)&(xx<680))
+          # Detect the arm as one connected skin component and protect it with a safety margin.
+          skin=((R>130)&(G>70)&(B<145)&((R-G)>20)&((G-B)>5)&(yy<830)&(xx<700))
           n,labels,stats,_=cv2.connectedComponentsWithStats(skin.astype(np.uint8),8)
           skin_keep=np.zeros_like(gray,dtype=np.uint8)
           for i in range(1,n):
-              x,y,w,h,area=stats[i]
               comp=labels==i
-              if area>500 and np.any(comp & (xx>250)&(xx<550)&(yy>450)&(yy<750)):
+              area=stats[i,cv2.CC_STAT_AREA]
+              if area>500 and np.any(comp&(xx>230)&(xx<580)&(yy>430)&(yy<770)):
                   skin_keep[comp]=255
-          skin_keep=cv2.dilate(skin_keep,np.ones((13,13),np.uint8),iterations=1)
+          skin_keep=cv2.dilate(skin_keep,np.ones((17,17),np.uint8),iterations=1)
 
           protect=np.zeros_like(gray,dtype=np.uint8)
           protect[skin_keep>0]=255
-          sleeve=np.array([(0,0),(700,0),(700,500),(640,515),(610,500),(560,450),(450,400),(300,360),(0,340)],np.int32)
+          sleeve=np.array([(0,0),(715,0),(715,500),(690,510),(655,520),(620,510),(580,470),(500,420),(380,380),(250,350),(0,330)],np.int32)
           cv2.fillPoly(protect,[sleeve],255)
-          cv2.rectangle(protect,(0,720),(315,1491),255,-1)
+          cv2.rectangle(protect,(0,700),(320,1491),255,-1)
 
           mask=(candidate.astype(np.uint8)*255)
-          mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((13,13),np.uint8))
-          mask=cv2.dilate(mask,np.ones((15,15),np.uint8),iterations=1)
+          mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((17,17),np.uint8))
+          mask=cv2.dilate(mask,np.ones((31,31),np.uint8),iterations=1)
           mask[protect>0]=0
 
-          # Keep only substantial connected regions linked to the known umbrella zone.
           n,labels,stats,_=cv2.connectedComponentsWithStats((mask>0).astype(np.uint8),8)
           keep=np.zeros_like(mask)
           for i in range(1,n):
-              x,y,w,h,area=stats[i]
-              if area<800:
-                  continue
               comp=labels==i
-              if np.any(comp & (xx>500) & (yy>470)):
+              area=stats[i,cv2.CC_STAT_AREA]
+              if area>800 and np.any(comp&(xx>500)&(yy>450)):
                   keep[comp]=255
           keep[protect>0]=0
           mask=keep
 
-          Path('work/patch_input').mkdir(parents=True, exist_ok=True)
-          Path('work/patch_mask').mkdir(parents=True, exist_ok=True)
-          Path('work/patch_output').mkdir(parents=True, exist_ok=True)
-          Path('work/final').mkdir(parents=True, exist_ok=True)
+          Path('work/patch_input').mkdir(parents=True,exist_ok=True)
+          Path('work/patch_mask').mkdir(parents=True,exist_ok=True)
+          Path('work/patch_output').mkdir(parents=True,exist_ok=True)
+          Path('work/final').mkdir(parents=True,exist_ok=True)
           patch_img.save('work/patch_input/input.png')
           Image.fromarray(mask).save('work/patch_mask/input.png')
+
+          # Force LaMa to use the complete 960x1492 patch instead of IOPaint's default 128px mask crop.
+          Path('work/lama-config.json').write_text(json.dumps({'hd_strategy':'Original'}),encoding='utf-8')
 
           red_layer=np.zeros_like(patch); red_layer[:,:,0]=255
           alpha=(mask.astype(np.float32)/255.0*0.45)[...,None]
           overlay=np.clip(patch*(1-alpha)+red_layer*alpha,0,255).astype(np.uint8)
-          Image.fromarray(overlay).save('work/final/mask_overlay_v02.png')
+          Image.fromarray(overlay).save('work/final/mask_overlay_v03.png')
 
           meta={
               'source_file':str(src_path),
@@ -128,19 +125,21 @@ jobs:
               'crop_box':crop_box,
               'patch_size':patch_img.size,
               'mask_nonzero_pixels':int(np.count_nonzero(mask)),
-              'mask_method':'dark/red content-aware classification + morphology + connected components',
+              'mask_method':'expanded dark/red content-aware selection with arm/sleeve protection',
+              'lama_hd_strategy':'Original',
               'person_protection':'skin component + explicit sleeve/clothing exclusion; final compositing preserves every pixel outside mask'
           }
-          Path('work/final/mask_metadata_v02.json').write_text(json.dumps(meta,indent=2),encoding='utf-8')
+          Path('work/final/mask_metadata_v03.json').write_text(json.dumps(meta,indent=2),encoding='utf-8')
           print(meta)
           PY
 
-      - name: Run LaMa only on masked patch
+      - name: Run LaMa with full patch context
         run: |
           iopaint run --model=lama --device=cpu \
             --image=work/patch_input \
             --mask=work/patch_mask \
-            --output=work/patch_output
+            --output=work/patch_output \
+            --config=work/lama-config.json
 
       - name: Composite into source and verify untouched pixels
         run: |
@@ -155,10 +154,10 @@ jobs:
           patch_src=src.crop(crop_box)
           mask=Image.open('work/patch_mask/input.png').convert('L')
 
-          outs=list(Path('work/patch_output').rglob('*.png')) + list(Path('work/patch_output').rglob('*.jpg')) + list(Path('work/patch_output').rglob('*.jpeg'))
-          assert outs, 'LaMa output not found'
+          outs=list(Path('work/patch_output').rglob('*.png'))+list(Path('work/patch_output').rglob('*.jpg'))+list(Path('work/patch_output').rglob('*.jpeg'))
+          assert outs,'LaMa output not found'
           patch_out=Image.open(outs[0]).convert('RGB')
-          if patch_out.size != patch_src.size:
+          if patch_out.size!=patch_src.size:
               patch_out=patch_out.resize(patch_src.size,Image.Resampling.LANCZOS)
 
           blurred=mask.filter(ImageFilter.GaussianBlur(radius=2))
@@ -171,7 +170,7 @@ jobs:
 
           final=src.copy()
           final.paste(Image.fromarray(comp,'RGB'),crop_box[:2])
-          out_path=Path('work/final/Hao_Hair_SR_x2_masked_umbrella_lama_v02.png')
+          out_path=Path('work/final/Hao_Hair_SR_x2_masked_umbrella_lama_v03.png')
           final.save(out_path)
 
           src_np=np.asarray(src); final_np=np.asarray(final)
@@ -182,24 +181,23 @@ jobs:
           assert outside_identical,'Pixels outside mask changed'
           assert final.size==(2360,4192),final.size
 
-          h=hashlib.sha256(out_path.read_bytes()).hexdigest()
           report={
               'source_size':[2360,4192],
               'output_size':list(final.size),
               'outside_mask_bit_identical':outside_identical,
               'mask_pixels':int(np.count_nonzero(gm)),
               'changed_pixels':changed_pixels,
-              'output_sha256':h,
-              'method':'IOPaint 1.6.0 / LaMa CPU on content-aware local mask; composited only inside mask'
+              'output_sha256':hashlib.sha256(out_path.read_bytes()).hexdigest(),
+              'method':'IOPaint 1.6.0 / LaMa CPU with hd_strategy=Original on protected local mask'
           }
-          Path('work/final/verification_v02.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          Path('work/final/verification_v03.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
           print(report)
           PY
 
       - name: Upload masked removal candidate
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-umbrella-lama-v02
+          name: hao-hair-umbrella-lama-v03
           path: work/final/*
           if-no-files-found: error
           retention-days: 7
