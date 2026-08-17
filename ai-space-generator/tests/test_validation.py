@@ -66,3 +66,25 @@ def test_unchanged_target_is_not_removal_evidence():
     qa = target_modified_ratio(source, result, target)
     assert qa["target_modified_ratio"] == 0.0
     assert qa["semantic_removal_verified"] is False
+
+
+def test_boolean_array_mask_preserves_foreground_pixels():
+    target = np.zeros((40, 40), dtype=bool)
+    target[10:21, 10:21] = True
+    edit = target.copy()
+    protected = np.zeros((40, 40), dtype=bool)
+    qa = validate_remove_target_contract(edit, protected, target)
+    assert qa["hard_gate_pass"] is True
+    assert qa["remove_target_pixels"] == int(np.count_nonzero(target))
+
+
+def test_target_modified_ratio_supports_grayscale_arrays():
+    target = np.zeros((40, 40), dtype=bool)
+    target[10:21, 10:21] = True
+    source = np.zeros((40, 40), dtype=np.uint8)
+    result = source.copy()
+    result[target] = 32
+    qa = target_modified_ratio(source, result, target, threshold=8)
+    assert qa["target_pixels_changed"] == int(np.count_nonzero(target))
+    assert qa["target_modified_ratio"] == 1.0
+    assert qa["semantic_removal_verified"] is False

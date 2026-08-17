@@ -16,6 +16,8 @@ def _binary_mask(mask: Image.Image | np.ndarray) -> np.ndarray:
         array = np.asarray(mask)
         if array.ndim == 3:
             array = np.max(array, axis=2)
+    if array.dtype == np.bool_:
+        return array.copy()
     return array > 8
 
 
@@ -110,7 +112,14 @@ def target_modified_ratio(
     if src.shape != out.shape or src.shape[:2] != target.shape:
         raise ValueError("Source, result, and remove-target mask must have matching dimensions.")
 
-    delta = np.max(np.abs(src.astype(np.int16) - out.astype(np.int16)), axis=2)
+    diff = np.abs(src.astype(np.int16) - out.astype(np.int16))
+    if diff.ndim == 2:
+        delta = diff
+    elif diff.ndim == 3:
+        delta = np.max(diff, axis=2)
+    else:
+        raise ValueError("Source and result must be 2-D grayscale or 3-D image arrays.")
+
     target_pixels = int(np.count_nonzero(target))
     changed_pixels = int(np.count_nonzero((delta > int(threshold)) & target))
     ratio = float(changed_pixels) / float(target_pixels) if target_pixels else 0.0
