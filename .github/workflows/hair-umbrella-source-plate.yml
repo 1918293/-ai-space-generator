@@ -1,0 +1,180 @@
+name: Hao Hair Source Plate Umbrella Removal
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-source-plate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  source-grounded-clean-plate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified primary SR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
+      - name: Install image processing stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'numpy<2' pillow opencv-python-headless==4.10.0.84
+
+      - name: Build source-grounded clean plate and protected mask
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageFilter, ImageDraw
+          import numpy as np
+          import cv2, json, hashlib
+
+          files=list(Path('work/source_artifact').rglob('*.png'))
+          assert files, 'Primary SR PNG not found'
+          src_path=files[0]
+          src=Image.open(src_path).convert('RGB')
+          assert src.size==(2360,4192),src.size
+          arr=np.asarray(src)
+          H,W=arr.shape[:2]
+          gray=cv2.cvtColor(arr,cv2.COLOR_RGB2GRAY)
+
+          # 1. Recover the visible dark trim trajectory above the umbrella cluster.
+          ys=[]; xs=[]
+          for y in range(2300,3090,10):
+              strip=gray[y,1980:2225].astype(np.float32)
+              moving=np.convolve(strip,np.ones(11,dtype=np.float32)/11.0,mode='same')
+              idx=int(np.argmin(moving[10:-10]))+10
+              if strip[idx] < 110:
+                  ys.append(y); xs.append(1980+idx)
+          assert len(xs)>50,'Insufficient trim samples'
+          trim_fit=np.polyfit(ys,xs,1)
+
+          # 2. Use only clean pixels from this same photo to build a background plate.
+          #    Clean source: upper-right wood + dark trim + white wall.
+          x0,x1=1650,2360
+          bg=arr[0:1800,x0:x1].copy()
+          bg_gray=cv2.cvtColor(bg,cv2.COLOR_RGB2GRAY)
+          src_trim=[]
+          for sy in range(bg.shape[0]):
+              strip=bg_gray[sy,350:690].astype(np.float32)
+              moving=np.convolve(strip,np.ones(11,dtype=np.float32)/11.0,mode='same')
+              idx=int(np.argmin(moving[10:-10]))+10+350
+              src_trim.append(idx)
+          src_trim=np.asarray(src_trim,dtype=np.float32)
+          src_trim=cv2.blur(src_trim.reshape(-1,1),(1,51)).ravel()
+
+          plate=arr.copy()
+          for y in range(2300,H):
+              t=(y-2300)/(H-2300-1)
+              sy=int(t*(bg.shape[0]-1))
+              target_line=float(np.polyval(trim_fit,y))
+              source_line=float(x0+src_trim[sy])
+              delta=source_line-target_line
+              out_x=np.arange(x0,x1)
+              sample_x=np.clip((out_x+delta-x0).astype(np.int32),0,bg.shape[1]-1)
+              plate[y,x0:x1]=bg[sy,sample_x]
+
+          # 3. Continue the visible floor/threshold under the wall using another clean source crop.
+          floor_src=np.asarray(src.crop((1700,4080,2000,4192)))
+          for x in range(1660,2360):
+              y_floor=int(4025+0.23*(x-1680))
+              y_floor=max(4025,min(H,y_floor))
+              if y_floor < H:
+                  floor=np.asarray(Image.fromarray(floor_src).resize((710,H-y_floor),Image.Resampling.BICUBIC))
+                  plate[y_floor:H,x]=floor[:,min(709,max(0,x-1650))]
+
+          # 4. Local edit mask: lower-right umbrella area only.
+          mask=np.zeros((H,W),dtype=np.uint8)
+          cv2.rectangle(mask,(1660,3100),(2359,4191),255,-1)
+
+          # Explicit person protection. These pixels are never edited.
+          protect=np.zeros_like(mask)
+          sleeve=np.array([
+              (1580,2250),(2030,2250),(2065,3040),(2060,3140),(2035,3185),
+              (1990,3180),(1930,3140),(1840,3100),(1740,3060),(1650,3035),(1580,3000)
+          ],np.int32)
+          cv2.fillPoly(protect,[sleeve],255)
+          arm=np.array([
+              (1400,3045),(1530,3055),(1700,3065),(1870,3090),(1990,3140),(2045,3195),
+              (2045,3215),(2010,3250),(1980,3290),(1940,3325),(1900,3355),(1860,3380),
+              (1810,3402),(1750,3422),(1660,3442),(1530,3450),(1430,3430),(1380,3380),(1360,3300)
+          ],np.int32)
+          cv2.fillPoly(protect,[arm],255)
+          cv2.rectangle(protect,(0,3100),(1665,4191),255,-1)
+          mask[protect>0]=0
+
+          # 5. Feather only inward. Every pixel outside the binary mask remains source-identical.
+          mask_img=Image.fromarray(mask)
+          blurred=np.asarray(mask_img.filter(ImageFilter.GaussianBlur(radius=12)),dtype=np.float32)/255.0
+          hard=mask.astype(np.float32)/255.0
+          alpha=np.minimum(hard,blurred)[...,None]
+          out=np.clip(plate.astype(np.float32)*alpha+arr.astype(np.float32)*(1-alpha),0,255).astype(np.uint8)
+
+          Path('work/final').mkdir(parents=True,exist_ok=True)
+          out_path=Path('work/final/Hao_Hair_SR_x2_umbrella_source_plate_v13.png')
+          Image.fromarray(out,'RGB').save(out_path)
+          Image.fromarray(mask).save('work/final/edit_mask_v13.png')
+          Image.fromarray(protect).save('work/final/person_protect_v13.png')
+
+          # Visual QA crop and mask overlay for review.
+          crop_box=(1200,2300,2360,4192)
+          qa=Image.fromarray(out,'RGB').crop(crop_box)
+          qa.thumbnail((858,1400))
+          qa.save('work/final/qa_lower_right_v13.jpg',quality=94)
+          overlay=arr.copy()
+          overlay[mask>0]=(0.55*overlay[mask>0]+0.45*np.array([255,0,0])).astype(np.uint8)
+          ov=Image.fromarray(overlay,'RGB').crop(crop_box)
+          ov.thumbnail((858,1400))
+          ov.save('work/final/mask_overlay_v13.jpg',quality=92)
+
+          # 6. Hard verification gates.
+          outside=mask==0
+          outside_identical=bool(np.array_equal(arr[outside],out[outside]))
+          protected_identical=bool(np.array_equal(arr[protect>0],out[protect>0]))
+          assert outside_identical,'Pixels outside edit mask changed'
+          assert protected_identical,'Protected person pixels changed'
+          assert Image.open(out_path).size==(2360,4192)
+
+          changed=int(np.count_nonzero(np.any(arr!=out,axis=2)))
+          report={
+              'method':'source-grounded clean plate; no generative model',
+              'source_size':[2360,4192],
+              'output_size':[2360,4192],
+              'background_source_upper_right':[1650,0,2360,1800],
+              'floor_source':[1700,4080,2000,4192],
+              'trim_fit_coefficients':[float(trim_fit[0]),float(trim_fit[1])],
+              'edit_mask_pixels':int(np.count_nonzero(mask)),
+              'protected_person_pixels':int(np.count_nonzero(protect)),
+              'changed_pixels':changed,
+              'outside_mask_bit_identical':outside_identical,
+              'protected_person_bit_identical':protected_identical,
+              'output_sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
+          }
+          Path('work/final/verification_v13.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload source-grounded candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-umbrella-source-plate-v13
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
