@@ -1,0 +1,153 @@
+name: Hao Hair Umbrella Masked LaMa Removal
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-lama.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  masked-lama-removal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install CPU inference stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==1.26.4 pillow==12.3.0
+          pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Fetch verified 2x SR source
+        run: |
+          mkdir -p umbrella_lama/input umbrella_lama/output umbrella_lama/model
+          curl -L --fail --retry 3 -o umbrella_lama/input/source.png 'https://at.adobe.com/AZgcnQiiGqXVd0K2'
+          python - <<'PY'
+          from PIL import Image
+          im = Image.open('umbrella_lama/input/source.png')
+          print('SOURCE_SIZE', im.size, im.mode)
+          assert im.size == (2360, 4192), im.size
+          PY
+
+      - name: Download Big-LaMa TorchScript model
+        run: |
+          curl -L --fail --retry 3 \
+            -o umbrella_lama/model/big-lama.pt \
+            'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt'
+          ls -lh umbrella_lama/model/big-lama.pt
+
+      - name: Run local masked inpainting and exact outside-mask composite
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFilter
+          import numpy as np
+          import torch
+
+          src_path = Path('umbrella_lama/input/source.png')
+          out_dir = Path('umbrella_lama/output')
+          out_dir.mkdir(parents=True, exist_ok=True)
+
+          src_img = Image.open(src_path).convert('RGB')
+          src = np.array(src_img)
+          H, W = src.shape[:2]
+          assert (W, H) == (2360, 4192)
+
+          # Local ROI around the umbrella cluster only. All pixels outside this ROI remain untouched.
+          x0, y0, x1, y1 = 1600, 2900, 2360, 4192
+          crop = src[y0:y1, x0:x1].copy()
+          ch, cw = crop.shape[:2]
+          assert (cw, ch) == (760, 1292)
+
+          # Hand-audited umbrella mask from the verified SR image.
+          mask_img = Image.new('L', (cw, ch), 0)
+          draw = ImageDraw.Draw(mask_img)
+          umbrella_poly = [
+              (455,280),(520,280),(530,420),(570,300),(610,300),
+              (615,480),(665,420),(680,290),(720,280),(759,330),
+              (759,1291),(390,1291),(330,1120),(280,1010),(230,880),
+              (100,720),(160,650),(240,570),(300,500),(350,470),(410,380)
+          ]
+          draw.polygon(umbrella_poly, fill=255)
+          # Include the narrow dangling black umbrella/rack segment at lower-left of the cluster.
+          draw.polygon([(185,820),(250,820),(250,1105),(180,1105)], fill=255)
+
+          # Small safety dilation keeps red trim/edge remnants inside the edited region.
+          edit_mask_img = mask_img.filter(ImageFilter.MaxFilter(15))
+          edit_mask = np.array(edit_mask_img)
+
+          # Pad crop/mask to LaMa's modulo-8 requirement.
+          pad_h = (8 - (ch % 8)) % 8
+          pad_w = (8 - (cw % 8)) % 8
+          crop_pad = np.pad(crop, ((0,pad_h),(0,pad_w),(0,0)), mode='symmetric')
+          mask_pad = np.pad(edit_mask, ((0,pad_h),(0,pad_w)), mode='constant')
+
+          image_t = torch.from_numpy(crop_pad.transpose(2,0,1).astype('float32') / 255.0).unsqueeze(0)
+          mask_t = torch.from_numpy((mask_pad.astype('float32') / 255.0)[None,None,:,:])
+          mask_t = (mask_t > 0).float()
+
+          model = torch.jit.load('umbrella_lama/model/big-lama.pt', map_location='cpu').eval()
+          with torch.inference_mode():
+              pred = model(image_t, mask_t)
+          pred = pred[0].permute(1,2,0).cpu().numpy()
+          pred = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
+          pred = pred[:ch, :cw]
+
+          # Feather only INSIDE the dilated mask. Outside-mask pixels are byte-identical to source.
+          feather = np.array(edit_mask_img.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32) / 255.0
+          feather *= (edit_mask > 0).astype(np.float32)
+          alpha = feather[..., None]
+          blended = np.clip(crop.astype(np.float32) * (1.0 - alpha) + pred.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
+
+          final = src.copy()
+          roi = final[y0:y1, x0:x1]
+          inside = edit_mask > 0
+          roi[inside] = blended[inside]
+          final[y0:y1, x0:x1] = roi
+
+          # Full-size mask for deterministic QA.
+          global_mask = np.zeros((H, W), dtype=np.uint8)
+          global_mask[y0:y1, x0:x1] = edit_mask
+
+          diff = np.any(final != src, axis=2)
+          outside_changes = int(np.count_nonzero(diff & (global_mask == 0)))
+          inside_changes = int(np.count_nonzero(diff & (global_mask > 0)))
+          print('OUTSIDE_MASK_CHANGED_PIXELS', outside_changes)
+          print('INSIDE_MASK_CHANGED_PIXELS', inside_changes)
+          assert outside_changes == 0, outside_changes
+          assert inside_changes > 0, inside_changes
+
+          Image.fromarray(final).save(out_dir / 'Hao_Hair_SR_x2_UmbrellaRemoved_LaMa_v01.png', compress_level=2)
+          Image.fromarray(global_mask).save(out_dir / 'umbrella_edit_mask_v01.png', compress_level=2)
+
+          # QA crop: before | after.
+          before = Image.fromarray(src[y0:y1, x0:x1])
+          after = Image.fromarray(final[y0:y1, x0:x1])
+          qa = Image.new('RGB', (cw * 2, ch))
+          qa.paste(before, (0,0))
+          qa.paste(after, (cw,0))
+          qa.save(out_dir / 'umbrella_before_after_QA_v01.png', compress_level=2)
+
+          print('FINAL_SIZE', Image.open(out_dir / 'Hao_Hair_SR_x2_UmbrellaRemoved_LaMa_v01.png').size)
+          assert Image.open(out_dir / 'Hao_Hair_SR_x2_UmbrellaRemoved_LaMa_v01.png').size == (2360, 4192)
+          PY
+
+      - name: Upload masked removal result and QA
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-umbrella-lama-v01
+          path: umbrella_lama/output/*.png
+          if-no-files-found: error
+          retention-days: 7
