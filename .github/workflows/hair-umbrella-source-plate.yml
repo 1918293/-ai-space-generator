@@ -38,24 +38,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install 'numpy<2' pillow opencv-python-headless==4.10.0.84
 
-      - name: Build seamless source-grounded clean plate and protected mask
+      - name: Build irregular-mask source-grounded clean-plate variants
         run: |
           python - <<'PY'
           from pathlib import Path
-          from PIL import Image, ImageFilter
+          from PIL import Image, ImageFilter, ImageDraw
           import numpy as np
           import cv2, json, hashlib
 
-          files=list(Path('work/source_artifact').rglob('*.png'))
-          assert files, 'Primary SR PNG not found'
-          src_path=files[0]
+          files=[]
+          for p in Path('work/source_artifact').rglob('*.png'):
+              try:
+                  if Image.open(p).size==(2360,4192): files.append(p)
+              except Exception:
+                  pass
+          assert files,'Primary SR PNG not found'
+          src_path=max(files,key=lambda p:p.stat().st_size)
           src=Image.open(src_path).convert('RGB')
-          assert src.size==(2360,4192),src.size
           arr=np.asarray(src)
           H,W=arr.shape[:2]
+          assert (W,H)==(2360,4192)
           gray=cv2.cvtColor(arr,cv2.COLOR_RGB2GRAY)
 
-          # 1. Recover the visible dark trim trajectory above the umbrella cluster.
+          # 1. Recover the dark vertical trim trajectory from visible source pixels above the umbrella.
           ys=[]; xs=[]
           for y in range(2300,3090,10):
               strip=gray[y,1980:2225].astype(np.float32)
@@ -66,7 +71,7 @@ jobs:
           assert len(xs)>50,'Insufficient trim samples'
           trim_fit=np.polyfit(ys,xs,1)
 
-          # 2. Rebuild wood + dark trim using only clean upper-right pixels from this same photo.
+          # 2. Rebuild the wood/trim plane only from clean upper-right pixels of this exact photo.
           x0,x1=1650,2360
           bg=arr[0:1800,x0:x1].copy()
           bg_gray=cv2.cvtColor(bg,cv2.COLOR_RGB2GRAY)
@@ -90,10 +95,7 @@ jobs:
               sample_x=np.clip((out_x+delta-x0).astype(np.int32),0,bg.shape[1]-1)
               plate[y,x0:x1]=bg[sy,sample_x]
 
-          # 3. Seamless white-wall continuation.
-          # Anchor at y=3100, where the original wall is clean and unobstructed. Extrapolate
-          # only a very low-frequency vertical luminance/color trend, while shifting source
-          # columns with the observed trim perspective so newly exposed wall remains coherent.
+          # 3. Continue the white wall from a clean source row, aligned to trim perspective.
           smooth=cv2.GaussianBlur(arr,(7,31),sigmaX=2,sigmaY=8).astype(np.float32)
           white_anchor_y=3100
           earlier_y=2880
@@ -101,7 +103,6 @@ jobs:
           white_slope=(white_base-smooth[earlier_y])/(white_anchor_y-earlier_y)
           white_slope=np.clip(white_slope,-0.02,0.02)
           trim_anchor=float(np.polyval(trim_fit,white_anchor_y))
-
           for y in range(white_anchor_y,H):
               target_trim=float(np.polyval(trim_fit,y))
               start=max(x0,min(W-1,int(target_trim+28)))
@@ -111,7 +112,7 @@ jobs:
               wall=white_base[source_x]+white_slope[source_x]*(y-white_anchor_y)
               plate[y,start:W]=np.clip(wall,0,255)
 
-          # 4. Continue the visible floor/threshold under the reconstructed wall.
+          # 4. Continue the visible floor/threshold beneath the reconstructed wall.
           floor_src=np.asarray(src.crop((1700,4080,2000,4192)))
           for x in range(1660,2360):
               y_floor=int(4025+0.23*(x-1680))
@@ -120,12 +121,8 @@ jobs:
                   floor=np.asarray(Image.fromarray(floor_src).resize((710,H-y_floor),Image.Resampling.BICUBIC))
                   plate[y_floor:H,x]=floor[:,min(709,max(0,x-1650))]
 
-          # 5. Local edit mask: lower-right umbrella area only.
-          mask=np.zeros((H,W),dtype=np.uint8)
-          cv2.rectangle(mask,(1660,3100),(2359,4191),255,-1)
-
-          # Explicit person protection. These pixels are never edited.
-          protect=np.zeros_like(mask)
+          # 5. Explicit person protection — never edit these pixels.
+          protect=np.zeros((H,W),dtype=np.uint8)
           sleeve=np.array([
               (1580,2250),(2030,2250),(2065,3040),(2060,3140),(2035,3185),
               (1990,3180),(1930,3140),(1840,3100),(1740,3060),(1650,3035),(1580,3000)
@@ -138,68 +135,91 @@ jobs:
           ],np.int32)
           cv2.fillPoly(protect,[arm],255)
           cv2.rectangle(protect,(0,3100),(1665,4191),255,-1)
-          mask[protect>0]=0
 
-          # 6. Feather only inward. Every pixel outside the binary mask remains source-identical.
-          mask_img=Image.fromarray(mask)
-          blurred=np.asarray(mask_img.filter(ImageFilter.GaussianBlur(radius=12)),dtype=np.float32)/255.0
-          hard=mask.astype(np.float32)/255.0
-          alpha=np.minimum(hard,blurred)[...,None]
-          out=np.clip(plate*alpha+arr.astype(np.float32)*(1-alpha),0,255).astype(np.uint8)
+          # 6. Object-shaped umbrella mask. This removes the v15 rectangular top boundary.
+          roi_x0,roi_y0=1600,2900
+          roi_w,roi_h=760,1292
+          base_roi=Image.new('L',(roi_w,roi_h),0)
+          d=ImageDraw.Draw(base_roi)
+          d.polygon([
+              (455,280),(520,280),(530,420),(570,300),(610,300),
+              (615,480),(665,420),(680,290),(720,280),(759,330),
+              (759,1291),(390,1291),(330,1120),(280,1010),(230,880),
+              (100,720),(160,650),(240,570),(300,500),(350,470),(410,380)
+          ],fill=255)
+          d.polygon([(175,805),(260,805),(260,1120),(170,1120)],fill=255)
+          base=np.zeros((H,W),dtype=np.uint8)
+          base[roi_y0:roi_y0+roi_h,roi_x0:roi_x0+roi_w]=np.asarray(base_roi,dtype=np.uint8)
 
-          Path('work/final').mkdir(parents=True,exist_ok=True)
-          out_path=Path('work/final/Hao_Hair_SR_x2_umbrella_source_plate_v15.png')
-          Image.fromarray(out,'RGB').save(out_path)
-          Image.fromarray(mask).save('work/final/edit_mask_v15.png')
-          Image.fromarray(protect).save('work/final/person_protect_v15.png')
+          out_dir=Path('work/final'); out_dir.mkdir(parents=True,exist_ok=True)
+          Image.fromarray(protect).save(out_dir/'person_protect_v16.png')
+          reports={}
 
-          # Visual QA views.
-          crop_box=(1200,2300,2360,4192)
-          qa=Image.fromarray(out,'RGB').crop(crop_box)
-          qa.thumbnail((858,1400))
-          qa.save('work/final/qa_lower_right_v15.jpg',quality=94)
-          full=Image.fromarray(out,'RGB').copy()
-          full.thumbnail((900,1600))
-          full.save('work/final/qa_full_v15.jpg',quality=94)
-          overlay=arr.copy()
-          overlay[mask>0]=(0.55*overlay[mask>0]+0.45*np.array([255,0,0])).astype(np.uint8)
-          ov=Image.fromarray(overlay,'RGB').crop(crop_box)
-          ov.thumbnail((858,1400))
-          ov.save('work/final/mask_overlay_v15.jpg',quality=92)
+          # Test modest dilation/feather pairs instead of one arbitrary mask boundary.
+          for dilation,feather in [(6,10),(12,18),(18,26)]:
+              roi_mask=base_roi.filter(ImageFilter.MaxFilter(2*dilation+1))
+              mask=np.zeros((H,W),dtype=np.uint8)
+              mask[roi_y0:roi_y0+roi_h,roi_x0:roi_x0+roi_w]=np.asarray(roi_mask,dtype=np.uint8)
+              mask[protect>0]=0
 
-          # 7. Hard verification gates.
-          outside=mask==0
-          outside_identical=bool(np.array_equal(arr[outside],out[outside]))
-          protected_identical=bool(np.array_equal(arr[protect>0],out[protect>0]))
-          assert outside_identical,'Pixels outside edit mask changed'
-          assert protected_identical,'Protected person pixels changed'
-          assert Image.open(out_path).size==(2360,4192)
+              mask_img=Image.fromarray(mask,'L')
+              blurred=np.asarray(mask_img.filter(ImageFilter.GaussianBlur(radius=feather)),dtype=np.float32)/255.0
+              hard=mask.astype(np.float32)/255.0
+              alpha=np.minimum(hard,blurred)[...,None]
+              out=np.clip(plate*alpha+arr.astype(np.float32)*(1-alpha),0,255).astype(np.uint8)
 
-          changed=int(np.count_nonzero(np.any(arr!=out,axis=2)))
+              outside=mask==0
+              outside_identical=bool(np.array_equal(arr[outside],out[outside]))
+              protected_identical=bool(np.array_equal(arr[protect>0],out[protect>0]))
+              assert outside_identical,'Pixels outside irregular mask changed'
+              assert protected_identical,'Protected person pixels changed'
+
+              label=f'd{dilation:02d}_f{feather:02d}'
+              out_path=out_dir/f'Hao_Hair_SR_x2_umbrella_source_plate_v16_{label}.png'
+              Image.fromarray(out,'RGB').save(out_path,compress_level=2)
+              Image.fromarray(mask,'L').save(out_dir/f'edit_mask_v16_{label}.png')
+
+              # Before / after at equal scale for strict visual inspection.
+              crop_box=(1200,2300,2360,4192)
+              bef=Image.fromarray(arr,'RGB').crop(crop_box); aft=Image.fromarray(out,'RGB').crop(crop_box)
+              bef.thumbnail((650,1060)); aft.thumbnail((650,1060))
+              qa=Image.new('RGB',(bef.width+aft.width,max(bef.height,aft.height)),(255,255,255))
+              qa.paste(bef,(0,0)); qa.paste(aft,(bef.width,0)); qa.save(out_dir/f'qa_before_after_v16_{label}.jpg',quality=95)
+
+              overlay=arr.astype(np.float32).copy()
+              overlay[mask>0]=0.55*overlay[mask>0]+0.45*np.array([255,0,0],dtype=np.float32)
+              overlay[protect>0]=0.65*overlay[protect>0]+0.35*np.array([0,255,0],dtype=np.float32)
+              ov=Image.fromarray(np.clip(overlay,0,255).astype(np.uint8),'RGB').crop(crop_box)
+              ov.thumbnail((858,1400)); ov.save(out_dir/f'qa_mask_overlay_v16_{label}.jpg',quality=92)
+
+              reports[label]={
+                  'dilation_pixels':dilation,'feather_radius':feather,
+                  'edit_mask_pixels':int(np.count_nonzero(mask)),
+                  'changed_pixels':int(np.count_nonzero(np.any(arr!=out,axis=2))),
+                  'outside_mask_bit_identical':outside_identical,
+                  'protected_person_bit_identical':protected_identical,
+                  'sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
+              }
+
           report={
-              'method':'source-grounded clean plate with perspective-aligned white-wall continuation; no generative model',
-              'source_size':[2360,4192],
-              'output_size':[2360,4192],
+              'status':'VISUAL_CANDIDATES_NOT_USER_ACCEPTED',
+              'method':'same-photo source-grounded perspective plate + object-shaped umbrella mask; no generative model',
+              'source_size':[W,H],
               'background_source_upper_right':[1650,0,2360,1800],
               'white_wall_anchor_y':white_anchor_y,
-              'white_wall_trend_source':[earlier_y,white_anchor_y],
               'floor_source':[1700,4080,2000,4192],
               'trim_fit_coefficients':[float(trim_fit[0]),float(trim_fit[1])],
-              'edit_mask_pixels':int(np.count_nonzero(mask)),
               'protected_person_pixels':int(np.count_nonzero(protect)),
-              'changed_pixels':changed,
-              'outside_mask_bit_identical':outside_identical,
-              'protected_person_bit_identical':protected_identical,
-              'output_sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
+              'variants':reports
           }
-          Path('work/final/verification_v15.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          (out_dir/'verification_v16.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
           print(json.dumps(report,indent=2))
           PY
 
-      - name: Upload source-grounded candidate
+      - name: Upload irregular-mask source-plate candidates
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-umbrella-source-plate-v15
+          name: hao-hair-umbrella-source-plate-v16
           path: work/final/*
           if-no-files-found: error
           retention-days: 7
