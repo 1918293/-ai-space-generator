@@ -58,13 +58,15 @@ jobs:
           PY
           } 2>&1 | tee work/environment.log
 
-      - name: Patch wrapper for CPU-safe execution, variable probe size, grayscale masks, and encoder device
+      - name: Patch wrapper and DDIM for CPU-safe execution
         if: always()
         run: |
           cd work/simple-leftrefill
           cp simple_leftrefill_inpainting/LeftRefill/wrapper.py ../wrapper_official.py
+          cp simple_leftrefill_inpainting/LeftRefill/ldm/models/diffusion/ddim.py ../ddim_official.py
           python - <<'PY'
           from pathlib import Path
+
           p=Path('simple_leftrefill_inpainting/LeftRefill/wrapper.py')
           s=p.read_text()
           s=s.replace('import sys\n', 'import sys\nfrom contextlib import nullcontext\n')
@@ -73,17 +75,26 @@ jobs:
           s=s.replace('torch.cuda.manual_seed(42)\n        torch.cuda.manual_seed_all(42)', 'if torch.cuda.is_available():\n            torch.cuda.manual_seed(42)\n            torch.cuda.manual_seed_all(42)')
           old="im_padded = Image.fromarray(np.pad(np.array(input_image), ((0, pad_h), (0, pad_w), (0, 0)), mode='edge'))"
           new="arr = np.array(input_image)\n        pad_spec = ((0, pad_h), (0, pad_w), (0, 0)) if arr.ndim == 3 else ((0, pad_h), (0, pad_w))\n        im_padded = Image.fromarray(np.pad(arr, pad_spec, mode='edge'))"
-          assert old in s, 'expected upstream RGB-only pad_image implementation not found'
+          assert old in s
           s=s.replace(old,new)
           old="model = model.to(device)\n        model.eval()"
           new="model = model.to(device)\n        if hasattr(model, 'cond_stage_model') and hasattr(model.cond_stage_model, 'device'):\n            model.cond_stage_model.device = device\n        model.eval()"
-          assert old in s, 'expected upstream model.to(device) block not found'
+          assert old in s
           s=s.replace(old,new)
           p.write_text(s)
+
+          p=Path('simple_leftrefill_inpainting/LeftRefill/ldm/models/diffusion/ddim.py')
+          s=p.read_text()
+          old='''    def register_buffer(self, name, attr):\n        if type(attr) == torch.Tensor:\n            if attr.device != torch.device("cuda"):\n                attr = attr.to(torch.device("cuda"))\n        setattr(self, name, attr)'''
+          new='''    def register_buffer(self, name, attr):\n        if type(attr) == torch.Tensor:\n            device = self.model.betas.device\n            if attr.device != device:\n                attr = attr.to(device)\n        setattr(self, name, attr)'''
+          assert old in s, 'expected CUDA-pinned DDIM register_buffer not found'
+          p.write_text(s.replace(old,new))
           PY
-          python -m py_compile simple_leftrefill_inpainting/LeftRefill/wrapper.py
+          python -m py_compile simple_leftrefill_inpainting/LeftRefill/wrapper.py simple_leftrefill_inpainting/LeftRefill/ldm/models/diffusion/ddim.py
           diff -u ../wrapper_official.py simple_leftrefill_inpainting/LeftRefill/wrapper.py > ../cpu_probe_patch.diff || true
+          diff -u ../ddim_official.py simple_leftrefill_inpainting/LeftRefill/ldm/models/diffusion/ddim.py > ../ddim_cpu_patch.diff || true
           cat ../cpu_probe_patch.diff
+          cat ../ddim_cpu_patch.diff
 
       - name: Prepare target, broad umbrella mask, source-derived clean reference, and person protection
         if: always()
@@ -99,15 +110,11 @@ jobs:
           target_box=(312,2144,2360,4192)
           target=src.crop(target_box)
           target.save('work/leftrefill_inputs/target.png')
-
           reference_box=(1500,900,2360,1760)
-          ref=src.crop(reference_box)
-          ref.save('work/leftrefill_inputs/reference.png')
+          src.crop(reference_box).save('work/leftrefill_inputs/reference.png')
 
           mask=Image.new('L',(2048,2048),0); d=ImageDraw.Draw(mask)
-          poly=[(1110,580),(1320,540),(1540,560),(1760,550),(1960,590),(2047,640),
-                (2047,2047),(1050,2047),(1010,1780),(1025,1500),(1060,1240),(1080,980),(1060,760)]
-          d.polygon(poly,fill=255)
+          d.polygon([(1110,580),(1320,540),(1540,560),(1760,550),(1960,590),(2047,640),(2047,2047),(1050,2047),(1010,1780),(1025,1500),(1060,1240),(1080,980),(1060,760)],fill=255)
           d.polygon([(990,1200),(1160,1180),(1200,1900),(1000,1930)],fill=255)
           mask.save('work/leftrefill_inputs/model_mask.png')
 
@@ -119,10 +126,7 @@ jobs:
           dp.polygon([T(p) for p in arm],fill=255)
           dp.rectangle((0,3100-target_box[1],1665-target_box[0],2047),fill=255)
           protect.save('work/leftrefill_inputs/person_protect.png')
-
-          rep={'target_box':target_box,'reference_box':reference_box,'target_size':target.size,
-               'mask_fraction':float((np.asarray(mask)>0).mean()),
-               'protected_overlap_pixels':int(((np.asarray(mask)>0)&(np.asarray(protect)>0)).sum())}
+          rep={'target_box':target_box,'reference_box':reference_box,'target_size':target.size,'mask_fraction':float((np.asarray(mask)>0).mean()),'protected_overlap_pixels':int(((np.asarray(mask)>0)&(np.asarray(protect)>0)).sum())}
           Path('work/leftrefill_input_report.json').write_text(json.dumps(rep,indent=2))
           print(json.dumps(rep,indent=2))
           PY
@@ -144,21 +148,13 @@ jobs:
           from PIL import Image
           import torch, gc
           from simple_leftrefill_inpainting import LeftRefillGuidance
-
           root=Path('../leftrefill_inputs')
           print('START_INIT CPU',not torch.cuda.is_available())
-          model=LeftRefillGuidance()
-          model.target_image_size=256
+          model=LeftRefillGuidance(); model.target_image_size=256
           print('MODEL_READY target',model.target_image_size)
           print('COND_STAGE_DEVICE',getattr(model.sampler.model.cond_stage_model,'device',None))
-          result=model.predict(
-              Image.open(root/'target.png').convert('RGB'),
-              Image.open(root/'model_mask.png').convert('L'),
-              Image.open(root/'reference.png').convert('RGB'),
-              ddim_steps=6,
-              scale=2.5,
-              seed=42,
-          )
+          print('DDIM_MODEL_DEVICE',model.sampler.model.betas.device)
+          result=model.predict(Image.open(root/'target.png').convert('RGB'),Image.open(root/'model_mask.png').convert('L'),Image.open(root/'reference.png').convert('RGB'),ddim_steps=6,scale=2.5,seed=42)
           Path('../leftrefill_output').mkdir(exist_ok=True)
           result.save('../leftrefill_output/raw_leftrefill_256.png')
           print('OUTPUT_SIZE',result.size)
@@ -173,44 +169,28 @@ jobs:
           from pathlib import Path
           from PIL import Image
           import numpy as np, json, hashlib
-          root=Path('work')
-          target=Image.open(root/'leftrefill_inputs/target.png').convert('RGB')
-          mask=Image.open(root/'leftrefill_inputs/model_mask.png').convert('L')
-          protect=Image.open(root/'leftrefill_inputs/person_protect.png').convert('L')
-          rawp=root/'leftrefill_output/raw_leftrefill_256.png'
+          root=Path('work'); target=Image.open(root/'leftrefill_inputs/target.png').convert('RGB'); mask=Image.open(root/'leftrefill_inputs/model_mask.png').convert('L'); protect=Image.open(root/'leftrefill_inputs/person_protect.png').convert('L'); rawp=root/'leftrefill_output/raw_leftrefill_256.png'
           log=(root/'leftrefill_inference.log').read_text(errors='ignore') if (root/'leftrefill_inference.log').exists() else ''
-          verdict={'raw_output_exists':rawp.exists() and rawp.stat().st_size>0,
-                   'timed_out':'status 124' in log.lower() or 'Command exited with non-zero status 124' in log,
-                   'oom_signal':'out of memory' in log.lower() or 'killed' in log.lower()}
+          verdict={'raw_output_exists':rawp.exists() and rawp.stat().st_size>0,'timed_out':'status 124' in log.lower() or 'Command exited with non-zero status 124' in log,'oom_signal':'out of memory' in log.lower() or 'killed' in log.lower()}
           if verdict['raw_output_exists']:
-              raw=Image.open(rawp).convert('RGB').resize(target.size,Image.Resampling.BICUBIC)
-              a=np.asarray(target); g=np.asarray(raw)
-              m=np.asarray(mask)>0; p=np.asarray(protect)>0; safe=m & ~p
-              out=a.copy(); out[safe]=g[safe]
+              raw=Image.open(rawp).convert('RGB').resize(target.size,Image.Resampling.BICUBIC); a=np.asarray(target); g=np.asarray(raw); m=np.asarray(mask)>0; p=np.asarray(protect)>0; safe=m & ~p; out=a.copy(); out[safe]=g[safe]
               outim=Image.fromarray(out); outp=root/'leftrefill_output/source_safe_leftrefill_256.png'; outim.save(outp)
-              verdict.update({'output_size':raw.size,'safe_edit_pixels':int(safe.sum()),
-                              'outside_safe_edit_changed_pixels':int(np.count_nonzero(np.any(out!=a,axis=2)&~safe)),
-                              'inside_changed_pixels':int(np.count_nonzero(np.any(out!=a,axis=2)&safe)),
-                              'sha256':hashlib.sha256(outp.read_bytes()).hexdigest(),
-                              'status':'INFERENCE_OUTPUT_CANDIDATE'})
-              qa=Image.new('RGB',(2048*3,2048)); qa.paste(target,(0,0)); qa.paste(raw,(2048,0)); qa.paste(outim,(4096,0))
-              qa.thumbnail((1800,600)); qa.save(root/'leftrefill_output/qa_before_raw_safe.jpg',quality=92)
-          else:
-              verdict['status']='INFERENCE_BLOCKED'
-          verdict['promotion']='NOT_PROMOTED_PENDING_VISUAL_QA'
-          (root/'leftrefill_verdict.json').write_text(json.dumps(verdict,indent=2))
-          print(json.dumps(verdict,indent=2))
+              verdict.update({'output_size':raw.size,'safe_edit_pixels':int(safe.sum()),'outside_safe_edit_changed_pixels':int(np.count_nonzero(np.any(out!=a,axis=2)&~safe)),'inside_changed_pixels':int(np.count_nonzero(np.any(out!=a,axis=2)&safe)),'sha256':hashlib.sha256(outp.read_bytes()).hexdigest(),'status':'INFERENCE_OUTPUT_CANDIDATE'})
+              qa=Image.new('RGB',(2048*3,2048)); qa.paste(target,(0,0)); qa.paste(raw,(2048,0)); qa.paste(outim,(4096,0)); qa.thumbnail((1800,600)); qa.save(root/'leftrefill_output/qa_before_raw_safe.jpg',quality=92)
+          else: verdict['status']='INFERENCE_BLOCKED'
+          verdict['promotion']='NOT_PROMOTED_PENDING_VISUAL_QA'; (root/'leftrefill_verdict.json').write_text(json.dumps(verdict,indent=2)); print(json.dumps(verdict,indent=2))
           PY
 
       - name: Upload LeftRefill probe evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-leftrefill-probe-v03
+          name: hao-hair-leftrefill-probe-v04
           path: |
             work/leftrefill_wrapper_commit.txt
             work/environment.log
             work/cpu_probe_patch.diff
+            work/ddim_cpu_patch.diff
             work/leftrefill_input_report.json
             work/leftrefill_inputs/*.png
             work/leftrefill_inference.log
