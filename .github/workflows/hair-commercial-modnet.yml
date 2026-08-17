@@ -53,7 +53,7 @@ jobs:
         run: |
           cd /tmp/MODNet
           python - <<'PY'
-          import sys, json, hashlib
+          import os, sys, json, hashlib
           from pathlib import Path
           import numpy as np
           import cv2
@@ -66,9 +66,11 @@ jobs:
           sys.path.insert(0,'/tmp/MODNet')
           from src.models.modnet import MODNet
 
-          source_files=list(Path("$GITHUB_WORKSPACE/work/source_artifact").rglob('Hao_Hair_SR_x2_umbrella_source_plate_v15.png'))
+          workspace=Path(os.environ['GITHUB_WORKSPACE'])
+          source_root=workspace/'work/source_artifact'
+          source_files=list(source_root.rglob('Hao_Hair_SR_x2_umbrella_source_plate_v15.png'))
           if not source_files:
-              source_files=list(Path("$GITHUB_WORKSPACE/work/source_artifact").rglob('*.png'))
+              source_files=list(source_root.rglob('*.png'))
               source_files=[p for p in source_files if 'mask' not in p.name.lower() and 'protect' not in p.name.lower()]
           assert source_files,'v15 source PNG not found'
           src_path=source_files[0]
@@ -106,7 +108,7 @@ jobs:
           matte=F.interpolate(matte,size=(h,w),mode='bilinear',align_corners=False)[0,0].cpu().numpy()
           matte=np.clip(matte,0,1)
 
-          outdir=Path("$GITHUB_WORKSPACE/work/final")
+          outdir=workspace/'work/final'
           outdir.mkdir(parents=True,exist_ok=True)
           Image.fromarray((matte*255).astype(np.uint8),'L').save(outdir/'modnet_matte_768.png')
 
@@ -122,8 +124,9 @@ jobs:
               assert np.array_equal(out[core],src_np[core]),f'{label}: core subject changed'
               p=outdir/f'Hao_Hair_Commercial_Bokeh_{label}_v01.png'
               Image.fromarray(out,'RGB').save(p)
-              # QA preview
-              preview=Image.fromarray(out,'RGB').copy(); preview.thumbnail((900,1600)); preview.save(outdir/f'qa_{label}.jpg',quality=94)
+              preview=Image.fromarray(out,'RGB').copy()
+              preview.thumbnail((900,1600))
+              preview.save(outdir/f'qa_{label}.jpg',quality=94)
               variants[label]={
                   'sigma':sigma,
                   'core_subject_bit_identical':True,
@@ -131,7 +134,6 @@ jobs:
                   'sha256':hashlib.sha256(p.read_bytes()).hexdigest()
               }
 
-          # Subject protection metrics.
           face_hair_roi=(300,700,1900,2800)
           x0,y0,x1,y1=face_hair_roi
           roi_matte=matte[y0:y1,x0:x1]
