@@ -1,0 +1,101 @@
+name: Hao Hair Segmentation BiSeNet Probe v01
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-segmentation-bisenet-probe-v01.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  hair-segmentation-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Download current v11 candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-final-v11
+          path: work/v11
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32038938614
+      - name: Download verified MODNet matte
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-modnet-hairsafe-bokeh-v02
+          path: work/modnet
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32009172839
+      - name: Install lightweight CPU inference stack
+        run: |
+          python -m pip install --disable-pip-version-check --quiet numpy==1.26.4 pillow==10.4.0 opencv-python-headless==4.10.0.84 onnxruntime==1.19.2
+      - name: Download MIT BiSeNet ONNX checkpoint
+        run: |
+          mkdir -p work/model
+          curl -L --fail --retry 3 https://github.com/yakhyo/face-parsing/releases/download/weights/resnet18.onnx -o work/model/resnet18.onnx
+          test -s work/model/resnet18.onnx
+      - name: Run dedicated hair segmentation probe
+        run: |
+          mkdir -p work/out
+          python - <<'PY'
+          from pathlib import Path
+          import json, cv2, numpy as np, onnxruntime as ort
+          from PIL import Image, ImageDraw
+          def exact(root, pattern):
+              hits=list(Path(root).rglob(pattern)); assert hits,(root,pattern)
+              return max(hits,key=lambda p:p.stat().st_size)
+          image_p=exact('work/v11','Hao_Hair_Commercial_PrimaryCandidate_v11.png')
+          matte_p=exact('work/modnet','modnet_matte_768_v02.png')
+          rgb=np.asarray(Image.open(image_p).convert('RGB'))
+          matte=np.asarray(Image.open(matte_p).convert('L')).astype(np.float32)/255.0
+          H,W=rgb.shape[:2]; assert matte.shape==(H,W)
+          subject=matte>=0.20; ys,xs=np.where(subject); assert len(xs)>1000
+          sx0,sx1=int(xs.min()),int(xs.max())+1; sy0,sy1=int(ys.min()),int(ys.max())+1
+          sw,sh=sx1-sx0,sy1-sy0
+          cy0=max(0,sy0-int(0.06*sh)); cy1=min(H,sy0+int(0.76*sh))
+          cx0=max(0,sx0-int(0.08*sw)); cx1=min(W,sx1+int(0.08*sw))
+          crop=rgb[cy0:cy1,cx0:cx1]; ch,cw=crop.shape[:2]; side=max(ch,cw)
+          canvas=np.full((side,side,3),127,dtype=np.uint8); ox=(side-cw)//2; oy=(side-ch)//2
+          canvas[oy:oy+ch,ox:ox+cw]=crop
+          inp=cv2.resize(canvas,(512,512),interpolation=cv2.INTER_LINEAR).astype(np.float32)/255.0
+          inp=(inp-np.array([0.485,0.456,0.406],np.float32))/np.array([0.229,0.224,0.225],np.float32)
+          inp=np.transpose(inp,(2,0,1))[None].astype(np.float32)
+          sess=ort.InferenceSession('work/model/resnet18.onnx',providers=['CPUExecutionProvider'])
+          logits=sess.run([o.name for o in sess.get_outputs()],{sess.get_inputs()[0].name:inp})[0]
+          labels=logits.squeeze(0).argmax(0).astype(np.uint8)
+          labels=cv2.resize(labels,(side,side),interpolation=cv2.INTER_NEAREST)[oy:oy+ch,ox:ox+cw]
+          hair=np.zeros((H,W),np.uint8); hair[cy0:cy1,cx0:cx1]=(labels==17).astype(np.uint8)*255
+          hair[matte<0.05]=0; hb=hair>0; area=int(hb.sum())
+          n,cc,stats,cent=cv2.connectedComponentsWithStats(hb.astype(np.uint8),8)
+          comps=sorted([int(stats[i,cv2.CC_STAT_AREA]) for i in range(1,n)],reverse=True)
+          largest=float(comps[0]/area) if comps and area else 0.0
+          bbox=None
+          if area:
+              hy,hx=np.where(hb); bbox=[int(hx.min()),int(hy.min()),int(hx.max())+1,int(hy.max())+1]
+          Image.fromarray(hair).save('work/out/hair_mask_bisenet_v01.png')
+          overlay=rgb.astype(np.float32); tint=np.array([255,40,180],np.float32)
+          overlay[hb]=0.62*overlay[hb]+0.38*tint; overlay=np.clip(overlay,0,255).astype(np.uint8)
+          ov=Image.fromarray(overlay); dr=ImageDraw.Draw(ov); dr.rectangle((cx0,cy0,cx1-1,cy1-1),outline=(0,255,255),width=5)
+          if bbox: dr.rectangle(tuple(bbox),outline=(255,255,0),width=5)
+          ov.save('work/out/QA_hair_mask_overlay_bisenet_v01.jpg',quality=95)
+          a=Image.fromarray(rgb).crop((cx0,cy0,cx1,cy1)); b=ov.crop((cx0,cy0,cx1,cy1)); a.thumbnail((900,1400)); b.thumbnail((900,1400))
+          sheet=Image.new('RGB',(a.width+b.width,max(a.height,b.height)),(255,255,255)); sheet.paste(a,(0,0)); sheet.paste(b,(a.width,0)); sheet.save('work/out/QA_hair_crop_before_overlay_bisenet_v01.jpg',quality=95)
+          report={'status':'CANDIDATE_PENDING_VISUAL_QA','model':'yakhyo/face-parsing ResNet18 ONNX','license':'MIT','training_dataset':'CelebAMask-HQ','hair_class':17,'crop_xyxy':[cx0,cy0,cx1,cy1],'metrics':{'hair_pixels':area,'hair_over_modnet_subject_fraction':float(area/max(int(subject.sum()),1)),'hair_pixels_in_modnet_core_fraction':float(np.mean(matte[hb]>=0.65)) if area else 0.0,'largest_connected_component_fraction':largest,'hair_bbox_xyxy':bbox},'promotion_rule':'Integrate only if visual QA confirms useful coverage of the complete hairstyle, including lower layers/ends.'}
+          Path('work/out/segmentation_probe_report.json').write_text(json.dumps(report,indent=2)); print(json.dumps(report,indent=2)); assert area>5000
+          PY
+      - name: Upload probe evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-segmentation-bisenet-probe-v01
+          path: work/out/*
+          if-no-files-found: error
+          retention-days: 7
