@@ -33,23 +33,20 @@ jobs:
           Image.fromarray(hair.astype(np.uint8)*255).save(out/'mask.png')
           def make(name,hue,detail,bgbusy):
               hsv=np.zeros((H,W,3),np.uint8); hsv[:]=[15,10,205]
-              # controlled background structure; more structure means more distraction
               if bgbusy:
                   for x in range(0,W,40): hsv[:,x:x+4,2]=150
               base=np.zeros((H,W),np.float32)+90
               texture=(np.sin(xx*.22)+np.sin(yy*.31)+np.sin((xx+yy)*.13))*12*detail
               base=np.clip(base+texture,35,180)
               hsv[:,:,0][hair]=hue//2; hsv[:,:,1][hair]=88; hsv[:,:,2][hair]=base[hair].astype(np.uint8)
-              rgb=cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB); Image.fromarray(rgb).save(out/name)
+              Image.fromarray(cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB)).save(out/name)
           make('A.png',20,1.00,False); make('B.png',22,.72,True); make('C.png',20,.45,False)
           def manifest(name,files):
               p={'set_id':name,'items':[{'id':k,'image':str(out/f),'hair_mask':str(out/'mask.png')} for k,f in files]}; (out/f'{name}.json').write_text(json.dumps(p,indent=2))
           manifest('baseline',[('A','A.png'),('B','B.png'),('C','C.png')])
-          # Hue-drift negative control: A +12 degrees in the hair only.
-          a=np.asarray(Image.open(out/'A.png').convert('RGB')); hsv=cv2.cvtColor(a,cv2.COLOR_RGB2HSV); hh=hsv[:,:,0].astype(np.int16); hh[hair]=(hh[hair]+6)%180; hsv[:,:,0]=hh.astype(np.uint8); Image.fromarray(cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB)).save(out/'A_hue12.png')
+          a=np.array(Image.open(out/'A.png').convert('RGB')); hsv=cv2.cvtColor(a,cv2.COLOR_RGB2HSV); hh=hsv[:,:,0].astype(np.int16); hh[hair]=(hh[hair]+6)%180; hsv[:,:,0]=hh.astype(np.uint8); Image.fromarray(cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB)).save(out/'A_hue12.png')
           manifest('hue_drift',[('A','A_hue12.png'),('B','B.png'),('C','C.png')])
-          # Structure negative control: blur A hair so another frame should outrank it.
-          a=np.asarray(Image.open(out/'A.png').convert('RGB')); blur=cv2.GaussianBlur(a,(0,0),5); a[hair]=blur[hair]; Image.fromarray(a).save(out/'A_blur.png')
+          a=np.array(Image.open(out/'A.png').convert('RGB')); blur=cv2.GaussianBlur(a,(0,0),5); a[hair]=blur[hair]; Image.fromarray(a).save(out/'A_blur.png')
           manifest('blur',[('A','A_blur.png'),('B','B.png'),('C','C.png')])
           PY
       - name: Run baseline and stress tests
