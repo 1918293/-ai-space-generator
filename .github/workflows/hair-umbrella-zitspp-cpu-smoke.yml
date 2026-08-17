@@ -1,0 +1,247 @@
+name: Hao Hair ZITS++ CPU Smoke Test
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-zitspp-cpu-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  zitspp-cpu-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Hao test branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: Download verified 2x SR source
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
+      - name: Clone official ZITS++ source
+        run: |
+          git clone --depth 1 https://github.com/ewrfcas/ZITS-PlusPlus.git work/ZITS-PlusPlus
+          cd work/ZITS-PlusPlus
+          git rev-parse HEAD | tee ../zitspp_commit.txt
+
+      - name: Install legacy-compatible CPU stack
+        run: |
+          set -o pipefail
+          {
+            python -m pip install --upgrade 'pip<25' 'setuptools<70' wheel
+            python -m pip install numpy==1.21.6 pillow==9.5.0 six==1.16.0
+            python -m pip install torch==1.9.1+cpu torchvision==0.10.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+            python -m pip install pytorch-lightning==1.2.9 torchmetrics==0.2.0 tensorboard==2.5.0 protobuf==3.20.3
+            python -m pip install PyYAML==6.0 yacs==0.1.8 tqdm==4.59.0 timm==0.3.2 opencv-python-headless==4.5.5.64 scipy==1.7.3 scikit-image==0.19.3 lpips==0.1.4
+            python - <<'PY'
+          import numpy, PIL, six, torch, torchvision, pytorch_lightning, cv2, scipy, skimage
+          print('NUMPY',numpy.__version__)
+          print('PIL',PIL.__version__)
+          print('SIX',six.__version__)
+          print('TORCH',torch.__version__)
+          print('TORCHVISION',torchvision.__version__)
+          print('CUDA_AVAILABLE',torch.cuda.is_available())
+          print('PL',pytorch_lightning.__version__)
+          print('CV2',cv2.__version__)
+          print('SCIPY',scipy.__version__)
+          print('SKIMAGE',skimage.__version__)
+          PY
+          } 2>&1 | tee work/environment.log
+
+      - name: Download traceable ZITS++ checkpoint mirror
+        run: |
+          cd work/ZITS-PlusPlus
+          mkdir -p ckpts
+          wget -q --show-progress -O ckpts/best_lsm_hawp.pth 'https://huggingface.co/jingwei-xu-00/pretrained_backup_for_streetunveiler/resolve/main/ZITS%2B%2B/best_lsm_hawp.pth'
+          wget -q --show-progress -O ckpts/model_512.zip 'https://huggingface.co/jingwei-xu-00/pretrained_backup_for_streetunveiler/resolve/main/ZITS%2B%2B/model_512.zip'
+          unzip -q ckpts/model_512.zip -d ckpts
+          find ckpts -maxdepth 4 -type f -printf '%p %s bytes\n' | sort | tee ../checkpoint_files.txt
+          test -s ckpts/best_lsm_hawp.pth
+          test -s ckpts/model_512/models/last.ckpt
+          sha256sum ckpts/best_lsm_hawp.pth ckpts/model_512/models/last.ckpt | tee ../checkpoint_sha256.txt
+
+      - name: Build NMS native library
+        run: |
+          cd work/ZITS-PlusPlus/nms/cxx/src
+          bash build.sh 2>&1 | tee ../../../../nms_build.log
+          file ../lib/solve_csa.so | tee -a ../../../../nms_build.log
+
+      - name: Patch only explicit CUDA bindings for CPU smoke test
+        run: |
+          cd work/ZITS-PlusPlus
+          cp test.py test_official_backup.py
+          cp trainers/lsm_hawp/lsm_hawp_model.py trainers/lsm_hawp/lsm_hawp_model_official_backup.py
+          python - <<'PY'
+          from pathlib import Path
+
+          p=Path('test.py')
+          s=p.read_text()
+          s=s.replace('model.cuda()', "device = torch.device('cpu')\n    model.to(device)")
+          s=s.replace("batch[k] = batch[k].cuda()", "batch[k] = batch[k].to(device)")
+          p.write_text(s)
+
+          p=Path('trainers/lsm_hawp/lsm_hawp_model.py')
+          s=p.read_text()
+          s=s.replace('WireframeDetector(is_cuda=True).cuda()', 'WireframeDetector(is_cuda=False)')
+          s=s.replace('.unsqueeze(0).cuda()', '.unsqueeze(0)')
+          p.write_text(s)
+          PY
+          python -m py_compile test.py trainers/lsm_hawp/lsm_hawp_model.py
+          diff -u test_official_backup.py test.py > ../cpu_patch_test.diff || true
+          diff -u trainers/lsm_hawp/lsm_hawp_model_official_backup.py trainers/lsm_hawp/lsm_hawp_model.py > ../cpu_patch_lsm.diff || true
+          cat ../cpu_patch_test.diff
+          cat ../cpu_patch_lsm.diff
+
+      - name: Verify core imports on CPU
+        run: |
+          cd work/ZITS-PlusPlus
+          python - <<'PY' 2>&1 | tee ../core_imports.log
+          import torch
+          import dataset.dataloader
+          import networks.tsr
+          import networks.upsample
+          import networks.generators
+          import trainers.lsm_hawp.lsm_hawp_model
+          import trainers.pl_trainers
+          import trainers.nms_temp
+          print('CORE_IMPORTS_OK')
+          print('CUDA_AVAILABLE',torch.cuda.is_available())
+          PY
+
+      - name: Prepare deterministic 512 ROI and protected umbrella mask
+        run: |
+          cd work/ZITS-PlusPlus
+          mkdir -p smoke_input/images smoke_input/masks smoke_output
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          import numpy as np, json
+
+          files=list(Path('../source_artifact').rglob('*.png'))
+          assert files
+          src=Image.open(files[0]).convert('RGB')
+          assert src.size==(2360,4192)
+          box=(1336,2860,2360,3884)
+          crop=src.crop(box)
+          crop.resize((512,512),Image.Resampling.LANCZOS).save('smoke_input/images/umbrella_roi.png')
+
+          mask=Image.new('L',(512,512),0)
+          d=ImageDraw.Draw(mask)
+          d.polygon([(300,118),(354,110),(397,126),(434,115),(478,132),(511,153),
+                     (511,511),(305,511),(282,472),(276,422),(286,370),(300,320),
+                     (305,278),(298,238),(288,196)],fill=255)
+          d.polygon([(253,322),(288,322),(292,472),(260,472)],fill=255)
+          mask.save('smoke_input/masks/umbrella_roi.png')
+
+          rep={'source_size':src.size,'source_crop_box':box,'test_size':[512,512],
+               'mask_pixels':int(np.count_nonzero(np.asarray(mask))),
+               'mask_fraction':float(np.count_nonzero(np.asarray(mask))/512**2)}
+          Path('../smoke_input_report.json').write_text(json.dumps(rep,indent=2))
+          print(json.dumps(rep,indent=2))
+          PY
+
+      - name: Run actual ZITS++ 512 CPU inference
+        id: inference
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd work/ZITS-PlusPlus
+          /usr/bin/time -v timeout 1200s python test.py \
+            --config configs/config_zitspp_finetune.yml \
+            --exp_name zitspp_cpu_smoke \
+            --ckpt_resume ckpts/model_512/models/last.ckpt \
+            --save_path smoke_output \
+            --img_dir smoke_input/images \
+            --mask_dir smoke_input/masks \
+            --wf_ckpt ckpts/best_lsm_hawp.pth \
+            --use_ema \
+            --test_size 512 \
+            --save_image_only \
+            --obj_removal \
+            2>&1 | tee ../inference.log
+          test -s smoke_output/umbrella_roi.png
+
+      - name: Build smoke-test QA and verdict
+        if: always()
+        run: |
+          cd work/ZITS-PlusPlus
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          import json, hashlib, numpy as np
+
+          inp=Path('smoke_input/images/umbrella_roi.png')
+          msk=Path('smoke_input/masks/umbrella_roi.png')
+          out=Path('smoke_output/umbrella_roi.png')
+          result={'output_exists':out.exists(),'output_nonempty':out.exists() and out.stat().st_size>0}
+
+          if result['output_nonempty']:
+              a=Image.open(inp).convert('RGB')
+              b=Image.open(out).convert('RGB')
+              m=Image.open(msk).convert('L')
+              result['input_size']=a.size
+              result['output_size']=b.size
+              result['same_size']=a.size==b.size==(512,512)
+              aa=np.asarray(a); bb=np.asarray(b); mm=np.asarray(m)>0
+              result['outside_mask_changed_pixels']=int(np.count_nonzero(np.any(aa!=bb,axis=2) & ~mm))
+              result['inside_mask_changed_pixels']=int(np.count_nonzero(np.any(aa!=bb,axis=2) & mm))
+              result['output_sha256']=hashlib.sha256(out.read_bytes()).hexdigest()
+
+              qa=Image.new('RGB',(1536,512),'white')
+              qa.paste(a,(0,0)); qa.paste(b,(512,0))
+              ov=a.copy(); dr=ImageDraw.Draw(ov,'RGBA')
+              maskarr=np.asarray(m)
+              # use mask itself as third panel for precise visual scope
+              maskrgb=Image.merge('RGB',(m,m,m))
+              qa.paste(maskrgb,(1024,0))
+              qa.save('../zitspp_smoke_before_after_mask.png')
+          else:
+              result['same_size']=False
+
+          log=Path('../inference.log').read_text(errors='ignore') if Path('../inference.log').exists() else ''
+          result['timed_out']='status 124' in log.lower() or 'Command exited with non-zero status 124' in log
+          result['oom_signal']=('out of memory' in log.lower() or 'killed' in log.lower())
+          result['status']='INFERENCE_OUTPUT_CANDIDATE' if result.get('output_nonempty') and result.get('same_size') else 'INFERENCE_BLOCKED'
+          result['promotion']='NOT_PROMOTED_PENDING_VISUAL_QA_AND_FULL_RES_SOURCE_REGRESSION'
+          Path('../zitspp_cpu_smoke_verdict.json').write_text(json.dumps(result,indent=2))
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Upload smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-zitspp-cpu-smoke-v01
+          path: |
+            work/zitspp_commit.txt
+            work/environment.log
+            work/checkpoint_files.txt
+            work/checkpoint_sha256.txt
+            work/nms_build.log
+            work/cpu_patch_test.diff
+            work/cpu_patch_lsm.diff
+            work/core_imports.log
+            work/smoke_input_report.json
+            work/inference.log
+            work/zitspp_cpu_smoke_verdict.json
+            work/zitspp_smoke_before_after_mask.png
+            work/ZITS-PlusPlus/smoke_input/images/umbrella_roi.png
+            work/ZITS-PlusPlus/smoke_input/masks/umbrella_roi.png
+            work/ZITS-PlusPlus/smoke_output/umbrella_roi.png
+          if-no-files-found: warn
+          retention-days: 7
