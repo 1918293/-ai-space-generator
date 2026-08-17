@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   masked-lama-removal:
@@ -24,130 +25,182 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Download verified primary SR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
       - name: Install CPU inference stack
         run: |
           python -m pip install --upgrade pip
           pip install numpy==1.26.4 pillow==12.3.0
           pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Fetch verified 2x SR source
-        run: |
-          mkdir -p umbrella_lama/input umbrella_lama/output umbrella_lama/model
-          curl -L --fail --retry 3 -o umbrella_lama/input/source.png 'https://at.adobe.com/AZgcnQiiGqXVd0K2'
-          python - <<'PY'
-          from PIL import Image
-          im = Image.open('umbrella_lama/input/source.png')
-          print('SOURCE_SIZE', im.size, im.mode)
-          assert im.size == (2360, 4192), im.size
-          PY
-
       - name: Download Big-LaMa TorchScript model
         run: |
+          mkdir -p work/model work/final
           curl -L --fail --retry 3 \
-            -o umbrella_lama/model/big-lama.pt \
-            'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt'
-          ls -lh umbrella_lama/model/big-lama.pt
+            -o work/model/big-lama.pt \
+            'https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt'
+          python - <<'PY'
+          import torch
+          m=torch.jit.load('work/model/big-lama.pt',map_location='cpu').eval()
+          print('BIG_LAMA_LOAD_OK',torch.__version__)
+          PY
 
-      - name: Run local masked inpainting and exact outside-mask composite
+      - name: Run protected local LaMa variants
         run: |
           python - <<'PY'
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFilter
           import numpy as np
-          import torch
+          import torch, json, hashlib
 
-          src_path = Path('umbrella_lama/input/source.png')
-          out_dir = Path('umbrella_lama/output')
-          out_dir.mkdir(parents=True, exist_ok=True)
+          source_files=[]
+          for p in Path('work/source_artifact').rglob('*.png'):
+              try:
+                  if Image.open(p).size==(2360,4192): source_files.append(p)
+              except Exception:
+                  pass
+          assert source_files,'verified SR source not found'
+          src_path=max(source_files,key=lambda p:p.stat().st_size)
+          src_img=Image.open(src_path).convert('RGB')
+          src=np.asarray(src_img)
+          H,W=src.shape[:2]
+          assert (W,H)==(2360,4192)
 
-          src_img = Image.open(src_path).convert('RGB')
-          src = np.array(src_img)
-          H, W = src.shape[:2]
-          assert (W, H) == (2360, 4192)
+          # Local ROI around the entire umbrella cluster. Model sees surrounding real context,
+          # but only the binary mask is ever composited into the full-resolution image.
+          x0,y0,x1,y1=1600,2900,2360,4192
+          crop=src[y0:y1,x0:x1].copy()
+          ch,cw=crop.shape[:2]
+          assert (cw,ch)==(760,1292)
 
-          # Local ROI around the umbrella cluster only. All pixels outside this ROI remain untouched.
-          x0, y0, x1, y1 = 1600, 2900, 2360, 4192
-          crop = src[y0:y1, x0:x1].copy()
-          ch, cw = crop.shape[:2]
-          assert (cw, ch) == (760, 1292)
-
-          # Hand-audited umbrella mask from the verified SR image.
-          mask_img = Image.new('L', (cw, ch), 0)
-          draw = ImageDraw.Draw(mask_img)
-          umbrella_poly = [
+          # Reuse the historically successful hand-audited umbrella footprint and explicitly
+          # include the narrow dangling black segment. Coordinates are local to the ROI.
+          base=Image.new('L',(cw,ch),0)
+          draw=ImageDraw.Draw(base)
+          umbrella_poly=[
               (455,280),(520,280),(530,420),(570,300),(610,300),
               (615,480),(665,420),(680,290),(720,280),(759,330),
               (759,1291),(390,1291),(330,1120),(280,1010),(230,880),
               (100,720),(160,650),(240,570),(300,500),(350,470),(410,380)
           ]
-          draw.polygon(umbrella_poly, fill=255)
-          # Include the narrow dangling black umbrella/rack segment at lower-left of the cluster.
-          draw.polygon([(185,820),(250,820),(250,1105),(180,1105)], fill=255)
+          draw.polygon(umbrella_poly,fill=255)
+          draw.polygon([(180,810),(255,810),(255,1115),(175,1115)],fill=255)
 
-          # Small safety dilation keeps red trim/edge remnants inside the edited region.
-          edit_mask_img = mask_img.filter(ImageFilter.MaxFilter(15))
-          edit_mask = np.array(edit_mask_img)
+          # Explicit person protection in full-frame coordinates, then cropped to ROI.
+          protect_full=Image.new('L',(W,H),0)
+          pd=ImageDraw.Draw(protect_full)
+          pd.polygon([
+              (1580,2250),(2030,2250),(2065,3040),(2060,3140),(2035,3185),
+              (1990,3180),(1930,3140),(1840,3100),(1740,3060),(1650,3035),(1580,3000)
+          ],fill=255)
+          pd.polygon([
+              (1400,3045),(1530,3055),(1700,3065),(1870,3090),(1990,3140),(2045,3195),
+              (2045,3215),(2010,3250),(1980,3290),(1940,3325),(1900,3355),(1860,3380),
+              (1810,3402),(1750,3422),(1660,3442),(1530,3450),(1430,3430),(1380,3380),(1360,3300)
+          ],fill=255)
+          pd.rectangle((0,3100,1665,4191),fill=255)
+          protect=np.asarray(protect_full,dtype=np.uint8)
+          protect_crop=protect[y0:y1,x0:x1]
 
-          # Pad crop/mask to LaMa's modulo-8 requirement.
-          pad_h = (8 - (ch % 8)) % 8
-          pad_w = (8 - (cw % 8)) % 8
-          crop_pad = np.pad(crop, ((0,pad_h),(0,pad_w),(0,0)), mode='symmetric')
-          mask_pad = np.pad(edit_mask, ((0,pad_h),(0,pad_w)), mode='constant')
+          model=torch.jit.load('work/model/big-lama.pt',map_location='cpu').eval()
+          out_dir=Path('work/final'); out_dir.mkdir(parents=True,exist_ok=True)
+          Image.fromarray(protect).save(out_dir/'person_protect_LaMa_v02.png')
 
-          image_t = torch.from_numpy(crop_pad.transpose(2,0,1).astype('float32') / 255.0).unsqueeze(0)
-          mask_t = torch.from_numpy((mask_pad.astype('float32') / 255.0)[None,None,:,:])
-          mask_t = (mask_t > 0).float()
+          report={
+              'status':'VISUAL_CANDIDATES_NOT_USER_ACCEPTED',
+              'method':'Big-LaMa TorchScript local masked inpainting; verified SR artifact; protected-person source composite',
+              'source_artifact_run':32003834720,
+              'source_size':[W,H],
+              'roi_xyxy':[x0,y0,x1,y1],
+              'variants':{}
+          }
 
-          model = torch.jit.load('umbrella_lama/model/big-lama.pt', map_location='cpu').eval()
-          with torch.inference_mode():
-              pred = model(image_t, mask_t)
-          pred = pred[0].permute(1,2,0).cpu().numpy()
-          pred = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
-          pred = pred[:ch, :cw]
+          # Three safety margins around the same hand-audited mask. Dilation occurs before
+          # person subtraction so no variant can overwrite protected person pixels.
+          for dilation in [4,8,12]:
+              mask_img=base.filter(ImageFilter.MaxFilter(2*dilation+1))
+              mask=np.asarray(mask_img,dtype=np.uint8).copy()
+              mask[protect_crop>0]=0
+              mask_img=Image.fromarray(mask,'L')
 
-          # Feather only INSIDE the dilated mask. Outside-mask pixels are byte-identical to source.
-          feather = np.array(edit_mask_img.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32) / 255.0
-          feather *= (edit_mask > 0).astype(np.float32)
-          alpha = feather[..., None]
-          blended = np.clip(crop.astype(np.float32) * (1.0 - alpha) + pred.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
+              # Pad to modulo 8, matching LaMa inference requirements.
+              pad_h=(8-(ch%8))%8; pad_w=(8-(cw%8))%8
+              crop_pad=np.pad(crop,((0,pad_h),(0,pad_w),(0,0)),mode='symmetric')
+              mask_pad=np.pad(mask,((0,pad_h),(0,pad_w)),mode='constant')
+              image_t=torch.from_numpy(crop_pad.transpose(2,0,1).astype('float32')/255.0).unsqueeze(0)
+              mask_t=torch.from_numpy((mask_pad.astype('float32')/255.0)[None,None,:,:])
+              mask_t=(mask_t>0).float()
 
-          final = src.copy()
-          roi = final[y0:y1, x0:x1]
-          inside = edit_mask > 0
-          roi[inside] = blended[inside]
-          final[y0:y1, x0:x1] = roi
+              with torch.inference_mode():
+                  pred=model(image_t,mask_t)
+              pred=pred[0].permute(1,2,0).cpu().numpy()
+              pred=np.clip(pred*255.0,0,255).astype(np.uint8)[:ch,:cw]
 
-          # Full-size mask for deterministic QA.
-          global_mask = np.zeros((H, W), dtype=np.uint8)
-          global_mask[y0:y1, x0:x1] = edit_mask
+              # Feather only inward; every unmasked pixel is source-identical by construction.
+              feather=np.asarray(mask_img.filter(ImageFilter.GaussianBlur(radius=4)),dtype=np.float32)/255.0
+              feather*=((mask>0).astype(np.float32))
+              alpha=feather[...,None]
+              blended=np.clip(crop.astype(np.float32)*(1-alpha)+pred.astype(np.float32)*alpha,0,255).astype(np.uint8)
 
-          diff = np.any(final != src, axis=2)
-          outside_changes = int(np.count_nonzero(diff & (global_mask == 0)))
-          inside_changes = int(np.count_nonzero(diff & (global_mask > 0)))
-          print('OUTSIDE_MASK_CHANGED_PIXELS', outside_changes)
-          print('INSIDE_MASK_CHANGED_PIXELS', inside_changes)
-          assert outside_changes == 0, outside_changes
-          assert inside_changes > 0, inside_changes
+              final=src.copy()
+              roi=final[y0:y1,x0:x1]
+              inside=mask>0
+              roi[inside]=blended[inside]
+              final[y0:y1,x0:x1]=roi
 
-          Image.fromarray(final).save(out_dir / 'Hao_Hair_SR_x2_UmbrellaRemoved_LaMa_v01.png', compress_level=2)
-          Image.fromarray(global_mask).save(out_dir / 'umbrella_edit_mask_v01.png', compress_level=2)
+              global_mask=np.zeros((H,W),dtype=np.uint8)
+              global_mask[y0:y1,x0:x1]=mask
+              outside=global_mask==0
+              protected=protect>0
+              outside_identical=bool(np.array_equal(final[outside],src[outside]))
+              protected_identical=bool(np.array_equal(final[protected],src[protected]))
+              assert outside_identical
+              assert protected_identical
 
-          # QA crop: before | after.
-          before = Image.fromarray(src[y0:y1, x0:x1])
-          after = Image.fromarray(final[y0:y1, x0:x1])
-          qa = Image.new('RGB', (cw * 2, ch))
-          qa.paste(before, (0,0))
-          qa.paste(after, (cw,0))
-          qa.save(out_dir / 'umbrella_before_after_QA_v01.png', compress_level=2)
+              label=f'd{dilation:02d}'
+              out_path=out_dir/f'Hao_Hair_SR_x2_UmbrellaRemoved_LaMa_{label}_v02.png'
+              Image.fromarray(final,'RGB').save(out_path,compress_level=2)
+              Image.fromarray(global_mask,'L').save(out_dir/f'umbrella_edit_mask_LaMa_{label}_v02.png')
 
-          print('FINAL_SIZE', Image.open(out_dir / 'Hao_Hair_SR_x2_UmbrellaRemoved_LaMa_v01.png').size)
-          assert Image.open(out_dir / 'Hao_Hair_SR_x2_UmbrellaRemoved_LaMa_v01.png').size == (2360, 4192)
+              # Before/after visual QA at identical crop and scale.
+              before=Image.fromarray(src[y0:y1,x0:x1],'RGB')
+              after=Image.fromarray(final[y0:y1,x0:x1],'RGB')
+              before.thumbnail((600,1020)); after.thumbnail((600,1020))
+              qa=Image.new('RGB',(before.width+after.width,max(before.height,after.height)),(255,255,255))
+              qa.paste(before,(0,0)); qa.paste(after,(before.width,0))
+              qa.save(out_dir/f'qa_before_after_LaMa_{label}_v02.jpg',quality=95)
+
+              # Mask overlay: red edit pixels, green protected-person pixels.
+              overlay=src.astype(np.float32).copy()
+              gm=global_mask>0
+              overlay[gm]=0.55*overlay[gm]+0.45*np.array([255,0,0],dtype=np.float32)
+              overlay[protected]=0.65*overlay[protected]+0.35*np.array([0,255,0],dtype=np.float32)
+              ov=Image.fromarray(np.clip(overlay,0,255).astype(np.uint8),'RGB').crop((1200,2200,2360,4192))
+              ov.thumbnail((820,1400)); ov.save(out_dir/f'qa_mask_overlay_LaMa_{label}_v02.jpg',quality=92)
+
+              report['variants'][label]={
+                  'dilation_pixels':dilation,
+                  'mask_pixels':int(np.count_nonzero(global_mask)),
+                  'outside_mask_bit_identical':outside_identical,
+                  'protected_person_bit_identical':protected_identical,
+                  'changed_pixels':int(np.count_nonzero(np.any(final!=src,axis=2))),
+                  'sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
+              }
+
+          (out_dir/'verification_lama_v02.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2))
           PY
 
-      - name: Upload masked removal result and QA
+      - name: Upload protected LaMa candidates
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-umbrella-lama-v01
-          path: umbrella_lama/output/*.png
+          name: hao-hair-umbrella-lama-v02
+          path: work/final/*
           if-no-files-found: error
           retention-days: 7
