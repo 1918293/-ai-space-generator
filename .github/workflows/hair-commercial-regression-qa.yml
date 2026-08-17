@@ -1,0 +1,259 @@
+name: Hao Hair Commercial Regression QA
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-commercial-regression-qa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  regression-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified baseline SR
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/baseline
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
+      - name: Download umbrella-clean v15
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-umbrella-source-plate-v15
+          path: work/plate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32008506857
+
+      - name: Download hair-safe bokeh v02
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-modnet-hairsafe-bokeh-v02
+          path: work/bokeh
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32009172839
+
+      - name: Download studio tone v01
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-studiotone-v01
+          path: work/tone
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32009395162
+
+      - name: Download packaged primary candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-primary-candidate-v01
+          path: work/package
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32009562632
+
+      - name: Install QA stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'numpy<2' pillow opencv-python-headless==4.10.0.84 scikit-image==0.24.0
+
+      - name: Run end-to-end regression QA
+        run: |
+          python - <<'PY'
+          import json, hashlib
+          from pathlib import Path
+          import numpy as np
+          import cv2
+          from PIL import Image, ImageDraw, ImageFont
+          from skimage.metrics import structural_similarity
+
+          ROOT=Path('work')
+          OUT=ROOT/'qa_final'
+          OUT.mkdir(parents=True,exist_ok=True)
+
+          def sha256(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+          def load_rgb(p): return np.asarray(Image.open(p).convert('RGB'))
+          def exact(root,name):
+              hits=list((ROOT/root).rglob(name)); assert len(hits)==1,(root,name,hits); return hits[0]
+          def find_fullres(root):
+              hits=[]
+              for p in (ROOT/root).rglob('*.png'):
+                  try:
+                      if Image.open(p).size==(2360,4192): hits.append(p)
+                  except Exception: pass
+              non_aux=[p for p in hits if all(k not in p.name.lower() for k in ['mask','protect','matte'])]
+              assert non_aux,(root,hits)
+              return max(non_aux,key=lambda p:p.stat().st_size)
+
+          baseline_p=find_fullres('baseline')
+          plate_p=exact('plate','Hao_Hair_SR_x2_umbrella_source_plate_v15.png')
+          mask_p=exact('plate','edit_mask_v15.png')
+          protect_p=exact('plate','person_protect_v15.png')
+          bokeh_p=exact('bokeh','Hao_Hair_Commercial_HairSafe_Bokeh_balanced_v02.png')
+          matte_p=exact('bokeh','modnet_matte_768_v02.png')
+          tone_p=exact('tone','Hao_Hair_Commercial_StudioTone_studio_v01.png')
+          primary_p=exact('package','Hao_Hair_Commercial_PrimaryCandidate_v01.png')
+          portfolio_p=exact('package','Hao_Hair_Commercial_Portfolio4x5_Candidate_v01.png')
+
+          baseline=load_rgb(baseline_p); plate=load_rgb(plate_p); bokeh=load_rgb(bokeh_p); tone=load_rgb(tone_p); primary=load_rgb(primary_p)
+          mask=np.asarray(Image.open(mask_p).convert('L'))>0
+          protect=np.asarray(Image.open(protect_p).convert('L'))>0
+          matte=np.asarray(Image.open(matte_p).convert('L')).astype(np.float32)/255.0
+          assert baseline.shape==plate.shape==bokeh.shape==tone.shape==primary.shape==(4192,2360,3)
+
+          report={'status':'TECHNICAL_QA_PENDING','source_files':{},'gates':{},'metrics':{}}
+          for label,p in [('baseline_sr',baseline_p),('umbrella_clean_v15',plate_p),('hairsafe_bokeh_v02',bokeh_p),('studio_tone_v01',tone_p),('primary_candidate',primary_p),('portfolio_4x5',portfolio_p)]:
+              report['source_files'][label]={'name':Path(p).name,'sha256':sha256(p)}
+
+          # Gate 1 — umbrella removal isolation: only edit-mask pixels may change; all protected person pixels must remain exact.
+          outside=~mask
+          g1_outside=bool(np.array_equal(baseline[outside],plate[outside]))
+          g1_person=bool(np.array_equal(baseline[protect],plate[protect]))
+          hair_roi=(350,800,1900,2600)
+          x0,y0,x1,y1=hair_roi
+          hair_baseline=baseline[y0:y1,x0:x1]
+          hair_plate=plate[y0:y1,x0:x1]
+          g1_hair=bool(np.array_equal(hair_baseline,hair_plate))
+          report['gates']['umbrella_removal_isolation']={
+              'outside_edit_mask_bit_identical':g1_outside,
+              'protected_person_bit_identical':g1_person,
+              'hair_face_roi_bit_identical':g1_hair,
+              'edit_mask_pixels':int(mask.sum()),
+              'protected_person_pixels':int(protect.sum())
+          }
+          assert g1_outside and g1_person and g1_hair
+
+          # Gate 2 — hair-safe bokeh: MODNet core subject is literally unchanged.
+          core=matte>=0.65
+          g2_core=bool(np.array_equal(plate[core],bokeh[core]))
+          roi_plate=plate[y0:y1,x0:x1]
+          roi_bokeh=bokeh[y0:y1,x0:x1]
+          ssim_bokeh=float(structural_similarity(roi_plate,roi_bokeh,channel_axis=2,data_range=255))
+          def grad_corr(a,b):
+              ga=cv2.cvtColor(a,cv2.COLOR_RGB2GRAY).astype(np.float32)
+              gb=cv2.cvtColor(b,cv2.COLOR_RGB2GRAY).astype(np.float32)
+              def mag(g):
+                  gx=cv2.Sobel(g,cv2.CV_32F,1,0,ksize=3); gy=cv2.Sobel(g,cv2.CV_32F,0,1,ksize=3)
+                  return np.sqrt(gx*gx+gy*gy).ravel()
+              return float(np.corrcoef(mag(ga),mag(gb))[0,1])
+          gc_bokeh=grad_corr(roi_plate,roi_bokeh)
+          report['gates']['hairsafe_bokeh']={
+              'modnet_core_subject_bit_identical':g2_core,
+              'core_threshold':0.65,
+              'hair_face_roi_ssim_vs_clean_plate':ssim_bokeh,
+              'hair_face_gradient_correlation_vs_clean_plate':gc_bokeh
+          }
+          assert g2_core and ssim_bokeh>0.95 and gc_bokeh>0.97
+
+          # Gate 3 — studio tone may change luminance, but must preserve hair/face structure and chromatic direction.
+          roi_tone=tone[y0:y1,x0:x1]
+          gc_tone=grad_corr(roi_bokeh,roi_tone)
+          ssim_tone=float(structural_similarity(roi_bokeh,roi_tone,channel_axis=2,data_range=255))
+
+          roi_core=(matte[y0:y1,x0:x1]>=0.65)
+          hsv0=cv2.cvtColor(roi_bokeh,cv2.COLOR_RGB2HSV).astype(np.float32)
+          hsv1=cv2.cvtColor(roi_tone,cv2.COLOR_RGB2HSV).astype(np.float32)
+          chroma=roi_core & (hsv0[:,:,1]>=35) & (hsv0[:,:,2]>=25)
+          if np.any(chroma):
+              hd=np.abs(hsv1[:,:,0]-hsv0[:,:,0]); hd=np.minimum(hd,180-hd)*2.0
+              sd=np.abs(hsv1[:,:,1]-hsv0[:,:,1])
+              hue_med=float(np.median(hd[chroma])); hue_p95=float(np.percentile(hd[chroma],95)); sat_med=float(np.median(sd[chroma]))
+          else:
+              hue_med=hue_p95=sat_med=0.0
+          report['gates']['studio_tone_fidelity']={
+              'hair_face_gradient_correlation_vs_bokeh':gc_tone,
+              'hair_face_roi_ssim_vs_bokeh':ssim_tone,
+              'core_chromatic_pixels':int(chroma.sum()),
+              'median_hue_shift_degrees':hue_med,
+              'p95_hue_shift_degrees':hue_p95,
+              'median_saturation_shift_8bit':sat_med
+          }
+          assert gc_tone>0.995 and ssim_tone>0.97 and hue_med<=2.0 and hue_p95<=6.0 and sat_med<=4.0
+
+          # Gate 4 — packaging cannot modify selected primary pixels; portfolio derivative is native crop.
+          g4_primary=bool(np.array_equal(tone,primary)) and Path(tone_p).read_bytes()==Path(primary_p).read_bytes()
+          portfolio=load_rgb(portfolio_p)
+          crop_box=(280,560,2080,2810)
+          cx0,cy0,cx1,cy1=crop_box
+          g4_crop=portfolio.shape==(2250,1800,3) and bool(np.array_equal(portfolio,primary[cy0:cy1,cx0:cx1]))
+          report['gates']['package_integrity']={
+              'primary_byte_identical_to_selected_studio_tone':g4_primary,
+              'portfolio_native_pixel_crop_identical':g4_crop,
+              'portfolio_crop_box_xyxy':list(crop_box)
+          }
+          assert g4_primary and g4_crop
+
+          # Supplemental metrics: clipping and edit scope.
+          report['metrics']['final_highlight_clip_fraction']=float(np.mean(np.any(primary>=255,axis=2)))
+          report['metrics']['final_black_clip_fraction']=float(np.mean(np.all(primary<=0,axis=2)))
+          report['metrics']['baseline_to_plate_changed_fraction']=float(np.mean(np.any(baseline!=plate,axis=2)))
+          report['metrics']['plate_to_bokeh_changed_fraction']=float(np.mean(np.any(plate!=bokeh,axis=2)))
+          report['metrics']['bokeh_to_tone_changed_fraction']=float(np.mean(np.any(bokeh!=tone,axis=2)))
+
+          # QA visual 1: umbrella before/after, same crop and scale.
+          crop_lr=(1200,2300,2360,4192)
+          def pilcrop(a,box): return Image.fromarray(a,'RGB').crop(box)
+          before=pilcrop(baseline,crop_lr); after=pilcrop(plate,crop_lr)
+          before.thumbnail((700,1100)); after.thumbnail((700,1100))
+          sheet=Image.new('RGB',(before.width+after.width,max(before.height,after.height)),(255,255,255))
+          sheet.paste(before,(0,0)); sheet.paste(after,(before.width,0)); sheet.save(OUT/'qa_umbrella_before_after.png')
+
+          # QA visual 2: hair/face stage triptych plus amplified difference heatmap.
+          imgs=[Image.fromarray(x,'RGB') for x in [roi_plate,roi_bokeh,roi_tone]]
+          thumbs=[]
+          for im in imgs:
+              q=im.copy(); q.thumbnail((520,620)); thumbs.append(q)
+          diff=np.mean(np.abs(roi_tone.astype(np.int16)-roi_plate.astype(np.int16)),axis=2)
+          heat=np.clip(diff*8,0,255).astype(np.uint8)
+          heat=cv2.applyColorMap(heat,cv2.COLORMAP_TURBO)
+          heat=cv2.cvtColor(heat,cv2.COLOR_BGR2RGB)
+          hi=Image.fromarray(heat,'RGB'); hi.thumbnail((520,620)); thumbs.append(hi)
+          stage=Image.new('RGB',(sum(i.width for i in thumbs),max(i.height for i in thumbs)),(255,255,255))
+          px=0
+          for im in thumbs: stage.paste(im,(px,0)); px+=im.width
+          stage.save(OUT/'qa_hair_face_stages_and_diff.png')
+
+          # QA visual 3: final full-frame + portfolio crop side-by-side.
+          p1=Image.fromarray(primary,'RGB'); p1.thumbnail((720,1280))
+          p2=Image.fromarray(portfolio,'RGB'); p2.thumbnail((720,1280))
+          final_sheet=Image.new('RGB',(p1.width+p2.width,max(p1.height,p2.height)),(255,255,255))
+          final_sheet.paste(p1,(0,0)); final_sheet.paste(p2,(p1.width,0)); final_sheet.save(OUT/'qa_final_full_and_4x5.png')
+
+          report['status']='PASS_TECHNICAL_REGRESSION_QA_NOT_USER_ACCEPTED'
+          (OUT/'regression_qa_report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          (OUT/'REGRESSION_QA_SUMMARY.md').write_text(
+              '# Hao Hair Commercial Regression QA\n\n'
+              f"Status: **{report['status']}**\n\n"
+              f"- Umbrella edit isolation: PASS\n"
+              f"- Protected person exactness: PASS\n"
+              f"- Hair/face exact before bokeh: PASS\n"
+              f"- Hair-safe bokeh core exactness: PASS\n"
+              f"- Hair/face SSIM clean→bokeh: {ssim_bokeh:.6f}\n"
+              f"- Hair/face gradient corr clean→bokeh: {gc_bokeh:.6f}\n"
+              f"- Hair/face gradient corr bokeh→tone: {gc_tone:.6f}\n"
+              f"- Median hue shift: {hue_med:.3f}°; p95: {hue_p95:.3f}°\n"
+              f"- Package byte/pixel integrity: PASS\n\n"
+              'This is a technical QA result, not user acceptance.\n',encoding='utf-8')
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload regression QA
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-commercial-regression-qa-v01
+          path: work/qa_final/*
+          if-no-files-found: error
+          retention-days: 7
