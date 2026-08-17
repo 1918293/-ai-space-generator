@@ -1,0 +1,137 @@
+name: Hao Hair Umbrella MIGAN Removal
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-migan.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  masked-migan-removal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install CPU inference stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==1.26.4 pillow==12.3.0 opencv-python-headless==4.10.0.84
+          pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Fetch verified 2x SR source and MIGAN model
+        run: |
+          mkdir -p umbrella_migan/input umbrella_migan/output umbrella_migan/model
+          curl -L --fail --retry 3 -o umbrella_migan/input/source.png 'https://at.adobe.com/AZgcnQiiGqXVd0K2'
+          curl -L --fail --retry 3 -o umbrella_migan/model/migan_traced.pt 'https://github.com/Sanster/models/releases/download/migan/migan_traced.pt'
+          python - <<'PY'
+          from PIL import Image
+          im=Image.open('umbrella_migan/input/source.png')
+          print('SOURCE_SIZE', im.size)
+          assert im.size == (2360,4192)
+          PY
+
+      - name: Run MIGAN local-mask removal with exact outside-mask lock
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFilter
+          import cv2
+          import numpy as np
+          import torch
+
+          out_dir=Path('umbrella_migan/output'); out_dir.mkdir(parents=True,exist_ok=True)
+          src=np.array(Image.open('umbrella_migan/input/source.png').convert('RGB'))
+          H,W=src.shape[:2]
+          x0,y0,x1,y1=1600,2900,2360,4192
+          roi=src[y0:y1,x0:x1].copy()
+          rh,rw=roi.shape[:2]
+
+          # Umbrella-only edit mask, shaped to stay clear of the arm and shirt.
+          m=Image.new('L',(rw,rh),0)
+          d=ImageDraw.Draw(m)
+          pts=[
+            (455,280),(520,280),(530,420),(570,300),(610,300),
+            (615,480),(665,420),(680,290),(720,280),(759,330),
+            (759,1291),(390,1291),(330,1120),(280,1010),(230,880),
+            (100,720),(160,650),(240,570),(300,500),(350,470),(410,380)
+          ]
+          d.polygon(pts,fill=255)
+          m=m.filter(ImageFilter.MaxFilter(25))
+          mask=np.array(m)
+
+          # Context crop around mask with source-code-equivalent margin.
+          ys,xs=np.where(mask>0)
+          margin=120
+          bx0=max(0,int(xs.min())-margin); bx1=min(rw,int(xs.max())+1+margin)
+          by0=max(0,int(ys.min())-margin); by1=min(rh,int(ys.max())+1+margin)
+          cimg=roi[by0:by1,bx0:bx1].copy()
+          cmask=mask[by0:by1,bx0:bx1].copy()
+          oh,ow=cimg.shape[:2]
+
+          # MIGAN runs at 512 square; preserve aspect and pad symmetrically.
+          scale=min(512.0/max(oh,ow),1.0)
+          nw=max(1,int(round(ow*scale))); nh=max(1,int(round(oh*scale)))
+          rimg=cv2.resize(cimg,(nw,nh),interpolation=cv2.INTER_AREA if scale<1 else cv2.INTER_CUBIC)
+          rmask=cv2.resize(cmask,(nw,nh),interpolation=cv2.INTER_NEAREST)
+          pad_x=512-nw; pad_y=512-nh
+          left=pad_x//2; right=pad_x-left; top=pad_y//2; bottom=pad_y-top
+          pimg=np.pad(rimg,((top,bottom),(left,right),(0,0)),mode='symmetric')
+          pmask=np.pad(rmask,((top,bottom),(left,right)),mode='constant')
+
+          image=pimg.transpose(2,0,1).astype('float32')/255.0
+          image=image*2.0-1.0
+          mask01=(pmask>120).astype('float32')[None,:,:]
+          erased=image*(1.0-mask01)
+          model_input=np.concatenate([0.5-mask01,erased],axis=0)
+          tin=torch.from_numpy(model_input).unsqueeze(0)
+
+          model=torch.jit.load('umbrella_migan/model/migan_traced.pt',map_location='cpu').eval()
+          with torch.inference_mode():
+              pred=model(tin)
+          pred=(pred.permute(0,2,3,1)*127.5+127.5).round().clamp(0,255).to(torch.uint8)[0].cpu().numpy()
+          pred=pred[top:top+nh,left:left+nw]
+          pred=cv2.resize(pred,(ow,oh),interpolation=cv2.INTER_CUBIC)
+
+          # Exact source lock outside the dilated edit mask.
+          out_roi=roi.copy()
+          local_inside=cmask>0
+          target=out_roi[by0:by1,bx0:bx1]
+          target[local_inside]=pred[local_inside]
+          out_roi[by0:by1,bx0:bx1]=target
+
+          final=src.copy(); final[y0:y1,x0:x1]=out_roi
+          global_mask=np.zeros((H,W),np.uint8); global_mask[y0:y1,x0:x1]=mask
+          diff=np.any(final!=src,axis=2)
+          outside=int(np.count_nonzero(diff & (global_mask==0)))
+          inside=int(np.count_nonzero(diff & (global_mask>0)))
+          print('OUTSIDE_MASK_CHANGED_PIXELS',outside)
+          print('INSIDE_MASK_CHANGED_PIXELS',inside)
+          assert outside==0 and inside>0
+
+          Image.fromarray(final).save(out_dir/'Hao_Hair_SR_x2_UmbrellaRemoved_MIGAN_v02.png',compress_level=2)
+          Image.fromarray(global_mask).save(out_dir/'umbrella_edit_mask_MIGAN_v02.png',compress_level=2)
+          before=Image.fromarray(roi); after=Image.fromarray(out_roi)
+          qa=Image.new('RGB',(rw*2,rh)); qa.paste(before,(0,0)); qa.paste(after,(rw,0))
+          qa.save(out_dir/'umbrella_before_after_MIGAN_v02.png',compress_level=2)
+          print('FINAL_SIZE',Image.open(out_dir/'Hao_Hair_SR_x2_UmbrellaRemoved_MIGAN_v02.png').size)
+          PY
+
+      - name: Upload MIGAN result and QA
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-umbrella-migan-v02
+          path: umbrella_migan/output/*.png
+          if-no-files-found: error
+          retention-days: 7
