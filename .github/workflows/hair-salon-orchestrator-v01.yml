@@ -1,0 +1,68 @@
+name: Hao Hair Salon Safety Orchestrator v01
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [hao-hair-sr-test-20260817]
+    paths:
+      - 'tools/hair_salon_pipeline/orchestrator.py'
+      - '.github/workflows/hair-salon-orchestrator-v01.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install preflight stack
+        run: python -m pip install --disable-pip-version-check --quiet pillow==10.4.0 numpy==1.26.4 opencv-python-headless==4.10.0.84
+      - name: Build test authorities and preflight reports
+        run: |
+          mkdir -p work
+          python - <<'PY'
+          from PIL import Image
+          import numpy as np
+          for name,size in [('small',(900,1400)),('large',(1800,2400))]:
+              w,h=size; y,x=np.indices((h,w)); a=np.zeros((h,w,3),np.uint8); a[:]=[190,185,178]
+              hair=((x-w*.5)**2/(w*.22)**2+(y-h*.42)**2/(h*.25)**2)<1
+              a[hair]=[92,55,37]
+              Image.fromarray(a).save(f'work/{name}.png')
+              m=np.zeros((h,w),np.uint8); m[hair]=255; Image.fromarray(m).save(f'work/{name}_matte.png')
+          Image.fromarray(np.ones((1400,900),np.uint8)*255).save('work/defect.png')
+          PY
+          python tools/hair_salon_pipeline/preflight.py --source work/small.png --matte work/small_matte.png --output work/pre_small.json
+          python tools/hair_salon_pipeline/preflight.py --source work/large.png --matte work/large_matte.png --output work/pre_large.json
+      - name: Exercise safety plans
+        run: |
+          python tools/hair_salon_pipeline/orchestrator.py --preflight work/pre_small.json --output work/small_locked.json
+          python tools/hair_salon_pipeline/orchestrator.py --preflight work/pre_small.json --allow-safe-sr --output work/small_allowed.json
+          python tools/hair_salon_pipeline/orchestrator.py --preflight work/pre_small.json --allow-safe-sr --defect-mask work/defect.png --candidate-available --output work/small_candidate.json
+          python tools/hair_salon_pipeline/orchestrator.py --preflight work/pre_large.json --output work/large.json
+          python - <<'PY'
+          import json
+          load=lambda n: json.load(open('work/'+n))
+          locked=load('small_locked.json'); allowed=load('small_allowed.json'); cand=load('small_candidate.json'); large=load('large.json')
+          by=lambda r,s: next(x for x in r['plan'] if x['stage']==s)
+          assert by(locked,'SR')['action']=='READY_WAITING_EXPLICIT_SAFE_SR_PERMISSION'
+          assert by(locked,'OBJECT_REMOVAL')['action']=='BLOCK_NO_EXPLICIT_DEFECT_MASK'
+          assert by(allowed,'SR')['auto_execute_eligible'] is True
+          assert by(allowed,'SR')['action']=='AUTO_EXECUTE_CONSERVATIVE_SR'
+          assert by(cand,'OBJECT_REMOVAL')['action']=='CONTROLLED_REVIEW_WITH_MASK'
+          assert by(cand,'HAIR_QA')['auto_execute_eligible'] is True
+          assert by(cand,'BOKEH')['auto_execute_eligible'] is False
+          assert by(cand,'TONE')['auto_execute_eligible'] is False
+          assert by(large,'SR')['action']=='SKIP'
+          print('ORCHESTRATOR_SELFTEST_PASS')
+          PY
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-salon-safety-orchestrator-v01
+          path: work/*.json
+          retention-days: 14
