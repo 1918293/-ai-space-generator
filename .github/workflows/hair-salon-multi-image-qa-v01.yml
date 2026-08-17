@@ -33,6 +33,8 @@ jobs:
           Image.fromarray(hair.astype(np.uint8)*255).save(out/'mask.png')
           def make(name,hue,detail,bgbusy):
               hsv=np.zeros((H,W,3),np.uint8); hsv[:]=[15,10,205]
+              # Every frame has low-amplitude real-world-like background structure.
+              for x in range(0,W,64): hsv[:,x:x+2,2]=198
               if bgbusy:
                   for x in range(0,W,40): hsv[:,x:x+4,2]=150
               base=np.zeros((H,W),np.float32)+90
@@ -46,7 +48,7 @@ jobs:
           manifest('baseline',[('A','A.png'),('B','B.png'),('C','C.png')])
           a=np.array(Image.open(out/'A.png').convert('RGB')); hsv=cv2.cvtColor(a,cv2.COLOR_RGB2HSV); hh=hsv[:,:,0].astype(np.int16); hh[hair]=(hh[hair]+6)%180; hsv[:,:,0]=hh.astype(np.uint8); Image.fromarray(cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB)).save(out/'A_hue12.png')
           manifest('hue_drift',[('A','A_hue12.png'),('B','B.png'),('C','C.png')])
-          a=np.array(Image.open(out/'A.png').convert('RGB')); blur=cv2.GaussianBlur(a,(0,0),5); a[hair]=blur[hair]; Image.fromarray(a).save(out/'A_blur.png')
+          a=np.array(Image.open(out/'A.png').convert('RGB')); blur=cv2.GaussianBlur(a,(0,0),8); a[hair]=blur[hair]; Image.fromarray(a).save(out/'A_blur.png')
           manifest('blur',[('A','A_blur.png'),('B','B.png'),('C','C.png')])
           PY
       - name: Run baseline and stress tests
@@ -60,6 +62,7 @@ jobs:
           assert base['status']=='PASS_SET_CONSISTENCY',base['status']
           assert base['hero_recommendation']['recommended_id']=='A',base['hero_recommendation']
           assert hue['status']=='REVIEW_SET_CONSISTENCY',hue['set_color_spread']
+          assert hue['hero_recommendation']['recommended_id']!='A',hue['hero_recommendation']
           assert blur['hero_recommendation']['recommended_id']!='A',blur['hero_recommendation']
           print('SELFTEST_PASS')
           PY
