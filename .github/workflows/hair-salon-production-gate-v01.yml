@@ -1,4 +1,4 @@
-name: Hao Hair Salon Production Gate v02
+name: Hao Hair Salon Production Gate v03
 
 on:
   workflow_dispatch:
@@ -47,6 +47,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Download source authority
         uses: actions/download-artifact@v4
         with:
@@ -54,6 +55,7 @@ jobs:
           path: work/source
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.inputs.source_run_id || '32003834720' }}
+
       - name: Download candidate
         uses: actions/download-artifact@v4
         with:
@@ -61,6 +63,7 @@ jobs:
           path: work/candidate
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.inputs.candidate_run_id || '32038938614' }}
+
       - name: Download matte authority
         uses: actions/download-artifact@v4
         with:
@@ -68,10 +71,12 @@ jobs:
           path: work/matte
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.inputs.matte_run_id || '32009172839' }}
+
       - name: Install minimal QA stack
         run: |
-          python -m pip install --disable-pip-version-check --quiet pillow==10.4.0 numpy==1.26.4 opencv-python-headless==4.10.0.84
-          python -m py_compile tools/hair_salon_pipeline/preflight.py tools/hair_salon_pipeline/hair_qa.py tools/hair_salon_pipeline/gate.py
+          python -m pip install --disable-pip-version-check --quiet pillow==10.4.0 numpy==1.26.4 opencv-python-headless==4.10.0.84 onnxruntime==1.19.2
+          python -m py_compile tools/hair_salon_pipeline/preflight.py tools/hair_salon_pipeline/hair_qa.py tools/hair_salon_pipeline/gate.py tools/hair_salon_pipeline/hair_segment_onnx.py
+
       - name: Resolve artifact inputs
         run: |
           python - <<'PY'
@@ -99,20 +104,47 @@ jobs:
           matte=matte_hits[0]
           with open(os.environ['GITHUB_ENV'],'a') as f:
               f.write(f'SOURCE_IMAGE={source}\nCANDIDATE_IMAGE={candidate}\nMATTE_IMAGE={matte}\n')
+          print('SOURCE',source); print('CANDIDATE',candidate); print('MATTE',matte)
           PY
+
+      - name: Generate dedicated source-derived hair mask
+        id: hairseg
+        continue-on-error: true
+        run: |
+          mkdir -p work/model work/reports
+          curl -L --fail --retry 3 https://github.com/yakhyo/face-parsing/releases/download/weights/resnet18.onnx -o work/model/resnet18.onnx
+          python tools/hair_salon_pipeline/hair_segment_onnx.py \
+            --source "$SOURCE_IMAGE" \
+            --matte "$MATTE_IMAGE" \
+            --model work/model/resnet18.onnx \
+            --output-mask work/reports/hair_mask_source_v03.png \
+            --output-report work/reports/hair_segmentation_v03.json \
+            --output-qa work/reports/QA_hair_segmentation_v03.jpg
+
       - name: Run single-command production gate
         id: gate
         continue-on-error: true
         run: |
-          python tools/hair_salon_pipeline/gate.py --source "$SOURCE_IMAGE" --candidate "$CANDIDATE_IMAGE" --matte "$MATTE_IMAGE" --output-dir work/reports
+          EXTRA=()
+          if [ -s work/reports/hair_mask_source_v03.png ]; then
+            EXTRA+=(--hair-mask work/reports/hair_mask_source_v03.png)
+          fi
+          python tools/hair_salon_pipeline/gate.py \
+            --source "$SOURCE_IMAGE" \
+            --candidate "$CANDIDATE_IMAGE" \
+            --matte "$MATTE_IMAGE" \
+            "${EXTRA[@]}" \
+            --output-dir work/reports
+
       - name: Upload production gate evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-salon-production-gate-v02
+          name: hao-hair-salon-production-gate-v03
           path: work/reports/*
           if-no-files-found: error
           retention-days: 14
+
       - name: Enforce production gate
         if: always()
         env:
