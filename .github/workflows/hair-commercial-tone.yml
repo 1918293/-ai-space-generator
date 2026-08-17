@@ -1,0 +1,141 @@
+name: Hao Hair Commercial Studio Tone
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-commercial-tone.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  studio-tone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified hair-safe bokeh v02
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-modnet-hairsafe-bokeh-v02
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32009172839
+
+      - name: Install deterministic image stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'numpy<2' pillow opencv-python-headless==4.10.0.84
+
+      - name: Generate restrained studio-lighting candidates
+        run: |
+          python - <<'PY'
+          import os, json, hashlib
+          from pathlib import Path
+          import numpy as np
+          import cv2
+          from PIL import Image
+
+          workspace=Path(os.environ['GITHUB_WORKSPACE'])
+          root=workspace/'work/source_artifact'
+          candidates=list(root.rglob('Hao_Hair_Commercial_HairSafe_Bokeh_balanced_v02.png'))
+          assert candidates,'balanced hair-safe bokeh v02 not found'
+          src_path=candidates[0]
+          matte_path=next(iter(root.rglob('modnet_matte_768_v02.png')),None)
+          assert matte_path is not None,'MODNet matte not found'
+
+          src=Image.open(src_path).convert('RGB')
+          assert src.size==(2360,4192),src.size
+          arr=np.asarray(src).astype(np.float32)/255.0
+          matte=np.asarray(Image.open(matte_path).convert('L')).astype(np.float32)/255.0
+          H,W=matte.shape
+
+          # Standard sRGB transfer functions so exposure changes happen in linear light.
+          def srgb_to_linear(x):
+              return np.where(x<=0.04045,x/12.92,((x+0.055)/1.055)**2.4)
+          def linear_to_srgb(x):
+              x=np.clip(x,0,1)
+              return np.where(x<=0.0031308,12.92*x,1.055*np.power(x,1/2.4)-0.055)
+          def smoothstep(edge0,edge1,x):
+              t=np.clip((x-edge0)/(edge1-edge0),0,1)
+              return t*t*(3-2*t)
+
+          lin=srgb_to_linear(arr)
+          subject=smoothstep(0.20,0.80,matte)
+          background=1.0-subject
+
+          yy,xx=np.indices((H,W),dtype=np.float32)
+          xn=xx/(W-1); yn=yy/(H-1)
+          # Broad soft key centered on hair/face/upper torso; no geometry or local resampling.
+          key=np.exp(-0.5*(((xn-0.50)/0.30)**2+((yn-0.39)/0.24)**2))*subject
+          # Very broad optical-style edge falloff, restricted mostly to background.
+          rr=((xn-0.50)/0.72)**2+((yn-0.43)/0.78)**2
+          vignette=np.clip(rr-0.55,0,1)*background
+
+          variants={
+              'clean': {'bg_stop':-0.06,'key_stop':0.04,'vignette_stop':0.00},
+              'studio': {'bg_stop':-0.10,'key_stop':0.08,'vignette_stop':-0.03},
+              'studio_plus': {'bg_stop':-0.14,'key_stop':0.10,'vignette_stop':-0.05},
+          }
+
+          outdir=workspace/'work/final'
+          outdir.mkdir(parents=True,exist_ok=True)
+          base_u8=(arr*255.0+0.5).astype(np.uint8)
+          base_gray=cv2.cvtColor(base_u8,cv2.COLOR_RGB2GRAY).astype(np.float32)
+          roi=(350,800,1900,2600)
+          x0,y0,x1,y1=roi
+          gx0=cv2.Sobel(base_gray[y0:y1,x0:x1],cv2.CV_32F,1,0,ksize=3)
+          gy0=cv2.Sobel(base_gray[y0:y1,x0:x1],cv2.CV_32F,0,1,ksize=3)
+          grad0=np.sqrt(gx0*gx0+gy0*gy0).ravel()
+
+          report={'method':'linear-light restrained studio dodge/burn; no generative edit; no resampling','source_size':[W,H],'hair_face_roi':list(roi),'variants':{}}
+
+          for label,p in variants.items():
+              stops=(p['bg_stop']*background + p['key_stop']*key + p['vignette_stop']*vignette)
+              gain=np.exp2(stops)[...,None]
+              out_lin=np.clip(lin*gain,0,1)
+              out=np.clip(linear_to_srgb(out_lin)*255.0+0.5,0,255).astype(np.uint8)
+              out_path=outdir/f'Hao_Hair_Commercial_StudioTone_{label}_v01.png'
+              Image.fromarray(out,'RGB').save(out_path)
+
+              prev=Image.fromarray(out,'RGB').copy(); prev.thumbnail((900,1600)); prev.save(outdir/f'qa_studiotone_{label}_v01.jpg',quality=94)
+
+              out_gray=cv2.cvtColor(out,cv2.COLOR_RGB2GRAY).astype(np.float32)
+              gx=cv2.Sobel(out_gray[y0:y1,x0:x1],cv2.CV_32F,1,0,ksize=3)
+              gy=cv2.Sobel(out_gray[y0:y1,x0:x1],cv2.CV_32F,0,1,ksize=3)
+              grad=np.sqrt(gx*gx+gy*gy).ravel()
+              corr=float(np.corrcoef(grad0,grad)[0,1])
+              assert corr>0.995,f'{label}: hair/face gradient structure changed unexpectedly: {corr}'
+
+              clipped_hi=float(np.mean(np.any(out>=255,axis=2)))
+              clipped_lo=float(np.mean(np.all(out<=0,axis=2)))
+              report['variants'][label]={
+                  **p,
+                  'hair_face_gradient_correlation_vs_bokeh_base':corr,
+                  'highlight_clipped_pixel_fraction':clipped_hi,
+                  'black_clipped_pixel_fraction':clipped_lo,
+                  'sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
+              }
+
+          (outdir/'verification_studiotone_v01.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload studio-tone candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-commercial-studiotone-v01
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
