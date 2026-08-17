@@ -1,0 +1,156 @@
+name: Hao Hair Umbrella Inpaint Compare 2
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-inpaint-compare2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compare-mat-fcf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified primary SR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
+      - name: Install CPU IOPaint stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'numpy<2' 'Pillow==9.5.0' opencv-python-headless==4.10.0.84
+          pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install 'IOPaint==1.6.0'
+
+      - name: Prepare broad protected umbrella mask
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import numpy as np, cv2, json
+
+          src_path=list(Path('work/source_artifact').rglob('*.png'))[0]
+          src=Image.open(src_path).convert('RGB')
+          assert src.size==(2360,4192),src.size
+          crop_box=(1400,2700,2360,4192)
+          patch_img=src.crop(crop_box)
+          patch=np.asarray(patch_img)
+          R,G,B=[patch[:,:,i].astype(np.int16) for i in range(3)]
+          gray=cv2.cvtColor(patch,cv2.COLOR_RGB2GRAY)
+          yy,xx=np.indices(gray.shape)
+
+          skin=((R>130)&(G>70)&(B<145)&((R-G)>20)&((G-B)>5)&(yy<830)&(xx<700))
+          n,labels,stats,_=cv2.connectedComponentsWithStats(skin.astype(np.uint8),8)
+          skin_keep=np.zeros_like(gray,dtype=np.uint8)
+          for i in range(1,n):
+              comp=labels==i
+              area=stats[i,cv2.CC_STAT_AREA]
+              if area>500 and np.any(comp&(xx>220)&(xx<590)&(yy>420)&(yy<780)):
+                  skin_keep[comp]=255
+          skin_keep=cv2.dilate(skin_keep,np.ones((13,13),np.uint8),iterations=1)
+
+          protect=np.zeros_like(gray,dtype=np.uint8)
+          protect[skin_keep>0]=255
+          sleeve=np.array([(0,0),(720,0),(720,490),(700,505),(670,515),(635,525),(600,510),(560,470),(500,430),(420,395),(300,360),(0,330)],np.int32)
+          cv2.fillPoly(protect,[sleeve],255)
+          cv2.rectangle(protect,(0,700),(325,1491),255,-1)
+
+          mask=np.zeros_like(gray,dtype=np.uint8)
+          umbrella=np.array([(610,440),(959,440),(959,1491),(320,1491),(320,930),(350,860),(400,800),(450,750),(500,710),(545,665),(580,610),(600,550)],np.int32)
+          cv2.fillPoly(mask,[umbrella],255)
+          mask[protect>0]=0
+
+          for d in ['work/input','work/mask','work/mat','work/fcf','work/final']:
+              Path(d).mkdir(parents=True,exist_ok=True)
+          patch_img.save('work/input/input.png')
+          Image.fromarray(mask).save('work/mask/input.png')
+          Path('work/mat-config.json').write_text(json.dumps({'hd_strategy':'Resize','hd_strategy_resize_limit':512}),encoding='utf-8')
+          Path('work/fcf-config.json').write_text(json.dumps({'hd_strategy':'Crop','hd_strategy_crop_margin':256}),encoding='utf-8')
+
+          red=np.zeros_like(patch); red[:,:,0]=255
+          a=(mask.astype(np.float32)/255*0.45)[...,None]
+          Image.fromarray(np.clip(patch*(1-a)+red*a,0,255).astype(np.uint8)).save('work/final/mask_overlay_mat_fcf.png')
+          PY
+
+      - name: Run MAT
+        run: |
+          iopaint run --model=mat --device=cpu \
+            --image=work/input --mask=work/mask --output=work/mat \
+            --config=work/mat-config.json
+
+      - name: Run FcF
+        run: |
+          iopaint run --model=fcf --device=cpu \
+            --image=work/input --mask=work/mask --output=work/fcf \
+            --config=work/fcf-config.json
+
+      - name: Composite and verify candidates
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageFilter
+          import numpy as np, json, hashlib
+
+          src_path=list(Path('work/source_artifact').rglob('*.png'))[0]
+          src=Image.open(src_path).convert('RGB')
+          crop_box=(1400,2700,2360,4192)
+          patch_src=src.crop(crop_box)
+          mask=Image.open('work/mask/input.png').convert('L')
+          m=np.asarray(mask,dtype=np.float32)/255.0
+          b=np.asarray(mask.filter(ImageFilter.GaussianBlur(radius=2)),dtype=np.float32)/255.0
+          alpha=np.minimum(m,b)[...,None]
+          s=np.asarray(patch_src,dtype=np.float32)
+          gm=np.zeros((4192,2360),dtype=bool)
+          gm[2700:4192,1400:2360]=np.asarray(mask)>0
+          src_np=np.asarray(src)
+          reports={}
+
+          for model in ['mat','fcf']:
+              outs=list(Path(f'work/{model}').rglob('*.png'))+list(Path(f'work/{model}').rglob('*.jpg'))
+              assert outs,f'{model} output missing'
+              out=Image.open(outs[0]).convert('RGB')
+              if out.size!=patch_src.size:
+                  out=out.resize(patch_src.size,Image.Resampling.LANCZOS)
+              o=np.asarray(out,dtype=np.float32)
+              comp=np.clip(o*alpha+s*(1-alpha),0,255).astype(np.uint8)
+              final=src.copy(); final.paste(Image.fromarray(comp,'RGB'),crop_box[:2])
+              out_path=Path(f'work/final/Hao_Hair_SR_x2_umbrella_{model}_v05.png')
+              final.save(out_path)
+              final_np=np.asarray(final)
+              outside_identical=bool(np.array_equal(src_np[~gm],final_np[~gm]))
+              assert outside_identical,f'{model}: outside mask changed'
+              reports[model]={
+                  'outside_mask_bit_identical':outside_identical,
+                  'output_size':list(final.size),
+                  'changed_pixels':int(np.count_nonzero(np.any(src_np!=final_np,axis=2))),
+                  'sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
+              }
+          Path('work/final/verification_mat_fcf.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
+          print(reports)
+          PY
+
+      - name: Upload comparison candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-umbrella-compare-v05
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
