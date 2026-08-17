@@ -58,13 +58,11 @@ jobs:
           subject=np.array(Image.open('bg_v06/input/subject_mask.png').convert('L'))
           hair=np.array(Image.open('bg_v06/input/hair_mask.png').convert('L'))
 
-          # High-confidence original subject authority. Hair gets a lower threshold to retain fine edge strands.
           subject_hard=(subject>=96)
           hair_hard=(hair>=48)
           protect=(subject_hard | hair_hard).astype(np.uint8)*255
           protect=cv2.dilate(protect,np.ones((5,5),np.uint8),iterations=1)
 
-          # Umbrella target + observed remaining straps/trim. Never allow edit mask into protected subject pixels.
           edit=(umbrella>=96).astype(np.uint8)*255
           edit=cv2.dilate(edit,np.ones((25,25),np.uint8),iterations=1)
           cv2.fillPoly(edit,[np.array([[1880,3460],[2055,3440],[2075,4055],[1890,4070]],np.int32)],255)
@@ -72,8 +70,7 @@ jobs:
           cv2.fillPoly(edit,[np.array([[1985,3060],[2125,3060],[2150,3410],[2010,3430]],np.int32)],255)
           edit[protect>0]=0
 
-          # Perspective model fitted from the REAL visible dark divider above the umbrella:
-          # ~x2258@y1500, x2202@y2000, x2168@y2400, x2125@y2800, x2110@y3000.
+          # Fitted from the actual visible divider in the verified source image.
           def div_x(y):
               return int(round(2415.0 - 0.1020*float(y)))
 
@@ -81,53 +78,57 @@ jobs:
           ys,xs=np.where(edit>0)
           assert len(xs)>1000
 
-          # Reuse only genuine upper-wall pixels from the source. No AI-generated texture.
-          # Target y=2900..4192 maps into donor y≈650..1620, where this wall is unobstructed.
           for y,x in zip(ys.tolist(),xs.tolist()):
               td=div_x(y)
               rel=x-td
 
-              # Bottom base/floor band: extend real visible base texture horizontally.
+              # Preserve a source-derived base/floor cue at the bottom-left side of the divider.
               if y>=4030 and rel < -20:
-                  donor_x=1500 + ((x-1500) % 170)
-                  donor_x=int(np.clip(donor_x,1450,1690))
+                  donor_x=int(np.clip(1500 + ((x-1500) % 170),1450,1690))
                   repaired[y,x]=src[y,donor_x]
                   continue
 
-              dy=int(np.clip(650.0 + max(0.0,y-2900.0)*0.75,650,1650))
-              dd=div_x(dy)
-              donor_x=int(round(dd+rel))
+              if rel < -24:
+                  # Wood: map the target position relative to the divider into a clean upper-wall donor band.
+                  dy=int(np.clip(650.0 + max(0.0,y-2900.0)*0.75,650,1650))
+                  dd=div_x(dy)
+                  hi=max(1540,min(W-1,dd-28))
+                  donor_x=int(np.clip(dd+rel,1540,hi))
+              elif rel > 24:
+                  # White wall: use a later clean donor row where enough white-panel width is visible,
+                  # then map normalized distance from the divider to the right image edge.
+                  dy=int(np.clip(1550.0 + max(0.0,y-2900.0)*0.20,1550,1850))
+                  dd=div_x(dy)
+                  white_start=int(np.clip(dd+18,0,W-2))
+                  white_end=W-2
+                  target_span=max(1.0,float(W-1-td))
+                  frac=float(x-td)/target_span
+                  donor_x=int(round(white_start + np.clip(frac,0.0,1.0)*max(0,white_end-white_start)))
+                  donor_x=int(np.clip(donor_x,0,W-1))
+              else:
+                  # Divider: sample the real dark frame from a clean visible mid-height row.
+                  dy=int(np.clip(1500.0 + max(0.0,y-2900.0)*0.30,1500,2050))
+                  dd=div_x(dy)
+                  donor_x=int(np.clip(dd+rel,0,W-1))
 
-              # Keep donor coordinates inside known-clean source background bands.
-              if rel < -24:  # wood panel
-                  donor_x=int(np.clip(donor_x,1540,dd-28))
-              elif rel > 24:  # white panel
-                  donor_x=int(np.clip(donor_x,dd+28,W-2))
-              else:  # dark divider itself
-                  donor_x=int(np.clip(donor_x,dd-24,dd+24))
               repaired[y,x]=src[dy,donor_x]
 
-          # Source-derived wall reconstruction is intentionally background-only.
-          # A restrained full-background optical softness hides splice boundaries and creates requested commercial DOF.
+          # Requested background depth-of-field. Subject/hair will be restored exactly afterward.
           bg_blur=cv2.GaussianBlur(repaired,(0,0),sigmaX=7.0,sigmaY=7.0,borderType=cv2.BORDER_REFLECT)
 
-          # Soft subject transition outside the hard authority region, followed by exact original-pixel lock inside.
-          protect_f=(protect.astype(np.float32)/255.0)
+          protect_f=protect.astype(np.float32)/255.0
           soft=cv2.GaussianBlur(protect_f,(0,0),sigmaX=3.0,sigmaY=3.0)
           soft=np.clip(soft,0,1)[...,None]
           final=np.clip(bg_blur.astype(np.float32)*(1.0-soft)+src.astype(np.float32)*soft,0,255).astype(np.uint8)
+          # Hard authority lock: every protected person/hair pixel is restored byte-for-byte.
           final[protect>0]=src[protect>0]
 
-          # For areas near the lower edge not part of background cleanup and not subject, keep normal background blur.
-          # Verify all protected human pixels are bit-identical to the verified SR source.
           protected_changed=int(np.count_nonzero(np.any(final!=src,axis=2) & (protect>0)))
+          edit_changed=int(np.count_nonzero(np.any(final!=src,axis=2) & (edit>0)))
           print('PROTECTED_SUBJECT_CHANGED_PIXELS',protected_changed)
+          print('EDIT_REGION_CHANGED_PIXELS',edit_changed)
           assert protected_changed==0
-
-          # Verify umbrella region is actually changed while source dimensions are preserved.
-          umbrella_remaining_source_change=int(np.count_nonzero(np.any(final!=src,axis=2) & (edit>0)))
-          print('EDIT_REGION_CHANGED_PIXELS',umbrella_remaining_source_change)
-          assert umbrella_remaining_source_change>1000
+          assert edit_changed>1000
           assert final.shape[:2]==(4192,2360)
 
           out=Path('bg_v06/output'); out.mkdir(parents=True,exist_ok=True)
@@ -135,18 +136,15 @@ jobs:
           Image.fromarray(edit).save(out/'umbrella_edit_mask_v06.png',compress_level=2)
           Image.fromarray(protect).save(out/'protected_subject_hair_mask_v06.png',compress_level=2)
 
-          # QA: lower-right before | after.
           x0,y0,x1,y1=1450,2850,2360,4192
           before=Image.fromarray(src[y0:y1,x0:x1]); after=Image.fromarray(final[y0:y1,x0:x1])
           qa=Image.new('RGB',(before.width*2,before.height)); qa.paste(before,(0,0)); qa.paste(after,(before.width,0))
           qa.save(out/'lower_right_before_after_v06.png',compress_level=2)
 
-          # QA: entire frame side by side, reduced for practical review.
           b=Image.fromarray(src).resize((590,1048),Image.Resampling.LANCZOS)
           a=Image.fromarray(final).resize((590,1048),Image.Resampling.LANCZOS)
           full=Image.new('RGB',(1180,1048)); full.paste(b,(0,0)); full.paste(a,(590,0))
           full.save(out/'full_before_after_v06.png',compress_level=2)
-
           print('FINAL_SIZE',(2360,4192))
           PY
 
