@@ -1,0 +1,105 @@
+name: Hao Hair Commercial Candidate Package
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-commercial-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package-candidates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified studio-tone artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-studiotone-v01
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32009395162
+
+      - name: Install image stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install pillow 'numpy<2'
+
+      - name: Package primary and native-pixel portfolio crop
+        run: |
+          python - <<'PY'
+          import os, json, hashlib, shutil
+          from pathlib import Path
+          from PIL import Image
+          import numpy as np
+
+          workspace=Path(os.environ['GITHUB_WORKSPACE'])
+          root=workspace/'work/source_artifact'
+          src_files=list(root.rglob('Hao_Hair_Commercial_StudioTone_studio_v01.png'))
+          assert src_files,'selected studio-tone candidate not found'
+          src_path=src_files[0]
+          src=Image.open(src_path).convert('RGB')
+          assert src.size==(2360,4192),src.size
+
+          outdir=workspace/'work/final'
+          outdir.mkdir(parents=True,exist_ok=True)
+
+          primary=outdir/'Hao_Hair_Commercial_PrimaryCandidate_v01.png'
+          shutil.copyfile(src_path,primary)
+          assert primary.read_bytes()==src_path.read_bytes(),'primary package changed source bytes'
+
+          # Native-pixel 4:5 derivative: keeps complete hairstyle and shoulder context,
+          # removes the phone/hands from the visual hierarchy. No resize/interpolation.
+          crop_box=(280,560,2080,2810)
+          crop=src.crop(crop_box)
+          assert crop.size==(1800,2250),crop.size
+          portfolio=outdir/'Hao_Hair_Commercial_Portfolio4x5_Candidate_v01.png'
+          crop.save(portfolio)
+
+          src_np=np.asarray(src)
+          crop_np=np.asarray(crop)
+          x0,y0,x1,y1=crop_box
+          assert np.array_equal(crop_np,src_np[y0:y1,x0:x1]),'crop pixels differ from source region'
+
+          # QA previews only; never used as source for later edits.
+          p=src.copy(); p.thumbnail((900,1600)); p.save(outdir/'qa_primary_v01.jpg',quality=95)
+          q=crop.copy(); q.thumbnail((900,1125)); q.save(outdir/'qa_portfolio4x5_v01.jpg',quality=95)
+
+          def sha256(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          report={
+              'status':'PRIMARY_CANDIDATE_NOT_USER_ACCEPTED',
+              'primary_source':'Hao_Hair_Commercial_StudioTone_studio_v01.png',
+              'primary_size':list(src.size),
+              'primary_byte_identical_to_selected_studiotone':True,
+              'primary_sha256':sha256(primary),
+              'portfolio_crop_box_xyxy':list(crop_box),
+              'portfolio_size':list(crop.size),
+              'portfolio_aspect_ratio':'4:5',
+              'portfolio_native_pixel_crop_no_resampling':True,
+              'portfolio_sha256':sha256(portfolio)
+          }
+          (outdir/'verification_candidate_package_v01.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload candidate package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-commercial-primary-candidate-v01
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
