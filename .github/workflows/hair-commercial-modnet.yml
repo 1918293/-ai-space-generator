@@ -1,0 +1,159 @@
+name: Hao Hair Commercial MODNet Bokeh
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-commercial-modnet.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  portrait-bokeh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified umbrella-clean v15
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-umbrella-source-plate-v15
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32008506857
+
+      - name: Install MODNet CPU stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'numpy<2' pillow opencv-python-headless==4.10.0.84 gdown
+          pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cpu
+          git clone --depth 1 https://github.com/ZHKKKe/MODNet.git /tmp/MODNet
+          mkdir -p /tmp/MODNet/pretrained_download
+          gdown --folder 'https://drive.google.com/drive/folders/1umYmlCulvIFNaqPjwod1SayFmSRHziyR?usp=sharing' -O /tmp/MODNet/pretrained_download
+          echo 'Downloaded checkpoints:'
+          find /tmp/MODNet/pretrained_download -type f -maxdepth 3 -printf '%p\n'
+          python - <<'PY'
+          import torch, torchvision, cv2
+          print('TORCH',torch.__version__,'CUDA',torch.cuda.is_available())
+          print('TORCHVISION',torchvision.__version__,'OPENCV',cv2.__version__)
+          PY
+
+      - name: Generate high-resolution portrait matte and bokeh candidates
+        run: |
+          cd /tmp/MODNet
+          python - <<'PY'
+          import sys, json, hashlib
+          from pathlib import Path
+          import numpy as np
+          import cv2
+          from PIL import Image
+          import torch
+          import torch.nn as nn
+          import torch.nn.functional as F
+          import torchvision.transforms as transforms
+
+          sys.path.insert(0,'/tmp/MODNet')
+          from src.models.modnet import MODNet
+
+          source_files=list(Path("$GITHUB_WORKSPACE/work/source_artifact").rglob('Hao_Hair_SR_x2_umbrella_source_plate_v15.png'))
+          if not source_files:
+              source_files=list(Path("$GITHUB_WORKSPACE/work/source_artifact").rglob('*.png'))
+              source_files=[p for p in source_files if 'mask' not in p.name.lower() and 'protect' not in p.name.lower()]
+          assert source_files,'v15 source PNG not found'
+          src_path=source_files[0]
+          src=Image.open(src_path).convert('RGB')
+          assert src.size==(2360,4192),src.size
+          src_np=np.asarray(src)
+
+          ckpts=list(Path('/tmp/MODNet/pretrained_download').rglob('*.ckpt'))+list(Path('/tmp/MODNet/pretrained_download').rglob('*.pth'))
+          assert ckpts,'No MODNet checkpoint downloaded'
+          photographic=[p for p in ckpts if 'photographic' in p.name.lower()]
+          ckpt=photographic[0] if photographic else ckpts[0]
+          print('USING_CKPT',ckpt)
+
+          transform=transforms.Compose([
+              transforms.ToTensor(),
+              transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5)),
+          ])
+          im=transform(src)[None,:,:,:]
+          _,_,h,w=im.shape
+          ref_size=768
+          if w>=h:
+              rh=ref_size; rw=int(w/h*ref_size)
+          else:
+              rw=ref_size; rh=int(h/w*ref_size)
+          rw=max(32,rw-rw%32); rh=max(32,rh-rh%32)
+          im_small=F.interpolate(im,size=(rh,rw),mode='area')
+
+          model=MODNet(backbone_pretrained=False)
+          model=nn.DataParallel(model)
+          weights=torch.load(str(ckpt),map_location=torch.device('cpu'))
+          model.load_state_dict(weights)
+          model.eval()
+          with torch.no_grad():
+              _,_,matte=model(im_small,True)
+          matte=F.interpolate(matte,size=(h,w),mode='bilinear',align_corners=False)[0,0].cpu().numpy()
+          matte=np.clip(matte,0,1)
+
+          outdir=Path("$GITHUB_WORKSPACE/work/final")
+          outdir.mkdir(parents=True,exist_ok=True)
+          Image.fromarray((matte*255).astype(np.uint8),'L').save(outdir/'modnet_matte_768.png')
+
+          # Background-only blend. Core subject pixels (matte >= .985) remain bit-identical.
+          bg_mix=np.clip((0.985-matte)/0.985,0,1)
+          bg_mix=np.power(bg_mix,1.25)[...,None].astype(np.float32)
+          core=matte>=0.985
+          variants={}
+          src_f=src_np.astype(np.float32)
+          for label,sigma in [('subtle',7.0),('balanced',12.0),('strong',18.0)]:
+              blurred=cv2.GaussianBlur(src_np,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101).astype(np.float32)
+              out=np.clip(src_f*(1-bg_mix)+blurred*bg_mix,0,255).astype(np.uint8)
+              assert np.array_equal(out[core],src_np[core]),f'{label}: core subject changed'
+              p=outdir/f'Hao_Hair_Commercial_Bokeh_{label}_v01.png'
+              Image.fromarray(out,'RGB').save(p)
+              # QA preview
+              preview=Image.fromarray(out,'RGB').copy(); preview.thumbnail((900,1600)); preview.save(outdir/f'qa_{label}.jpg',quality=94)
+              variants[label]={
+                  'sigma':sigma,
+                  'core_subject_bit_identical':True,
+                  'changed_pixels':int(np.count_nonzero(np.any(out!=src_np,axis=2))),
+                  'sha256':hashlib.sha256(p.read_bytes()).hexdigest()
+              }
+
+          # Subject protection metrics.
+          face_hair_roi=(300,700,1900,2800)
+          x0,y0,x1,y1=face_hair_roi
+          roi_matte=matte[y0:y1,x0:x1]
+          report={
+              'method':'MODNet trimap-free portrait matte + background-only Gaussian bokeh',
+              'modnet_checkpoint':ckpt.name,
+              'matte_ref_size':ref_size,
+              'source_size':[2360,4192],
+              'core_subject_threshold':0.985,
+              'core_subject_pixels':int(np.count_nonzero(core)),
+              'face_hair_roi':list(face_hair_roi),
+              'face_hair_roi_mean_matte':float(roi_matte.mean()),
+              'variants':variants
+          }
+          (outdir/'verification_bokeh.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload bokeh candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-commercial-modnet-bokeh-v01
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
