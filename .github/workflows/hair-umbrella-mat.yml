@@ -1,0 +1,165 @@
+name: Hao Hair Umbrella MAT Removal
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-mat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  masked-mat-removal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install MAT CPU stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==1.26.4 Pillow==9.5.0 opencv-python-headless==4.10.0.84
+          pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install diffusers==0.27.2 huggingface_hub==0.25.2 loguru 'pydantic>=2.5.2' yacs omegaconf easydict safetensors
+          git clone --depth 1 https://github.com/Sanster/IOPaint.git /tmp/IOPaint
+          pip install -e /tmp/IOPaint --no-deps
+
+      - name: Fetch verified 2x SR source and selection mask
+        run: |
+          mkdir -p umbrella_mat/input umbrella_mat/output
+          curl -L --fail --retry 3 -o umbrella_mat/input/source.png 'https://at.adobe.com/AZgcnQiiGqXVd0K2'
+          # Prefer Adobe's object-selection mask. If the short URL is unavailable, the Python step falls back to a conservative local mask.
+          curl -L --fail --retry 2 -o umbrella_mat/input/adobe_mask.png 'https://photoshop-api.adobe.io/v2/short-url/urn:aaid:ps:US:ac780920-be9f-4308-8ea3-9cb2e60c5e95' || true
+          python - <<'PY'
+          from PIL import Image
+          im=Image.open('umbrella_mat/input/source.png')
+          print('SOURCE_SIZE',im.size)
+          assert im.size==(2360,4192)
+          PY
+
+      - name: Run MAT masked background reconstruction
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          import cv2
+          import numpy as np
+          import torch
+          from PIL import Image, ImageDraw, ImageFilter
+
+          sys.path.insert(0,'/tmp/IOPaint')
+          from iopaint.model.mat import MAT
+
+          src=np.array(Image.open('umbrella_mat/input/source.png').convert('RGB'))
+          H,W=src.shape[:2]
+
+          # Load Adobe object mask when valid; otherwise use the previously audited umbrella-only region.
+          mask=None
+          mp=Path('umbrella_mat/input/adobe_mask.png')
+          if mp.exists():
+              try:
+                  m=np.array(Image.open(mp).convert('L'))
+                  if m.shape==(H,W) and np.count_nonzero(m>127)>1000:
+                      mask=(m>127).astype(np.uint8)*255
+                      print('MASK_SOURCE Adobe selection',np.count_nonzero(mask))
+              except Exception as e:
+                  print('Adobe mask unusable',repr(e))
+
+          if mask is None:
+              mask=np.zeros((H,W),np.uint8)
+              # Conservative polygon localized to the known lower-right umbrella cluster.
+              pts=np.array([
+                [2055,3180],[2120,3180],[2130,3320],[2170,3200],[2210,3200],
+                [2215,3380],[2265,3320],[2280,3190],[2320,3180],[2359,3230],
+                [2359,4191],[1990,4191],[1930,4020],[1880,3910],[1830,3780],
+                [1700,3620],[1760,3550],[1840,3470],[1900,3400],[1950,3370],[2010,3280]
+              ],np.int32)
+              cv2.fillPoly(mask,[pts],255)
+              print('MASK_SOURCE fallback polygon',np.count_nonzero(mask))
+
+          # Safety dilation to include red trim / narrow umbrella edges.
+          kernel=np.ones((15,15),np.uint8)
+          edit_mask=cv2.dilate(mask,kernel,iterations=1)
+
+          # Determine crop around the mask and include enough surrounding real wall context.
+          ys,xs=np.where(edit_mask>0)
+          assert len(xs)>0
+          margin=220
+          x0=max(0,int(xs.min())-margin); x1=min(W,int(xs.max())+1+margin)
+          y0=max(0,int(ys.min())-margin); y1=min(H,int(ys.max())+1+margin)
+          crop=src[y0:y1,x0:x1].copy()
+          cmask=edit_mask[y0:y1,x0:x1].copy()
+          oh,ow=crop.shape[:2]
+          print('CROP',x0,y0,x1,y1,'SIZE',ow,oh)
+
+          # MAT is a 512x512 Places model. Preserve crop aspect ratio and symmetric-pad to square.
+          scale=min(512.0/max(ow,oh),1.0)
+          nw=max(1,int(round(ow*scale))); nh=max(1,int(round(oh*scale)))
+          interp=cv2.INTER_AREA if scale<1 else cv2.INTER_CUBIC
+          rimg=cv2.resize(crop,(nw,nh),interpolation=interp)
+          rmask=cv2.resize(cmask,(nw,nh),interpolation=cv2.INTER_NEAREST)
+          padx=512-nw; pady=512-nh
+          l=padx//2; r=padx-l; t=pady//2; b=pady-t
+          pimg=np.pad(rimg,((t,b),(l,r),(0,0)),mode='symmetric')
+          pmask=np.pad(rmask,((t,b),(l,r)),mode='constant')
+
+          # Run official IOPaint MAT implementation directly on CPU.
+          torch.manual_seed(240); np.random.seed(240)
+          model=MAT(torch.device('cpu'),no_half=True)
+          with torch.inference_mode():
+              # MAT.forward returns BGR uint8.
+              pred_bgr=model.forward(pimg,pmask,None)
+          pred_rgb=pred_bgr[:,:,::-1]
+          pred_rgb=pred_rgb[t:t+nh,l:l+nw]
+          pred_rgb=cv2.resize(pred_rgb,(ow,oh),interpolation=cv2.INTER_CUBIC)
+
+          # Only masked pixels can change. Feather is constrained to the inside of the hard mask.
+          feather_img=Image.fromarray(cmask).filter(ImageFilter.GaussianBlur(radius=3))
+          feather=np.array(feather_img,dtype=np.float32)/255.0
+          feather*= (cmask>0).astype(np.float32)
+          alpha=feather[...,None]
+          blend=np.clip(crop.astype(np.float32)*(1-alpha)+pred_rgb.astype(np.float32)*alpha,0,255).astype(np.uint8)
+
+          final=src.copy()
+          roi=final[y0:y1,x0:x1]
+          inside=cmask>0
+          roi[inside]=blend[inside]
+          final[y0:y1,x0:x1]=roi
+
+          # Deterministic pixel-lock QA.
+          global_mask=np.zeros((H,W),np.uint8); global_mask[y0:y1,x0:x1]=cmask
+          diff=np.any(final!=src,axis=2)
+          outside=int(np.count_nonzero(diff & (global_mask==0)))
+          inside_changes=int(np.count_nonzero(diff & (global_mask>0)))
+          print('OUTSIDE_MASK_CHANGED_PIXELS',outside)
+          print('INSIDE_MASK_CHANGED_PIXELS',inside_changes)
+          assert outside==0
+          assert inside_changes>0
+
+          out=Path('umbrella_mat/output'); out.mkdir(parents=True,exist_ok=True)
+          Image.fromarray(final).save(out/'Hao_Hair_SR_x2_UmbrellaRemoved_MAT_v03.png',compress_level=2)
+          Image.fromarray(global_mask).save(out/'umbrella_edit_mask_MAT_v03.png',compress_level=2)
+
+          before=Image.fromarray(src[y0:y1,x0:x1]); after=Image.fromarray(final[y0:y1,x0:x1])
+          qa=Image.new('RGB',(ow*2,oh)); qa.paste(before,(0,0)); qa.paste(after,(ow,0))
+          qa.save(out/'umbrella_before_after_MAT_v03.png',compress_level=2)
+          print('FINAL_SIZE',Image.open(out/'Hao_Hair_SR_x2_UmbrellaRemoved_MAT_v03.png').size)
+          assert Image.open(out/'Hao_Hair_SR_x2_UmbrellaRemoved_MAT_v03.png').size==(2360,4192)
+          PY
+
+      - name: Upload MAT result and QA
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-umbrella-mat-v03
+          path: umbrella_mat/output/*.png
+          if-no-files-found: error
+          retention-days: 7
