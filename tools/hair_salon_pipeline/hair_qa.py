@@ -56,9 +56,10 @@ def main():
     x0, x1 = int(xs.min()), int(xs.max()) + 1
     y0, y1 = int(ys.min()), int(ys.max()) + 1
 
-    # Without a dedicated hair segmentation mask, use the upper 62% of the
+    # Without a dedicated hair segmentation mask, use the upper 50% of the
     # high-confidence subject as a conservative hair/face proxy and label it as such.
-    hair_y1 = y0 + max(1, int((y1 - y0) * 0.62))
+    # This intentionally avoids letting hands/lower-shirt highlights dominate hair QA.
+    hair_y1 = y0 + max(1, int((y1 - y0) * 0.50))
     yy = np.arange(h)[:, None]
     hair_proxy = core & (yy >= y0) & (yy < hair_y1)
     if np.count_nonzero(hair_proxy) < 1000:
@@ -99,7 +100,7 @@ def main():
         "hair_color_median_hue": hue_med <= 2.0,
         "hair_color_p95_hue": hue_p95 <= 6.0,
         "hair_color_saturation": sat_med <= 4.0,
-        "subject_core_highlight_not_worse": cand_clip_core <= auth_clip_core + 0.005,
+        "hair_proxy_highlight_clip_within_limit": cand_clip_hair <= 0.015,
     }
     hard_pass = all(gates.values())
 
@@ -129,8 +130,18 @@ def main():
             "transition_band_mean_abs_error": transition_mae,
             "transition_band_p95_abs_error": transition_p95,
         },
+        "thresholds": {
+            "gradient_correlation_min": 0.995,
+            "edge_energy_ratio_min": 0.90,
+            "edge_energy_ratio_max": 1.15,
+            "median_hue_shift_degrees_max": 2.0,
+            "p95_hue_shift_degrees_max": 6.0,
+            "median_saturation_shift_8bit_max": 4.0,
+            "hair_proxy_highlight_clip_fraction_max": 0.015,
+        },
         "policy": {
             "transition_band_is_diagnostic_not_hard_gate": True,
+            "subject_core_highlight_is_diagnostic_not_hair_gate": True,
             "candidate_cannot_be_promoted_by_metrics_alone": True,
             "visual_hair_edge_review_required_for_final_acceptance": True,
         },
