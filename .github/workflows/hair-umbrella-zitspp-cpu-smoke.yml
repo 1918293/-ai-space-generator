@@ -47,7 +47,7 @@ jobs:
             python -m pip install numpy==1.21.6 pillow==9.5.0 six==1.16.0
             python -m pip install torch==1.9.1+cpu torchvision==0.10.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
             python -m pip install pytorch-lightning==1.2.9 torchmetrics==0.2.0 tensorboard==2.4.1 protobuf==3.20.3
-            python -m pip install PyYAML==6.0 yacs==0.1.8 tqdm==4.59.0 timm==0.3.2 opencv-python-headless==4.5.5.64 scipy==1.7.3 scikit-image==0.19.3 lpips==0.1.4 omegaconf==2.0.6
+            python -m pip install PyYAML==6.0 yacs==0.1.8 tqdm==4.59.0 timm==0.3.2 opencv-python-headless==4.5.5.64 scipy==1.7.3 scikit-image==0.19.3 lpips==0.1.4 omegaconf==2.0.6 pandas==1.3.5
             python - <<'PY'
           from pathlib import Path
           import site
@@ -61,7 +61,7 @@ jobs:
           print('TIMM_HELPER_PATCHED', old not in helper.read_text())
           PY
             python - <<'PY'
-          import numpy, PIL, six, torch, torchvision, pytorch_lightning, cv2, scipy, skimage, omegaconf, timm
+          import numpy, PIL, six, torch, torchvision, pytorch_lightning, cv2, scipy, skimage, omegaconf, timm, pandas
           print('NUMPY',numpy.__version__)
           print('PIL',PIL.__version__)
           print('SIX',six.__version__)
@@ -74,6 +74,7 @@ jobs:
           print('SKIMAGE',skimage.__version__)
           print('OMEGACONF',omegaconf.__version__)
           print('TIMM',timm.__version__)
+          print('PANDAS',pandas.__version__)
           PY
           } 2>&1 | tee work/environment.log
 
@@ -95,11 +96,12 @@ jobs:
           bash build.sh 2>&1 | tee ../../../../nms_build.log
           file ../lib/solve_csa.so | tee -a ../../../../nms_build.log
 
-      - name: Patch only explicit CUDA bindings for CPU smoke test
+      - name: Patch CPU and portable runtime bindings
         run: |
           cd work/ZITS-PlusPlus
           cp test.py test_official_backup.py
           cp trainers/lsm_hawp/lsm_hawp_model.py trainers/lsm_hawp/lsm_hawp_model_official_backup.py
+          cp trainers/nms_temp.py trainers/nms_temp_official_backup.py
           python - <<'PY'
           from pathlib import Path
 
@@ -114,12 +116,21 @@ jobs:
           s=s.replace('WireframeDetector(is_cuda=True).cuda()', 'WireframeDetector(is_cuda=False)')
           s=s.replace('.unsqueeze(0).cuda()', '.unsqueeze(0)')
           p.write_text(s)
+
+          p=Path('trainers/nms_temp.py')
+          s=p.read_text()
+          old='solver = cdll.LoadLibrary("/home/wmlce/dql_inpainting/CNN_final/src/cxx/lib/solve_csa.so")'
+          new='solver = cdll.LoadLibrary(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "nms", "cxx", "lib", "solve_csa.so"))'
+          assert old in s, 'expected upstream hard-coded NMS path not found'
+          p.write_text(s.replace(old,new))
           PY
-          python -m py_compile test.py trainers/lsm_hawp/lsm_hawp_model.py
+          python -m py_compile test.py trainers/lsm_hawp/lsm_hawp_model.py trainers/nms_temp.py
           diff -u test_official_backup.py test.py > ../cpu_patch_test.diff || true
           diff -u trainers/lsm_hawp/lsm_hawp_model_official_backup.py trainers/lsm_hawp/lsm_hawp_model.py > ../cpu_patch_lsm.diff || true
+          diff -u trainers/nms_temp_official_backup.py trainers/nms_temp.py > ../cpu_patch_nms.diff || true
           cat ../cpu_patch_test.diff
           cat ../cpu_patch_lsm.diff
+          cat ../cpu_patch_nms.diff
 
       - name: Verify core imports on CPU
         run: |
@@ -236,7 +247,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-zitspp-cpu-smoke-v04
+          name: hao-hair-zitspp-cpu-smoke-v05
           path: |
             work/zitspp_commit.txt
             work/environment.log
@@ -245,6 +256,7 @@ jobs:
             work/nms_build.log
             work/cpu_patch_test.diff
             work/cpu_patch_lsm.diff
+            work/cpu_patch_nms.diff
             work/core_imports.log
             work/smoke_input_report.json
             work/inference.log
