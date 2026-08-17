@@ -1,0 +1,221 @@
+name: Hao Hair ZITS++ Wide Mask Variants
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-zitspp-mask-variants.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  wide-mask-variants:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: Download verified 2x SR source
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
+      - name: Clone official ZITS++
+        run: |
+          git clone --depth 1 https://github.com/ewrfcas/ZITS-PlusPlus.git work/ZITS-PlusPlus
+          cd work/ZITS-PlusPlus
+          git rev-parse HEAD | tee ../zitspp_commit.txt
+
+      - name: Install verified CPU compatibility stack
+        run: |
+          python -m pip install --upgrade pip==24.0 'setuptools<70' wheel
+          python -m pip install numpy==1.21.6 pillow==9.5.0 six==1.16.0
+          python -m pip install torch==1.9.1+cpu torchvision==0.10.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+          python -m pip install pytorch-lightning==1.2.9 torchmetrics==0.2.0 tensorboard==2.4.1 protobuf==3.20.3
+          python -m pip install PyYAML==6.0 yacs==0.1.8 tqdm==4.59.0 timm==0.3.2 opencv-python-headless==4.5.5.64 scipy==1.7.3 scikit-image==0.19.3 lpips==0.1.4 omegaconf==2.0.6 pandas==1.3.5
+          python - <<'PY'
+          from pathlib import Path
+          import site
+          helper=Path(site.getsitepackages()[0])/'timm'/'models'/'layers'/'helpers.py'
+          s=helper.read_text(); old='from torch._six import container_abcs'
+          if old in s:
+              helper.write_text(s.replace(old,'from collections import abc as container_abcs'))
+          PY
+
+      - name: Download traceable checkpoint mirror
+        run: |
+          cd work/ZITS-PlusPlus
+          mkdir -p ckpts
+          wget -q -O ckpts/best_lsm_hawp.pth 'https://huggingface.co/jingwei-xu-00/pretrained_backup_for_streetunveiler/resolve/main/ZITS%2B%2B/best_lsm_hawp.pth'
+          wget -q -O ckpts/model_512.zip 'https://huggingface.co/jingwei-xu-00/pretrained_backup_for_streetunveiler/resolve/main/ZITS%2B%2B/model_512.zip'
+          unzip -q ckpts/model_512.zip -d ckpts
+          test -s ckpts/best_lsm_hawp.pth
+          test -s ckpts/model_512/models/last.ckpt
+          sha256sum ckpts/best_lsm_hawp.pth ckpts/model_512/models/last.ckpt | tee ../checkpoint_sha256.txt
+
+      - name: Build NMS and patch only verified CPU/runtime bindings
+        run: |
+          cd work/ZITS-PlusPlus/nms/cxx/src
+          bash build.sh >/tmp/nms.log 2>&1
+          cd ../../../
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('test.py'); s=p.read_text()
+          s=s.replace('model.cuda()', "device = torch.device('cpu')\n    model.to(device)")
+          s=s.replace("batch[k] = batch[k].cuda()", "batch[k] = batch[k].to(device)")
+          p.write_text(s)
+          p=Path('trainers/lsm_hawp/lsm_hawp_model.py'); s=p.read_text()
+          s=s.replace('WireframeDetector(is_cuda=True).cuda()', 'WireframeDetector(is_cuda=False)')
+          s=s.replace('.unsqueeze(0).cuda()', '.unsqueeze(0)')
+          p.write_text(s)
+          p=Path('trainers/nms_temp.py'); s=p.read_text()
+          old='solver = cdll.LoadLibrary("/home/wmlce/dql_inpainting/CNN_final/src/cxx/lib/solve_csa.so")'
+          new='solver = cdll.LoadLibrary(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "nms", "cxx", "lib", "solve_csa.so"))'
+          assert old in s; p.write_text(s.replace(old,new))
+          p=Path('trainers/pl_trainers.py'); s=p.read_text()
+          old='self.wf = WireframeDetector(is_cuda=True)'
+          assert old in s; p.write_text(s.replace(old,'self.wf = WireframeDetector(is_cuda=False)'))
+          PY
+          python -m py_compile test.py trainers/lsm_hawp/lsm_hawp_model.py trainers/nms_temp.py trainers/pl_trainers.py
+
+      - name: Prepare wide-context ROI and three complete umbrella masks
+        run: |
+          cd work/ZITS-PlusPlus
+          mkdir -p variants/images variants/masks variants/out qa
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          import numpy as np, json
+
+          srcfiles=list(Path('../source_artifact').rglob('*.png')); assert srcfiles
+          src=Image.open(srcfiles[0]).convert('RGB'); assert src.size==(2360,4192)
+          # 2048x2048 crop: much more true wall/wood context; umbrella cluster occupies a smaller fraction.
+          box=(312,2144,2360,4192)
+          base=src.crop(box).resize((512,512),Image.Resampling.LANCZOS)
+
+          # Person protection projected from the previously audited full-resolution arm/sleeve geometry.
+          protect=Image.new('L',(512,512),0); dp=ImageDraw.Draw(protect)
+          def T(pt):
+              x,y=pt; return (round((x-box[0])*512/(box[2]-box[0])), round((y-box[1])*512/(box[3]-box[1])))
+          sleeve=[(1580,2250),(2030,2250),(2065,3040),(2060,3140),(2035,3185),(1990,3180),(1930,3140),(1840,3100),(1740,3060),(1650,3035),(1580,3000)]
+          arm=[(1400,3045),(1530,3055),(1700,3065),(1870,3090),(1990,3140),(2045,3195),(2045,3215),(2010,3250),(1980,3290),(1940,3325),(1900,3355),(1860,3380),(1810,3402),(1750,3422),(1660,3442),(1530,3450),(1430,3430),(1380,3380),(1360,3300)]
+          dp.polygon([T(p) for p in sleeve],fill=255)
+          dp.polygon([T(p) for p in arm],fill=255)
+          # Protect left/lower subject pixels, matching the source-preserving workflow principle.
+          xprotect=T((1665,3100))[0]; yprotect=T((0,3100))[1]
+          dp.rectangle((0,yprotect,xprotect,511),fill=255)
+          protect.save('qa/person_protect_wide.png')
+
+          masks={
+            'wide_m1':[(310,178),(342,168),(375,176),(405,170),(437,178),(470,175),(511,188),(511,511),(300,511),(292,455),(296,400),(305,350),(310,300),(306,250),(302,212)],
+            'wide_m2':[(292,165),(335,154),(378,160),(420,154),(462,160),(511,174),(511,511),(282,511),(274,450),(278,390),(286,330),(292,270),(286,215)],
+            'wide_m3':[(275,145),(330,138),(390,142),(450,145),(511,160),(511,511),(265,511),(258,445),(262,375),(270,310),(272,240),(268,185)]
+          }
+          report={'source_size':src.size,'crop_box':box,'test_size':[512,512],'variants':{}}
+          for name,poly in masks.items():
+              base.save(f'variants/images/{name}.png')
+              m=Image.new('L',(512,512),0); d=ImageDraw.Draw(m); d.polygon(poly,fill=255)
+              # Cover narrow lower-left dangling umbrella/rack structure too.
+              d.polygon([(250,300),(292,295),(300,475),(252,482)],fill=255)
+              m.save(f'variants/masks/{name}.png')
+              ma=np.asarray(m)>0; pr=np.asarray(protect)>0
+              report['variants'][name]={
+                  'model_mask_pixels':int(ma.sum()),
+                  'model_mask_fraction':float(ma.mean()),
+                  'safe_edit_pixels':int((ma & ~pr).sum()),
+                  'protected_overlap_pixels':int((ma & pr).sum())
+              }
+          Path('../wide_mask_report.json').write_text(json.dumps(report,indent=2))
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Run ZITS++ batch inference for all mask variants
+        run: |
+          set -o pipefail
+          cd work/ZITS-PlusPlus
+          /usr/bin/time -v timeout 1200s python test.py \
+            --config configs/config_zitspp_finetune.yml \
+            --exp_name zitspp_wide_masks \
+            --ckpt_resume ckpts/model_512/models/last.ckpt \
+            --save_path variants/out \
+            --img_dir variants/images \
+            --mask_dir variants/masks \
+            --wf_ckpt ckpts/best_lsm_hawp.pth \
+            --use_ema --test_size 512 --save_image_only --obj_removal \
+            2>&1 | tee ../inference.log
+          test -s variants/out/wide_m1.png
+          test -s variants/out/wide_m2.png
+          test -s variants/out/wide_m3.png
+
+      - name: Hard composite source-safe variants and rank diagnostic metrics
+        run: |
+          cd work/ZITS-PlusPlus
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import numpy as np, json, hashlib, cv2
+
+          protect=np.asarray(Image.open('qa/person_protect_wide.png').convert('L'))>0
+          rows=[]
+          for name in ['wide_m1','wide_m2','wide_m3']:
+              a=np.asarray(Image.open(f'variants/images/{name}.png').convert('RGB'))
+              g=np.asarray(Image.open(f'variants/out/{name}.png').convert('RGB'))
+              m=np.asarray(Image.open(f'variants/masks/{name}.png').convert('L'))>0
+              safe=m & ~protect
+              out=a.copy(); out[safe]=g[safe]
+              outp=Path(f'qa/{name}_safe.png'); Image.fromarray(out).save(outp)
+
+              # Red umbrella-edge proxy in actual editable region.
+              hsv0=cv2.cvtColor(a,cv2.COLOR_RGB2HSV); hsv1=cv2.cvtColor(out,cv2.COLOR_RGB2HSV)
+              red0=(((hsv0[:,:,0]<12)|(hsv0[:,:,0]>170)) & (hsv0[:,:,1]>110) & (hsv0[:,:,2]>80) & safe)
+              red1=(((hsv1[:,:,0]<12)|(hsv1[:,:,0]>170)) & (hsv1[:,:,1]>110) & (hsv1[:,:,2]>80) & safe)
+              # Gray-collapse proxy: fraction of low-saturation mid-dark generated pixels.
+              gray=((hsv1[:,:,1]<45)&(hsv1[:,:,2]>35)&(hsv1[:,:,2]<190)&safe)
+              outside=int(np.count_nonzero(np.any(out!=a,axis=2)&~safe))
+              inside=int(np.count_nonzero(np.any(out!=a,axis=2)&safe))
+              row={
+                'name':name,'safe_edit_pixels':int(safe.sum()),
+                'outside_safe_edit_changed_pixels':outside,'inside_changed_pixels':inside,
+                'red_before':int(red0.sum()),'red_after':int(red1.sum()),
+                'red_removal_ratio':float(1-red1.sum()/max(1,red0.sum())),
+                'gray_fraction_in_safe_edit':float(gray.sum()/max(1,safe.sum())),
+                'sha256':hashlib.sha256(outp.read_bytes()).hexdigest()
+              }
+              rows.append(row)
+
+              qa=Image.new('RGB',(512*4,512),'white')
+              qa.paste(Image.fromarray(a),(0,0)); qa.paste(Image.fromarray(g),(512,0)); qa.paste(Image.fromarray(out),(1024,0))
+              mm=Image.fromarray((safe.astype(np.uint8)*255)); qa.paste(Image.merge('RGB',(mm,mm,mm)),(1536,0))
+              qa.save(f'qa/{name}_before_raw_safe_mask.png')
+          Path('../variant_metrics.json').write_text(json.dumps(rows,indent=2))
+          print(json.dumps(rows,indent=2))
+          assert all(r['outside_safe_edit_changed_pixels']==0 for r in rows)
+          PY
+
+      - name: Upload wide-context evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-zitspp-wide-mask-v01
+          path: |
+            work/zitspp_commit.txt
+            work/checkpoint_sha256.txt
+            work/wide_mask_report.json
+            work/inference.log
+            work/variant_metrics.json
+            work/ZITS-PlusPlus/qa/*.png
+            work/ZITS-PlusPlus/variants/images/*.png
+            work/ZITS-PlusPlus/variants/masks/*.png
+            work/ZITS-PlusPlus/variants/out/*.png
+          if-no-files-found: error
+          retention-days: 7
