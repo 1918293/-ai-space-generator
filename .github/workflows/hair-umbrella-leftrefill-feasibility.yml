@@ -39,6 +39,14 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: 32009172839
 
+      - name: Download aligned source-plate reference v15
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-umbrella-source-plate-v15
+          path: work/source_plate_v15
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32008506857
+
       - name: Clone simple LeftRefill wrapper and record source
         run: |
           git clone --depth 1 https://github.com/DavidXu-JJ/simple-leftrefill-inpainting.git work/simple-leftrefill
@@ -90,7 +98,7 @@ jobs:
           diff -u ../wrapper_official.py simple_leftrefill_inpainting/LeftRefill/wrapper.py > ../cpu_probe_patch.diff || true
           diff -u ../ddim_official.py simple_leftrefill_inpainting/LeftRefill/ldm/models/diffusion/ddim.py > ../ddim_cpu_patch.diff || true
 
-      - name: Prepare MODNet-constrained umbrella background mask and same-photo reference
+      - name: Prepare MODNet-safe mask and pixel-aligned clean-plate reference
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -101,45 +109,37 @@ jobs:
           src=Image.open(srcfiles[0]).convert('RGB'); assert src.size==(2360,4192)
           mattefiles=list(Path('work/modnet_artifact').rglob('modnet_matte_768_v02.png')); assert mattefiles
           matte=Image.open(mattefiles[0]).convert('L'); assert matte.size==(2360,4192)
+          reffiles=list(Path('work/source_plate_v15').rglob('Hao_Hair_SR_x2_umbrella_source_plate_v15.png')); assert reffiles
+          ref_full=Image.open(reffiles[0]).convert('RGB'); assert ref_full.size==(2360,4192)
           outdir=Path('work/leftrefill_inputs'); outdir.mkdir(exist_ok=True)
 
           target_box=(312,2144,2360,4192)
           target=src.crop(target_box); target.save(outdir/'target.png')
+          # Critical change: reference keeps exactly the same camera coordinates as the target.
+          # It is only a structural prior; final output never copies it directly outside the safe mask.
+          aligned_ref=ref_full.crop(target_box); aligned_ref.save(outdir/'reference_aligned_v15.png')
 
-          # Clean same-photo reference: wood panel + dark vertical trim + adjacent white wall.
-          reference_box=(1500,900,2360,1760)
-          src.crop(reference_box).save(outdir/'reference.png')
-
-          # Subject authority comes from the already-verified MODNet matte. Protect even faint edge pixels,
-          # then dilate inward/outward by 8 px so arm/sleeve/hair edges can never enter the generative composite.
           matte_crop=matte.crop(target_box)
-          protect=np.where(np.asarray(matte_crop)>=13,255,0).astype(np.uint8)  # >= ~0.05 matte confidence
+          protect=np.where(np.asarray(matte_crop)>=13,255,0).astype(np.uint8)
           protect_img=Image.fromarray(protect,'L').filter(ImageFilter.MaxFilter(17))
-          protect=np.asarray(protect_img)>0
-          protect_img.save(outdir/'person_protect_modnet.png')
+          protect=np.asarray(protect_img)>0; protect_img.save(outdir/'person_protect_modnet.png')
 
-          # Geometry mask now covers only the actual umbrella cluster, not the shirt/upper body.
           geom=Image.new('L',(2048,2048),0); d=ImageDraw.Draw(geom)
           d.polygon([(1430,940),(1530,910),(1650,930),(1770,920),(1900,950),(2047,970),
                      (2047,2047),(1380,2047),(1360,1900),(1370,1710),(1390,1510),(1420,1310),(1410,1110)],fill=255)
           d.polygon([(1320,1160),(1455,1140),(1500,1930),(1325,1960)],fill=255)
-          geom_arr=np.asarray(geom)>0
-          safe_model=geom_arr & ~protect
+          geom_arr=np.asarray(geom)>0; safe_model=geom_arr & ~protect
           model_mask=Image.fromarray((safe_model.astype(np.uint8)*255),'L')
-          geom.save(outdir/'umbrella_geometry_mask.png')
-          model_mask.save(outdir/'model_mask.png')
+          geom.save(outdir/'umbrella_geometry_mask.png'); model_mask.save(outdir/'model_mask.png')
 
-          overlay=np.asarray(target).copy()
-          overlay[safe_model]=(0.55*overlay[safe_model]+0.45*np.array([255,0,0])).astype(np.uint8)
+          overlay=np.asarray(target).copy(); overlay[safe_model]=(0.55*overlay[safe_model]+0.45*np.array([255,0,0])).astype(np.uint8)
           Image.fromarray(overlay).save(outdir/'model_mask_overlay.jpg',quality=92)
 
-          rep={
-            'target_box':target_box,'reference_box':reference_box,'target_size':target.size,
-            'modnet_source_run':32009172839,'modnet_protect_threshold_u8':13,'modnet_dilation_px':8,
-            'geometry_mask_pixels':int(geom_arr.sum()),'protected_pixels':int(protect.sum()),
-            'final_model_mask_pixels':int(safe_model.sum()),'final_model_mask_fraction':float(safe_model.mean()),
-            'geometry_removed_by_subject_protection':int((geom_arr&protect).sum())
-          }
+          rep={'target_box':target_box,'reference':'v15 aligned same-coordinate crop','reference_source_run':32008506857,
+               'modnet_source_run':32009172839,'modnet_protect_threshold_u8':13,'modnet_dilation_px':8,
+               'geometry_mask_pixels':int(geom_arr.sum()),'protected_pixels':int(protect.sum()),
+               'final_model_mask_pixels':int(safe_model.sum()),'final_model_mask_fraction':float(safe_model.mean()),
+               'geometry_removed_by_subject_protection':int((geom_arr&protect).sum())}
           Path('work/leftrefill_input_report.json').write_text(json.dumps(rep,indent=2)); print(json.dumps(rep,indent=2))
           PY
 
@@ -149,7 +149,7 @@ jobs:
           path: ~/.cache/huggingface/hub
           key: hao-leftrefill-sd2-openclip-v1
 
-      - name: Run reference-guided LeftRefill CPU probe at 256
+      - name: Run aligned-reference LeftRefill CPU probe at 256
         id: inference
         continue-on-error: true
         run: |
@@ -163,7 +163,7 @@ jobs:
           root=Path('../leftrefill_inputs')
           model=LeftRefillGuidance(); model.target_image_size=256
           print('MODEL_READY target',model.target_image_size,'DEVICE',model.sampler.model.betas.device)
-          result=model.predict(Image.open(root/'target.png').convert('RGB'),Image.open(root/'model_mask.png').convert('L'),Image.open(root/'reference.png').convert('RGB'),ddim_steps=6,scale=2.5,seed=42)
+          result=model.predict(Image.open(root/'target.png').convert('RGB'),Image.open(root/'model_mask.png').convert('L'),Image.open(root/'reference_aligned_v15.png').convert('RGB'),ddim_steps=6,scale=2.5,seed=42)
           Path('../leftrefill_output').mkdir(exist_ok=True)
           result.save('../leftrefill_output/raw_leftrefill_256.png'); print('OUTPUT_SIZE',result.size)
           del model; gc.collect()
@@ -184,17 +184,16 @@ jobs:
           if verdict['raw_output_exists']:
               raw=Image.open(rawp).convert('RGB').resize(target.size,Image.Resampling.BICUBIC)
               a=np.asarray(target); g=np.asarray(raw); safe=np.asarray(mask)>0; p=np.asarray(protect)>0
-              assert not np.any(safe&p),'MODNet-protected pixels leaked into edit mask'
+              assert not np.any(safe&p)
               out=a.copy(); out[safe]=g[safe]
               outim=Image.fromarray(out); outp=outdir/'source_safe_leftrefill_256.png'; outim.save(outp)
               hsv0=cv2.cvtColor(a,cv2.COLOR_RGB2HSV); hsv1=cv2.cvtColor(out,cv2.COLOR_RGB2HSV)
               red0=(((hsv0[:,:,0]<12)|(hsv0[:,:,0]>170))&(hsv0[:,:,1]>110)&(hsv0[:,:,2]>80)&safe)
               red1=(((hsv1[:,:,0]<12)|(hsv1[:,:,0]>170))&(hsv1[:,:,1]>110)&(hsv1[:,:,2]>80)&safe)
               gray=((hsv1[:,:,1]<45)&(hsv1[:,:,2]>35)&(hsv1[:,:,2]<190)&safe)
-              outside=int(np.count_nonzero(np.any(out!=a,axis=2)&~safe))
-              protected_changes=int(np.count_nonzero(np.any(out!=a,axis=2)&p))
+              outside=int(np.count_nonzero(np.any(out!=a,axis=2)&~safe)); protected_changes=int(np.count_nonzero(np.any(out!=a,axis=2)&p))
               verdict.update({'output_size':raw.size,'safe_edit_pixels':int(safe.sum()),'outside_safe_edit_changed_pixels':outside,'protected_subject_changed_pixels':protected_changes,'inside_changed_pixels':int(np.count_nonzero(np.any(out!=a,axis=2)&safe)),'red_before':int(red0.sum()),'red_after':int(red1.sum()),'red_removal_ratio':float(1-red1.sum()/max(1,red0.sum())),'gray_fraction_in_safe_edit':float(gray.sum()/max(1,safe.sum())),'sha256':hashlib.sha256(outp.read_bytes()).hexdigest(),'status':'INFERENCE_OUTPUT_CANDIDATE'})
-              qa=Image.new('RGB',(2048*3,2048)); qa.paste(target,(0,0)); qa.paste(raw,(2048,0)); qa.paste(outim,(4096,0)); qa.thumbnail((1800,600)); qa.save(outdir/'qa_before_raw_safe.jpg',quality=92)
+              qa=Image.new('RGB',(2048*4,2048)); qa.paste(target,(0,0)); qa.paste(Image.open(inp/'reference_aligned_v15.png').convert('RGB'),(2048,0)); qa.paste(raw,(4096,0)); qa.paste(outim,(6144,0)); qa.thumbnail((2000,500)); qa.save(outdir/'qa_target_reference_raw_safe.jpg',quality=92)
               assert outside==0 and protected_changes==0
           else: verdict['status']='INFERENCE_BLOCKED'
           verdict['promotion']='NOT_PROMOTED_PENDING_VISUAL_QA'; (root/'leftrefill_verdict.json').write_text(json.dumps(verdict,indent=2)); print(json.dumps(verdict,indent=2))
@@ -204,7 +203,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-leftrefill-probe-v05
+          name: hao-hair-leftrefill-probe-v06
           path: |
             work/leftrefill_wrapper_commit.txt
             work/environment.log
