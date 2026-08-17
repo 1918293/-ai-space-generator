@@ -1,0 +1,159 @@
+name: Hao Hair Deterministic Background Cleanup v06
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-background-geometric-v06.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-background-cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install deterministic image stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==1.26.4 Pillow==12.3.0 opencv-python-headless==4.10.0.84
+
+      - name: Fetch verified SR source and Adobe masks
+        run: |
+          mkdir -p bg_v06/input bg_v06/output
+          curl -L --fail --retry 3 -o bg_v06/input/source.png 'https://at.adobe.com/AZgcnQiiGqXVd0K2'
+          curl -L --fail --retry 3 -o bg_v06/input/umbrella_mask.png 'https://photoshop-api.adobe.io/v2/short-url/urn:aaid:ps:US:ac780920-be9f-4308-8ea3-9cb2e60c5e95'
+          curl -L --fail --retry 3 -o bg_v06/input/subject_mask.png 'https://photoshop-api.adobe.io/v2/short-url/urn:aaid:ps:US:5764b087-4dcb-4744-bd30-9142a0385a78'
+          curl -L --fail --retry 3 -o bg_v06/input/hair_mask.png 'https://photoshop-api.adobe.io/v2/short-url/urn:aaid:ps:US:48a8f5d5-e713-4fc9-b9fe-29f1ffdb7733'
+          python - <<'PY'
+          from PIL import Image
+          for p in ['source.png','umbrella_mask.png','subject_mask.png','hair_mask.png']:
+              im=Image.open('bg_v06/input/'+p)
+              print(p, im.size, im.mode)
+              assert im.size==(2360,4192), (p,im.size)
+          PY
+
+      - name: Reconstruct background only from source pixels and apply DOF
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import cv2
+          import numpy as np
+          from PIL import Image
+
+          src=np.array(Image.open('bg_v06/input/source.png').convert('RGB'))
+          H,W=src.shape[:2]
+          umbrella=np.array(Image.open('bg_v06/input/umbrella_mask.png').convert('L'))
+          subject=np.array(Image.open('bg_v06/input/subject_mask.png').convert('L'))
+          hair=np.array(Image.open('bg_v06/input/hair_mask.png').convert('L'))
+
+          # High-confidence original subject authority. Hair gets a lower threshold to retain fine edge strands.
+          subject_hard=(subject>=96)
+          hair_hard=(hair>=48)
+          protect=(subject_hard | hair_hard).astype(np.uint8)*255
+          protect=cv2.dilate(protect,np.ones((5,5),np.uint8),iterations=1)
+
+          # Umbrella target + observed remaining straps/trim. Never allow edit mask into protected subject pixels.
+          edit=(umbrella>=96).astype(np.uint8)*255
+          edit=cv2.dilate(edit,np.ones((25,25),np.uint8),iterations=1)
+          cv2.fillPoly(edit,[np.array([[1880,3460],[2055,3440],[2075,4055],[1890,4070]],np.int32)],255)
+          cv2.rectangle(edit,(2270,3050),(2359,3730),255,-1)
+          cv2.fillPoly(edit,[np.array([[1985,3060],[2125,3060],[2150,3410],[2010,3430]],np.int32)],255)
+          edit[protect>0]=0
+
+          # Perspective model fitted from the REAL visible dark divider above the umbrella:
+          # ~x2258@y1500, x2202@y2000, x2168@y2400, x2125@y2800, x2110@y3000.
+          def div_x(y):
+              return int(round(2415.0 - 0.1020*float(y)))
+
+          repaired=src.copy()
+          ys,xs=np.where(edit>0)
+          assert len(xs)>1000
+
+          # Reuse only genuine upper-wall pixels from the source. No AI-generated texture.
+          # Target y=2900..4192 maps into donor y≈650..1620, where this wall is unobstructed.
+          for y,x in zip(ys.tolist(),xs.tolist()):
+              td=div_x(y)
+              rel=x-td
+
+              # Bottom base/floor band: extend real visible base texture horizontally.
+              if y>=4030 and rel < -20:
+                  donor_x=1500 + ((x-1500) % 170)
+                  donor_x=int(np.clip(donor_x,1450,1690))
+                  repaired[y,x]=src[y,donor_x]
+                  continue
+
+              dy=int(np.clip(650.0 + max(0.0,y-2900.0)*0.75,650,1650))
+              dd=div_x(dy)
+              donor_x=int(round(dd+rel))
+
+              # Keep donor coordinates inside known-clean source background bands.
+              if rel < -24:  # wood panel
+                  donor_x=int(np.clip(donor_x,1540,dd-28))
+              elif rel > 24:  # white panel
+                  donor_x=int(np.clip(donor_x,dd+28,W-2))
+              else:  # dark divider itself
+                  donor_x=int(np.clip(donor_x,dd-24,dd+24))
+              repaired[y,x]=src[dy,donor_x]
+
+          # Source-derived wall reconstruction is intentionally background-only.
+          # A restrained full-background optical softness hides splice boundaries and creates requested commercial DOF.
+          bg_blur=cv2.GaussianBlur(repaired,(0,0),sigmaX=7.0,sigmaY=7.0,borderType=cv2.BORDER_REFLECT)
+
+          # Soft subject transition outside the hard authority region, followed by exact original-pixel lock inside.
+          protect_f=(protect.astype(np.float32)/255.0)
+          soft=cv2.GaussianBlur(protect_f,(0,0),sigmaX=3.0,sigmaY=3.0)
+          soft=np.clip(soft,0,1)[...,None]
+          final=np.clip(bg_blur.astype(np.float32)*(1.0-soft)+src.astype(np.float32)*soft,0,255).astype(np.uint8)
+          final[protect>0]=src[protect>0]
+
+          # For areas near the lower edge not part of background cleanup and not subject, keep normal background blur.
+          # Verify all protected human pixels are bit-identical to the verified SR source.
+          protected_changed=int(np.count_nonzero(np.any(final!=src,axis=2) & (protect>0)))
+          print('PROTECTED_SUBJECT_CHANGED_PIXELS',protected_changed)
+          assert protected_changed==0
+
+          # Verify umbrella region is actually changed while source dimensions are preserved.
+          umbrella_remaining_source_change=int(np.count_nonzero(np.any(final!=src,axis=2) & (edit>0)))
+          print('EDIT_REGION_CHANGED_PIXELS',umbrella_remaining_source_change)
+          assert umbrella_remaining_source_change>1000
+          assert final.shape[:2]==(4192,2360)
+
+          out=Path('bg_v06/output'); out.mkdir(parents=True,exist_ok=True)
+          Image.fromarray(final).save(out/'Hao_Hair_SR_x2_DeterministicCleanup_DOF_v06.png',compress_level=2)
+          Image.fromarray(edit).save(out/'umbrella_edit_mask_v06.png',compress_level=2)
+          Image.fromarray(protect).save(out/'protected_subject_hair_mask_v06.png',compress_level=2)
+
+          # QA: lower-right before | after.
+          x0,y0,x1,y1=1450,2850,2360,4192
+          before=Image.fromarray(src[y0:y1,x0:x1]); after=Image.fromarray(final[y0:y1,x0:x1])
+          qa=Image.new('RGB',(before.width*2,before.height)); qa.paste(before,(0,0)); qa.paste(after,(before.width,0))
+          qa.save(out/'lower_right_before_after_v06.png',compress_level=2)
+
+          # QA: entire frame side by side, reduced for practical review.
+          b=Image.fromarray(src).resize((590,1048),Image.Resampling.LANCZOS)
+          a=Image.fromarray(final).resize((590,1048),Image.Resampling.LANCZOS)
+          full=Image.new('RGB',(1180,1048)); full.paste(b,(0,0)); full.paste(a,(590,0))
+          full.save(out/'full_before_after_v06.png',compress_level=2)
+
+          print('FINAL_SIZE',(2360,4192))
+          PY
+
+      - name: Upload deterministic result and QA
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-deterministic-bg-v06
+          path: bg_v06/output/*.png
+          if-no-files-found: error
+          retention-days: 7
