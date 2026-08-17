@@ -75,7 +75,13 @@ jobs:
       - name: Install minimal QA stack
         run: |
           python -m pip install --disable-pip-version-check --quiet pillow==10.4.0 numpy==1.26.4 opencv-python-headless==4.10.0.84 onnxruntime==1.19.2
-          python -m py_compile tools/hair_salon_pipeline/preflight.py tools/hair_salon_pipeline/hair_qa.py tools/hair_salon_pipeline/gate.py tools/hair_salon_pipeline/hair_segment_onnx.py
+          python -m py_compile \
+            tools/hair_salon_pipeline/preflight.py \
+            tools/hair_salon_pipeline/orchestrator.py \
+            tools/hair_salon_pipeline/hair_qa.py \
+            tools/hair_salon_pipeline/gate.py \
+            tools/hair_salon_pipeline/decision_packet.py \
+            tools/hair_salon_pipeline/hair_segment_onnx.py
 
       - name: Resolve artifact inputs
         run: |
@@ -135,6 +141,14 @@ jobs:
             --matte "$MATTE_IMAGE" \
             "${EXTRA[@]}" \
             --output-dir work/reports
+          python - <<'PY'
+          import json
+          p=json.load(open('work/reports/decision_packet.json'))
+          assert p['decision_count']<=1,p
+          assert p['blocked_stages']==[],p
+          assert p['next_decision']['id']=='FINAL_VISUAL_ACCEPTANCE',p
+          print('MINIMAL_DECISION_PACKET_PASS')
+          PY
 
       - name: Upload production gate evidence
         if: always()
