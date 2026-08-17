@@ -1,0 +1,165 @@
+name: Hao Hair Umbrella PatchMatch
+
+on:
+  push:
+    branches:
+      - hao-hair-sr-test-20260817
+    paths:
+      - '.github/workflows/hair-umbrella-patchmatch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  patchmatch-texture-fill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download verified primary SR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source_artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 32003834720
+
+      - name: Install PatchMatch dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libopencv-dev
+          python -m pip install --upgrade pip
+          pip install 'numpy<2' pillow
+          pip install 'git+https://github.com/invoke-ai/PyPatchMatch.git@master'
+          python - <<'PY'
+          from patchmatch import patch_match
+          print('PATCHMATCH_AVAILABLE', patch_match.patchmatch_available)
+          assert patch_match.patchmatch_available
+          PY
+
+      - name: Prepare protected umbrella patch and mask
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import numpy as np, cv2, json
+
+          src_path=list(Path('work/source_artifact').rglob('*.png'))[0]
+          src=Image.open(src_path).convert('RGB')
+          assert src.size==(2360,4192),src.size
+          crop_box=(1320,2460,2360,4192)
+          patch_img=src.crop(crop_box)
+          patch=np.asarray(patch_img)
+          R,G,B=[patch[:,:,i].astype(np.int16) for i in range(3)]
+          gray=cv2.cvtColor(patch,cv2.COLOR_RGB2GRAY)
+          yy,xx=np.indices(gray.shape)
+
+          # Protect arm/skin with content detection plus conservative sleeve/body zones.
+          skin=((R>130)&(G>70)&(B<150)&((R-G)>20)&((G-B)>0)&(yy<1050)&(xx<820))
+          n,labels,stats,_=cv2.connectedComponentsWithStats(skin.astype(np.uint8),8)
+          skin_keep=np.zeros_like(gray,dtype=np.uint8)
+          for i in range(1,n):
+              comp=labels==i
+              area=stats[i,cv2.CC_STAT_AREA]
+              if area>600 and np.any(comp&(xx>260)&(xx<700)&(yy>500)&(yy<950)):
+                  skin_keep[comp]=255
+          skin_keep=cv2.dilate(skin_keep,np.ones((15,15),np.uint8),iterations=1)
+
+          protect=np.zeros_like(gray,dtype=np.uint8)
+          protect[skin_keep>0]=255
+          sleeve=np.array([(0,0),(800,0),(800,650),(760,670),(720,680),(680,675),(620,635),(560,590),(460,540),(320,500),(0,470)],np.int32)
+          cv2.fillPoly(protect,[sleeve],255)
+          cv2.rectangle(protect,(0,900),(400,1731),255,-1)
+
+          # Full umbrella cluster in this larger-context patch.
+          mask=np.zeros_like(gray,dtype=np.uint8)
+          umbrella=np.array([(690,660),(1039,650),(1039,1731),(400,1731),(390,1180),(420,1100),(470,1020),(520,960),(570,900),(620,830),(660,750)],np.int32)
+          cv2.fillPoly(mask,[umbrella],255)
+          mask[protect>0]=0
+
+          for d in ['work/input','work/mask','work/output','work/final']:
+              Path(d).mkdir(parents=True,exist_ok=True)
+          patch_img.save('work/input/input.png')
+          Image.fromarray(mask).save('work/mask/mask.png')
+          Path('work/final/meta.json').write_text(json.dumps({
+              'crop_box':crop_box,
+              'patch_size':patch_img.size,
+              'mask_pixels':int(np.count_nonzero(mask)),
+              'person_protection':'skin connected component + explicit sleeve/body exclusion'
+          },indent=2),encoding='utf-8')
+          PY
+
+      - name: Run PatchMatch variants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import numpy as np
+          from patchmatch import patch_match
+
+          img=np.asarray(Image.open('work/input/input.png').convert('RGB'),dtype=np.uint8)
+          mask=np.asarray(Image.open('work/mask/mask.png').convert('L'),dtype=np.uint8)
+          patch_match.set_random_seed(42)
+          patch_match.set_verbose(False)
+          for p in [3,5,7,11,15]:
+              out=patch_match.inpaint(img,mask,patch_size=p)
+              Image.fromarray(out.astype(np.uint8),'RGB').save(f'work/output/patchmatch_p{p}.png')
+              print('DONE',p,out.shape)
+          PY
+
+      - name: Composite and verify variants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageFilter
+          import numpy as np, json, hashlib
+
+          src_path=list(Path('work/source_artifact').rglob('*.png'))[0]
+          src=Image.open(src_path).convert('RGB')
+          crop_box=(1320,2460,2360,4192)
+          patch_src=src.crop(crop_box)
+          mask=Image.open('work/mask/mask.png').convert('L')
+          m=np.asarray(mask,dtype=np.float32)/255.0
+          b=np.asarray(mask.filter(ImageFilter.GaussianBlur(radius=2)),dtype=np.float32)/255.0
+          alpha=np.minimum(m,b)[...,None]
+          s=np.asarray(patch_src,dtype=np.float32)
+          gm=np.zeros((4192,2360),dtype=bool)
+          gm[2460:4192,1320:2360]=np.asarray(mask)>0
+          src_np=np.asarray(src)
+          reports={}
+
+          for p in [3,5,7,11,15]:
+              o=np.asarray(Image.open(f'work/output/patchmatch_p{p}.png').convert('RGB'),dtype=np.float32)
+              comp=np.clip(o*alpha+s*(1-alpha),0,255).astype(np.uint8)
+              final=src.copy(); final.paste(Image.fromarray(comp,'RGB'),crop_box[:2])
+              out_path=Path(f'work/final/Hao_Hair_SR_x2_umbrella_patchmatch_p{p}_v06.png')
+              final.save(out_path)
+              f=np.asarray(final)
+              outside=bool(np.array_equal(src_np[~gm],f[~gm]))
+              assert outside,f'p{p}: outside mask changed'
+              reports[f'p{p}']={
+                  'outside_mask_bit_identical':outside,
+                  'output_size':list(final.size),
+                  'changed_pixels':int(np.count_nonzero(np.any(src_np!=f,axis=2))),
+                  'sha256':hashlib.sha256(out_path.read_bytes()).hexdigest()
+              }
+          Path('work/final/verification_patchmatch.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
+          print(reports)
+          PY
+
+      - name: Upload PatchMatch candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-umbrella-patchmatch-v06
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 7
