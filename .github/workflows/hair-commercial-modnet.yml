@@ -49,7 +49,7 @@ jobs:
           print('TORCHVISION',torchvision.__version__,'OPENCV',cv2.__version__)
           PY
 
-      - name: Generate high-resolution portrait matte and bokeh candidates
+      - name: Generate hair-safe portrait matte and bokeh candidates
         run: |
           cd /tmp/MODNet
           python - <<'PY'
@@ -110,52 +110,65 @@ jobs:
 
           outdir=workspace/'work/final'
           outdir.mkdir(parents=True,exist_ok=True)
-          Image.fromarray((matte*255).astype(np.uint8),'L').save(outdir/'modnet_matte_768.png')
+          Image.fromarray((matte*255).astype(np.uint8),'L').save(outdir/'modnet_matte_768_v02.png')
 
-          # Background-only blend. Core subject pixels (matte >= .985) remain bit-identical.
-          bg_mix=np.clip((0.985-matte)/0.985,0,1)
-          bg_mix=np.power(bg_mix,1.25)[...,None].astype(np.float32)
-          core=matte>=0.985
+          # Hair-safe rule:
+          # matte >= 0.65 is kept exactly source-identical;
+          # only clear background (matte <= 0.05) receives full bokeh;
+          # ambiguous edge pixels transition smoothly instead of being aggressively blurred.
+          protect_threshold=0.65
+          background_threshold=0.05
+          x=np.clip((protect_threshold-matte)/(protect_threshold-background_threshold),0,1)
+          bg_mix=x*x*(3-2*x)
+          core=matte>=protect_threshold
+          bg_mix=bg_mix[...,None].astype(np.float32)
+
           variants={}
           src_f=src_np.astype(np.float32)
-          for label,sigma in [('subtle',7.0),('balanced',12.0),('strong',18.0)]:
+          hair_face_roi=(350,800,1900,2600)
+          hx0,hy0,hx1,hy1=hair_face_roi
+          for label,sigma in [('subtle',9.0),('balanced',12.0),('strong',15.0)]:
               blurred=cv2.GaussianBlur(src_np,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101).astype(np.float32)
               out=np.clip(src_f*(1-bg_mix)+blurred*bg_mix,0,255).astype(np.uint8)
-              assert np.array_equal(out[core],src_np[core]),f'{label}: core subject changed'
-              p=outdir/f'Hao_Hair_Commercial_Bokeh_{label}_v01.png'
+              assert np.array_equal(out[core],src_np[core]),f'{label}: protected subject changed'
+              p=outdir/f'Hao_Hair_Commercial_HairSafe_Bokeh_{label}_v02.png'
               Image.fromarray(out,'RGB').save(p)
               preview=Image.fromarray(out,'RGB').copy()
               preview.thumbnail((900,1600))
-              preview.save(outdir/f'qa_{label}.jpg',quality=94)
+              preview.save(outdir/f'qa_hairsafe_{label}_v02.jpg',quality=94)
+
+              roi_src=src_np[hy0:hy1,hx0:hx1]
+              roi_out=out[hy0:hy1,hx0:hx1]
+              roi_changed=np.any(roi_src!=roi_out,axis=2)
+              roi_abs=np.abs(roi_src.astype(np.int16)-roi_out.astype(np.int16))
               variants[label]={
                   'sigma':sigma,
-                  'core_subject_bit_identical':True,
-                  'changed_pixels':int(np.count_nonzero(np.any(out!=src_np,axis=2))),
+                  'protected_subject_bit_identical':True,
+                  'changed_pixels_full':int(np.count_nonzero(np.any(out!=src_np,axis=2))),
+                  'hair_face_roi_changed_fraction':float(np.mean(roi_changed)),
+                  'hair_face_roi_mean_abs_error':float(np.mean(roi_abs)),
                   'sha256':hashlib.sha256(p.read_bytes()).hexdigest()
               }
 
-          face_hair_roi=(300,700,1900,2800)
-          x0,y0,x1,y1=face_hair_roi
-          roi_matte=matte[y0:y1,x0:x1]
           report={
-              'method':'MODNet trimap-free portrait matte + background-only Gaussian bokeh',
+              'method':'MODNet trimap-free portrait matte + hair-safe background-only Gaussian bokeh',
               'modnet_checkpoint':ckpt.name,
               'matte_ref_size':ref_size,
               'source_size':[2360,4192],
-              'core_subject_threshold':0.985,
-              'core_subject_pixels':int(np.count_nonzero(core)),
-              'face_hair_roi':list(face_hair_roi),
-              'face_hair_roi_mean_matte':float(roi_matte.mean()),
+              'protected_subject_threshold':protect_threshold,
+              'full_background_threshold':background_threshold,
+              'protected_subject_pixels':int(np.count_nonzero(core)),
+              'hair_face_roi':list(hair_face_roi),
               'variants':variants
           }
-          (outdir/'verification_bokeh.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          (outdir/'verification_hairsafe_bokeh_v02.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
           print(json.dumps(report,indent=2))
           PY
 
-      - name: Upload bokeh candidates
+      - name: Upload hair-safe bokeh candidates
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-commercial-modnet-bokeh-v01
+          name: hao-hair-commercial-modnet-hairsafe-bokeh-v02
           path: work/final/*
           if-no-files-found: error
           retention-days: 7
