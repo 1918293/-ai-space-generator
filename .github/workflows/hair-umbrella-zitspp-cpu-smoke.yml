@@ -46,7 +46,7 @@ jobs:
             python -m pip install --upgrade 'pip<25' 'setuptools<70' wheel
             python -m pip install numpy==1.21.6 pillow==9.5.0 six==1.16.0
             python -m pip install torch==1.9.1+cpu torchvision==0.10.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
-            python -m pip install pytorch-lightning==1.2.9 torchmetrics==0.2.0 tensorboard==2.5.0 protobuf==3.20.3
+            python -m pip install pytorch-lightning==1.2.9 torchmetrics==0.2.0 tensorboard==2.4.1 protobuf==3.20.3
             python -m pip install PyYAML==6.0 yacs==0.1.8 tqdm==4.59.0 timm==0.3.2 opencv-python-headless==4.5.5.64 scipy==1.7.3 scikit-image==0.19.3 lpips==0.1.4
             python - <<'PY'
           import numpy, PIL, six, torch, torchvision, pytorch_lightning, cv2, scipy, skimage
@@ -204,9 +204,6 @@ jobs:
 
               qa=Image.new('RGB',(1536,512),'white')
               qa.paste(a,(0,0)); qa.paste(b,(512,0))
-              ov=a.copy(); dr=ImageDraw.Draw(ov,'RGBA')
-              maskarr=np.asarray(m)
-              # use mask itself as third panel for precise visual scope
               maskrgb=Image.merge('RGB',(m,m,m))
               qa.paste(maskrgb,(1024,0))
               qa.save('../zitspp_smoke_before_after_mask.png')
@@ -226,7 +223,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hao-hair-zitspp-cpu-smoke-v01
+          name: hao-hair-zitspp-cpu-smoke-v02
           path: |
             work/zitspp_commit.txt
             work/environment.log
