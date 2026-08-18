@@ -8,6 +8,19 @@ ALLOWED_INTAKE_STATUSES = {
     "BLOCKED",
 }
 
+ALLOWED_INTAKE_PRIMARY_CLASSES = {
+    "IDEA",
+    "REQUIREMENT",
+    "DECISION",
+    "TASK",
+    "OBSERVATION",
+    "QUESTION",
+    "EVIDENCE",
+    "SYSTEM_DESIGN",
+}
+
+ALLOWED_INTAKE_CONFIDENCES = {"LOW", "MEDIUM", "HIGH"}
+
 
 def test_runtime_summary_passes_when_all_contracts_pass():
     result = run_integrity_validation(
@@ -126,3 +139,119 @@ def test_runtime_summary_flags_stale_authority_window():
     assert result["contracts"]["AUTHORITY_SNAPSHOT_STABLE"]["changed_sources"] == [
         {"source": "intake", "before": "rev-1", "after": "rev-2"}
     ]
+
+
+def test_runtime_summary_flags_primary_class_and_confidence_domain_drift():
+    intake = [
+        {
+            "record_id": "INTAKE-001",
+            "captured_at": "2026-08-18T12:17:00+08:00",
+            "status": "CLOSED",
+            "primary_class": "RESEARCH_FINDING",
+            "confidence": "MEDIUM_HIGH",
+            "supersedes": "",
+        }
+    ]
+    result = run_integrity_validation(
+        events=[{"event_id": "EVT-001"}],
+        relations=[{"relation_id": "REL-001", "subject_id": "INTAKE-001"}],
+        valid_subject_ids={"INTAKE-001"},
+        intake_records=intake,
+        allowed_intake_primary_classes=ALLOWED_INTAKE_PRIMARY_CLASSES,
+        allowed_intake_confidences=ALLOWED_INTAKE_CONFIDENCES,
+    )
+
+    assert result["authority_integrity_pass"] is False
+    assert result["failed_contracts"] == [
+        "INTAKE_PRIMARY_CLASS_DOMAIN",
+        "INTAKE_CONFIDENCE_DOMAIN",
+    ]
+    assert result["contracts"]["INTAKE_PRIMARY_CLASS_DOMAIN"][
+        "invalid_primary_class_rows"
+    ] == [
+        {
+            "row": 0,
+            "record_id": "INTAKE-001",
+            "primary_class": "RESEARCH_FINDING",
+        }
+    ]
+    assert result["contracts"]["INTAKE_CONFIDENCE_DOMAIN"][
+        "invalid_confidence_rows"
+    ] == [
+        {
+            "row": 0,
+            "record_id": "INTAKE-001",
+            "confidence": "MEDIUM_HIGH",
+        }
+    ]
+
+
+def test_runtime_status_effective_scope_excludes_legacy_rows():
+    intake = [
+        {
+            "record_id": "INTAKE-LEGACY",
+            "captured_at": "2026-08-15T22:17:00+08:00",
+            "status": "CURRENT",
+            "supersedes": "",
+        },
+        {
+            "record_id": "INTAKE-CURRENT",
+            "captured_at": "2026-08-16T10:45:00+08:00",
+            "status": "CLOSED",
+            "supersedes": "",
+        },
+    ]
+    result = run_integrity_validation(
+        events=[{"event_id": "EVT-001"}],
+        relations=[{"relation_id": "REL-001", "subject_id": "INTAKE-CURRENT"}],
+        valid_subject_ids={"INTAKE-LEGACY", "INTAKE-CURRENT"},
+        intake_records=intake,
+        allowed_intake_statuses=ALLOWED_INTAKE_STATUSES,
+        intake_status_effective_from="2026-08-16T10:45:00+08:00",
+    )
+
+    assert result["authority_integrity_pass"] is True
+    assert result["failed_contracts"] == []
+    scope = result["contracts"]["INTAKE_STATUS_SCOPE"]
+    assert scope["hard_gate_pass"] is True
+    assert scope["excluded_legacy_rows"] == [
+        {
+            "row": 0,
+            "record_id": "INTAKE-LEGACY",
+            "captured_at": "2026-08-15T22:17:00+08:00",
+        }
+    ]
+    assert result["contracts"]["INTAKE_STATUS_DOMAIN"]["invalid_status_rows"] == []
+
+
+def test_runtime_status_effective_scope_fails_closed_when_timestamp_is_unknown():
+    intake = [
+        {
+            "record_id": "INTAKE-UNKNOWN",
+            "captured_at": "",
+            "status": "CLOSED",
+            "supersedes": "",
+        }
+    ]
+    result = run_integrity_validation(
+        events=[{"event_id": "EVT-001"}],
+        relations=[{"relation_id": "REL-001", "subject_id": "INTAKE-UNKNOWN"}],
+        valid_subject_ids={"INTAKE-UNKNOWN"},
+        intake_records=intake,
+        allowed_intake_statuses=ALLOWED_INTAKE_STATUSES,
+        intake_status_effective_from="2026-08-16T10:45:00+08:00",
+    )
+
+    assert result["authority_integrity_pass"] is False
+    assert result["failed_contracts"] == [
+        "SUPERSEDES_TEMPORAL_ORDER",
+        "INTAKE_STATUS_SCOPE",
+    ]
+    assert result["contracts"]["INTAKE_STATUS_SCOPE"]["scope_unknown_rows"] == [
+        {
+            "row": 0,
+            "record_id": "INTAKE-UNKNOWN",
+            "captured_at": "",
+        }
+    ]
+    assert "INTAKE_STATUS_DOMAIN" not in result["contracts"]
