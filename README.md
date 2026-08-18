@@ -100,6 +100,30 @@ Hao System 致力於建立一套長期可維護、可擴充且可持續發展的
 
 ---
 
+# Challenger Lane
+
+新的影像模型、編修工具、分析方法或工具版本，不直接取代目前已驗證流程；先以 Challenger 身分進行可比較測試。
+
+Challenger 測試必須遵守：
+
+- 使用與 Baseline 相同的 Original / Source Lock。
+- 不使用前一輪生成圖、A/B 圖或衍生圖作為新的分析或編修來源。
+- 只改變待測工具或待測方法，避免混入無法歸因的額外變更。
+- 使用與 Baseline 相同且符合任務類型的 Pixel / Geometry / Identity / Visual QA。
+- A/B 與 regression 指標在 Version Gate 前完成驗證；數值改善不能取代 Visual 或 Identity QA。
+- 工具成功輸出不等於品質提升；只有證據顯示至少一項重要指標實質改善，且既有高價值指標沒有退化時，才可升格。
+
+Challenger 狀態只使用：
+
+- `PROMOTED`：通過必要 QA 與 Version Gate，可進入主流程。
+- `CANDIDATE`：有價值，但證據或品質尚不足。
+- `REJECTED`：相較 Baseline 退化。
+- `BLOCKED`：受工具、權限或必要資料限制，無法完成有效比較。
+
+GitHub 保存可重現的 Workflow、Validator、Config、Schema、Tests 與 Eval；Data Analytics 在 Version Gate 前負責 A/B、regression 與數據可信度檢查。Adobe、Picsart 或其他執行工具只作為 Execution Adapter，不各自定義另一套正式版本判定規則。
+
+---
+
 # 開發原則
 
 我們遵循以下原則：
