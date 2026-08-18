@@ -1,0 +1,203 @@
+name: Hao Hair Commercial Adaptive Natural Bokeh v12
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [hao-hair-sr-test-20260817]
+    paths:
+      - '.github/workflows/hair-commercial-natural-bokeh-v12.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  natural-bokeh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download v11 authority
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-final-v11
+          path: work/v11
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: '32038938614'
+
+      - name: Download SR authority
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-realesr-general-x2-dn020
+          path: work/source
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: '32003834720'
+
+      - name: Download MODNet matte authority
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-commercial-modnet-hairsafe-bokeh-v02
+          path: work/matte
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: '32009172839'
+
+      - name: Download dedicated hair-mask authority
+        uses: actions/download-artifact@v4
+        with:
+          name: hao-hair-salon-production-gate-v03
+          path: work/hairgate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: '32074421708'
+
+      - name: Install deterministic QA stack
+        run: python -m pip install --disable-pip-version-check --quiet pillow==10.4.0 numpy==1.26.4 opencv-python-headless==4.10.0.84
+
+      - name: Build adaptive natural-bokeh candidate
+        run: |
+          mkdir -p work/final
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          import numpy as np, cv2, json, hashlib
+
+          ROOT=Path('work'); OUT=ROOT/'final'
+          def exact(root,name):
+              hits=list(Path(root).rglob(name)); assert len(hits)==1,(name,hits); return hits[0]
+          def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+          def rgb(p): return np.asarray(Image.open(p).convert('RGB'))
+          def grad(a):
+              g=cv2.cvtColor(a,cv2.COLOR_RGB2GRAY).astype(np.float32)
+              gx=cv2.Sobel(g,cv2.CV_32F,1,0,ksize=3); gy=cv2.Sobel(g,cv2.CV_32F,0,1,ksize=3)
+              return np.sqrt(gx*gx+gy*gy)
+          def smooth01(x):
+              z=np.clip(x,0,1); return z*z*(3-2*z)
+
+          clean_p=exact(ROOT/'v11','Hao_Hair_UmbrellaClean_LeftRefill_v11.png')
+          v11_p=exact(ROOT/'v11','Hao_Hair_Commercial_PrimaryCandidate_v11.png')
+          matte_p=exact(ROOT/'matte','modnet_matte_768_v02.png')
+          hair_p=exact(ROOT/'hairgate','hair_mask_source_v03.png')
+          clean=rgb(clean_p); v11=rgb(v11_p)
+          matte=np.asarray(Image.open(matte_p).convert('L')).astype(np.float32)/255.0
+          hair=np.asarray(Image.open(hair_p).convert('L')).astype(np.float32)/255.0
+          assert clean.shape==v11.shape==(4192,2360,3); assert matte.shape==hair.shape==(4192,2360)
+          H,W=matte.shape
+          core=matte>=0.65
+          hair_authority=(hair>=0.50)&(matte>=0.05)
+          t=np.clip((0.65-matte)/(0.65-0.05),0,1); bg_mix=smooth01(t).astype(np.float32)
+          donor_threshold=0.20
+          donor_w=np.clip((donor_threshold-matte)/donor_threshold,0,1).astype(np.float32)
+
+          def edge_safe(sigma):
+              support=cv2.GaussianBlur(donor_w,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101)
+              bg=np.empty_like(clean,dtype=np.float32)
+              for c in range(3):
+                  num=cv2.GaussianBlur(clean[:,:,c].astype(np.float32)*donor_w,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101)
+                  bg[:,:,c]=num/np.maximum(support,1e-4)
+              ordinary=cv2.GaussianBlur(clean,(0,0),sigmaX=sigma,sigmaY=sigma,borderType=cv2.BORDER_REFLECT101).astype(np.float32)
+              sa=np.clip(support/0.05,0,1)[...,None]
+              bg=bg*sa+ordinary*(1-sa)
+              out=np.clip(clean.astype(np.float32)*(1-bg_mix[...,None])+bg*bg_mix[...,None]+0.5,0,255).astype(np.uint8)
+              out[core]=clean[core]
+              return out
+
+          near=edge_safe(12.0)
+          far=edge_safe(9.6)
+          dist=cv2.distanceTransform((~core).astype(np.uint8),cv2.DIST_L2,5)
+          far_mix=smooth01((dist-50.0)/(180.0-50.0)).astype(np.float32)
+          bokeh=np.clip(near.astype(np.float32)*(1-far_mix[...,None])+far.astype(np.float32)*far_mix[...,None]+0.5,0,255).astype(np.uint8)
+          bokeh[core]=clean[core]
+
+          # Reapply the verified v10/v11 studio-tone recipe unchanged.
+          arr=bokeh.astype(np.float32)/255.0
+          def s2l(x): return np.where(x<=0.04045,x/12.92,((x+0.055)/1.055)**2.4)
+          def l2s(x):
+              x=np.clip(x,0,1); return np.where(x<=0.0031308,12.92*x,1.055*np.power(x,1/2.4)-0.055)
+          yy,xx=np.indices((H,W),dtype=np.float32); xn=xx/(W-1); yn=yy/(H-1)
+          subject=smooth01((matte-0.20)/(0.80-0.20)); background=1-subject
+          key=np.exp(-0.5*(((xn-0.50)/0.30)**2+((yn-0.39)/0.24)**2))*subject
+          rr=((xn-0.50)/0.72)**2+((yn-0.43)/0.78)**2; vignette=np.clip(rr-0.55,0,1)*background
+          stops=(-0.10*background)+(0.05*key)+(-0.03*vignette)
+          tone=np.clip(l2s(np.clip(s2l(arr)*np.exp2(stops)[...,None],0,1))*255.0+0.5,0,255).astype(np.uint8)
+
+          # Fail-safe preservation: keep all verified subject core + dedicated hair pixels exactly v11.
+          # Also freeze the first 30 px of high-confidence background around subject to v11, retaining edge-safe behavior.
+          edge_ring=(matte<0.08)&(dist>0)&(dist<=30)
+          preserve=core|hair_authority|edge_ring
+          tone[preserve]=v11[preserve]
+
+          primary=OUT/'Hao_Hair_Commercial_PrimaryCandidate_v12.png'; Image.fromarray(tone,'RGB').save(primary)
+          bokeh_p=OUT/'Hao_Hair_Commercial_AdaptiveBokeh_v12.png'; Image.fromarray(bokeh,'RGB').save(bokeh_p)
+          portfolio=Image.fromarray(tone,'RGB').crop((280,560,2080,2810)); portfolio_p=OUT/'Hao_Hair_Commercial_Portfolio4x5_v12.png'; portfolio.save(portfolio_p)
+
+          g11=grad(v11); g12=grad(tone)
+          high_bg=matte<0.08
+          far_bg=high_bg&(dist>=180)
+          detail_ratio=float(np.mean(g12[high_bg])/max(float(np.mean(g11[high_bg])),1e-6))
+          far_detail_ratio=float(np.mean(g12[far_bg])/max(float(np.mean(g11[far_bg])),1e-6))
+          edge_exact=bool(np.array_equal(tone[edge_ring],v11[edge_ring]))
+          protected_exact=bool(np.array_equal(tone[core|hair_authority],v11[core|hair_authority]))
+          far_mae=float(np.mean(np.abs(tone[far_bg].astype(np.int16)-v11[far_bg].astype(np.int16))))
+          clip11=float(np.mean(np.any(v11>=255,axis=2))); clip12=float(np.mean(np.any(tone>=255,axis=2)))
+          gates={
+            'subject_and_hair_authority_bit_identical_to_v11':protected_exact,
+            'first_30px_background_edge_ring_bit_identical_to_v11':edge_exact,
+            'high_confidence_background_detail_increase_5_to_15pct':1.05<=detail_ratio<=1.15,
+            'far_background_detail_increase_5_to_20pct':1.05<=far_detail_ratio<=1.20,
+            'far_background_actually_changed':far_mae>=0.25,
+            'highlight_clipping_not_worse':clip12<=clip11+0.0005,
+          }
+          hard=all(gates.values())
+
+          # Compact visual A/B: full image + hair edge + far background.
+          def thumb(arr,box=None,size=(600,900)):
+              im=Image.fromarray(arr,'RGB')
+              if box: im=im.crop(box)
+              im.thumbnail(size); return im
+          panels=[]
+          for label,box in [('FULL',None),('HAIR_EDGE',(300,500,2050,2200)),('FAR_BG',(0,0,2360,1500))]:
+              a=thumb(v11,box); b=thumb(tone,box)
+              pair=Image.new('RGB',(a.width+b.width,max(a.height,b.height)+30),'white'); pair.paste(a,(0,30)); pair.paste(b,(a.width,30))
+              ImageDraw.Draw(pair).text((8,8),f'{label}: v11 | v12 adaptive',fill='black'); panels.append(pair)
+          sw=max(p.width for p in panels); sh=sum(p.height for p in panels)
+          sheet=Image.new('RGB',(sw,sh),'white'); y=0
+          for p in panels: sheet.paste(p,(0,y)); y+=p.height
+          qa=OUT/'QA_v11_v12_adaptive_bokeh.jpg'; sheet.save(qa,quality=95)
+
+          report={'status':'TECHNICAL_STAGE_PASS' if hard else 'TECHNICAL_STAGE_FAIL','change':'adaptive spatial bokeh only: sigma 12 near subject -> sigma 9.6 far background; verified tone unchanged','authority':{'v11_run':32038938614,'source_sr_run':32003834720,'modnet_run':32009172839,'hair_mask_gate_run':32074421708},'parameters':{'near_sigma':12.0,'far_sigma':9.6,'distance_blend_start_px':50.0,'distance_blend_end_px':180.0,'frozen_edge_ring_px':30},'gates':gates,'metrics':{'high_confidence_background_edge_energy_ratio_v12_over_v11':detail_ratio,'far_background_edge_energy_ratio_v12_over_v11':far_detail_ratio,'far_background_mae_v11_to_v12':far_mae,'v11_highlight_clip_fraction':clip11,'v12_highlight_clip_fraction':clip12},'outputs':{'primary_sha256':sha(primary),'portfolio_sha256':sha(portfolio_p),'qa_sha256':sha(qa)},'promotion':'PENDING_HAIR_QA_AND_VISUAL_ACCEPTANCE' if hard else 'NOT_PROMOTED'}
+          (OUT/'verification_adaptive_bokeh_v12.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2))
+          if not hard: raise SystemExit('adaptive bokeh stage gate failed')
+          PY
+
+      - name: Run source-relative Hair QA
+        run: |
+          SOURCE=$(find work/source -type f -name '*.png' | head -1)
+          CAND='work/final/Hao_Hair_Commercial_PrimaryCandidate_v12.png'
+          MATTE=$(find work/matte -type f -name 'modnet_matte_768_v02.png' | head -1)
+          HAIR=$(find work/hairgate -type f -name 'hair_mask_source_v03.png' | head -1)
+          python tools/hair_salon_pipeline/hair_qa.py --authority "$SOURCE" --candidate "$CAND" --matte "$MATTE" --hair-mask "$HAIR" --output work/final/hair_qa_v12.json
+
+      - name: Enforce combined gate
+        run: |
+          python - <<'PY'
+          import json
+          a=json.load(open('work/final/verification_adaptive_bokeh_v12.json'))
+          h=json.load(open('work/final/hair_qa_v12.json'))
+          assert a['status']=='TECHNICAL_STAGE_PASS',a
+          assert h['status']=='PASS_HAIR_FIDELITY',h
+          out={'status':'TECHNICAL_PASS_PRIMARY_CANDIDATE','adaptive_bokeh':a,'hair_qa':h,'promotion':'PRIMARY_CANDIDATE_PENDING_VISUAL_ACCEPTANCE'}
+          open('work/final/verification_final_v12.json','w').write(json.dumps(out,indent=2))
+          print(json.dumps({'status':out['status'],'hair_qa':h['status'],'background_detail_ratio':a['metrics']['high_confidence_background_edge_energy_ratio_v12_over_v11']},indent=2))
+          PY
+
+      - name: Upload v12 candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-hair-commercial-final-v12
+          path: work/final/*
+          if-no-files-found: error
+          retention-days: 14
