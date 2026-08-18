@@ -217,10 +217,14 @@ def edit_integrity_report(
     target_threshold: int = 8,
     max_edit_ratio: float | None = None,
 ) -> dict[str, Any]:
-    """Run edit-integrity hard gates from a single image-difference pass.
+    """Run the deterministic edit-integrity fast path from one image-difference pass.
 
-    This validates pixel preservation and mask geometry only. It does not verify
-    semantic removal quality or brand/visual quality.
+    Decision logic is intentionally limited to two generic gates:
+    1. mask-contract validity;
+    2. preservation outside the approved edit mask.
+
+    Task-specific correctness is intentionally left to the caller. Protected-region
+    and remove-target change statistics remain diagnostics, not semantic success proof.
     """
     if int(tolerance) < 0:
         raise ValueError("tolerance must be non-negative.")
@@ -254,16 +258,17 @@ def edit_integrity_report(
         "target_threshold": int(target_threshold),
         "max_edit_ratio": None if max_edit_ratio is None else float(max_edit_ratio),
         "semantic_removal_verified": False,
+        "task_specific_correctness": "REQUIRED",
     }
 
-    gates = {
+    contract_gates = {
         "edit_mask_nonempty": bool(edit_pixels > 0),
         "outside_mask_exists": bool(outside_stats["region_pixels"] > 0),
-        "outside_mask_unchanged": bool(outside_stats["changed_pixels"] == 0),
         "edit_ratio_within_limit": bool(
             max_edit_ratio is None or edit_ratio <= float(max_edit_ratio)
         ),
     }
+    diagnostic_gates: dict[str, bool] = {}
 
     protected = None
     if protected_mask is not None:
@@ -280,9 +285,11 @@ def edit_integrity_report(
             "mean_channel_delta": protected_stats["mean_channel_delta"],
             "edit_overlap_pixels": overlap_pixels,
         }
-        gates["protected_mask_nonempty"] = bool(protected_stats["region_pixels"] > 0)
-        gates["edit_protected_disjoint"] = bool(overlap_pixels == 0)
-        gates["protected_mask_unchanged"] = bool(protected_stats["changed_pixels"] == 0)
+        contract_gates["protected_mask_nonempty"] = bool(protected_stats["region_pixels"] > 0)
+        contract_gates["edit_protected_disjoint"] = bool(overlap_pixels == 0)
+        diagnostic_gates["protected_mask_unchanged"] = bool(
+            protected_stats["changed_pixels"] == 0
+        )
 
     if remove_target_mask is not None:
         target = _binary_mask(remove_target_mask)
@@ -301,13 +308,28 @@ def edit_integrity_report(
             "in_edit_pixels": target_edit_pixels,
             "in_protected_pixels": target_protected_pixels,
         }
-        gates["remove_target_nonempty"] = bool(target_pixels > 0)
-        gates["remove_target_fully_editable"] = bool(
+        contract_gates["remove_target_nonempty"] = bool(target_pixels > 0)
+        contract_gates["remove_target_fully_editable"] = bool(
             target_pixels > 0 and target_edit_pixels == target_pixels
         )
         if protected is not None:
-            gates["remove_target_not_protected"] = bool(target_protected_pixels == 0)
+            contract_gates["remove_target_not_protected"] = bool(target_protected_pixels == 0)
+        diagnostic_gates["remove_target_pixels_changed"] = bool(
+            target_stats["changed_pixels"] > 0
+        )
 
-    report["gates"] = gates
-    report["hard_gate_pass"] = bool(all(gates.values()))
+    mask_contract_pass = bool(all(contract_gates.values()))
+    preservation_pass = bool(outside_stats["changed_pixels"] == 0)
+
+    report["gates"] = {
+        **contract_gates,
+        "outside_mask_unchanged": preservation_pass,
+    }
+    report["diagnostics"] = diagnostic_gates
+    report["fast_path"] = {
+        "mask_contract_pass": mask_contract_pass,
+        "preservation_pass": preservation_pass,
+        "task_specific_correctness": "REQUIRED" if mask_contract_pass and preservation_pass else "BLOCKED",
+    }
+    report["hard_gate_pass"] = bool(mask_contract_pass and preservation_pass)
     return report
