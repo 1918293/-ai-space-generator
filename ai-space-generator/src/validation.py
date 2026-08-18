@@ -131,3 +131,60 @@ def target_modified_ratio(
         "threshold": int(threshold),
         "semantic_removal_verified": False,
     }
+
+
+def outside_mask_invariance(
+    source: Image.Image | np.ndarray,
+    result: Image.Image | np.ndarray,
+    edit_mask: Image.Image | np.ndarray,
+    tolerance: int = 0,
+) -> dict[str, Any]:
+    """Verify that pixels outside the approved edit mask remain unchanged.
+
+    The tolerance is the maximum allowed per-pixel channel delta. A zero tolerance
+    enforces exact pixel preservation outside the edit region.
+    """
+    if int(tolerance) < 0:
+        raise ValueError("tolerance must be non-negative.")
+
+    src = np.asarray(source.convert("RGB") if isinstance(source, Image.Image) else source)
+    out = np.asarray(result.convert("RGB") if isinstance(result, Image.Image) else result)
+    edit = _binary_mask(edit_mask)
+
+    if src.shape != out.shape or src.shape[:2] != edit.shape:
+        raise ValueError("Source, result, and edit mask must have matching dimensions.")
+
+    diff = np.abs(src.astype(np.int16) - out.astype(np.int16))
+    if diff.ndim == 2:
+        delta = diff
+    elif diff.ndim == 3:
+        delta = np.max(diff, axis=2)
+    else:
+        raise ValueError("Source and result must be 2-D grayscale or 3-D image arrays.")
+
+    outside = ~edit
+    outside_pixels = int(np.count_nonzero(outside))
+    changed = (delta > int(tolerance)) & outside
+    changed_pixels = int(np.count_nonzero(changed))
+
+    if outside_pixels:
+        outside_delta = delta[outside]
+        max_delta = int(np.max(outside_delta))
+        mean_delta = float(np.mean(outside_delta))
+    else:
+        max_delta = 0
+        mean_delta = 0.0
+
+    changed_ratio = (
+        float(changed_pixels) / float(outside_pixels) if outside_pixels else 0.0
+    )
+
+    return {
+        "outside_mask_pixels": outside_pixels,
+        "outside_mask_changed_pixels": changed_pixels,
+        "outside_mask_changed_ratio": changed_ratio,
+        "outside_mask_max_channel_delta": max_delta,
+        "outside_mask_mean_channel_delta": mean_delta,
+        "tolerance": int(tolerance),
+        "hard_gate_pass": bool(outside_pixels > 0 and changed_pixels == 0),
+    }
