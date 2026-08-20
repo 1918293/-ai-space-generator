@@ -86,6 +86,16 @@ test('no meaningful delta becomes NO_OP even without comparable hashes', () => {
   assert.equal(result.reason, MUTATION_REASONS.NO_DELTA);
 });
 
+test('semantic delta assertion cannot replace comparable state evidence', () => {
+  const result = classifyMutationGuard(proposal({
+    current_content_hash: null,
+    proposed_content_hash: null,
+    has_meaningful_delta: true,
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.DELTA_EVIDENCE_REQUIRED);
+});
+
 test('missing expected observable outcome blocks mutation', () => {
   const result = classifyMutationGuard(proposal({ expected_outcome: '' }));
   assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
