@@ -15,6 +15,7 @@ const MUTATION_REASONS = Object.freeze({
   STALE_TARGET: 'STALE_TARGET',
   SCOPE_MISMATCH: 'SCOPE_MISMATCH',
   NO_DELTA: 'NO_DELTA',
+  DELTA_EVIDENCE_REQUIRED: 'DELTA_EVIDENCE_REQUIRED',
   EXPECTED_OUTCOME_REQUIRED: 'EXPECTED_OUTCOME_REQUIRED',
 });
 
@@ -86,6 +87,14 @@ function classifyMutationGuard(proposal) {
       MUTATION_DECISIONS.NO_OP,
       MUTATION_REASONS.NO_DELTA,
       'no meaningful durable delta was established'
+    );
+  }
+
+  if (!currentHash || !proposedHash) {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.DELTA_EVIDENCE_REQUIRED,
+      'durable mutation requires comparable current and proposed state fingerprints'
     );
   }
 
