@@ -1,5 +1,7 @@
 'use strict';
 
+const { isDeepStrictEqual } = require('node:util');
+
 const OUTCOMES = Object.freeze({
   EXECUTE: 'EXECUTE',
   EXECUTE_NONPERSISTENT: 'EXECUTE_NONPERSISTENT',
@@ -99,7 +101,7 @@ function reviseInterpretation(previous, patch) {
 
 function closeOutcome({ execution_receipt, expected_outcome, observed_outcome, user_visible_success }) {
   const tool_success = execution_receipt?.status === 'SUCCESS';
-  const task_success = JSON.stringify(expected_outcome) === JSON.stringify(observed_outcome);
+  const task_success = isDeepStrictEqual(expected_outcome, observed_outcome);
 
   return Object.freeze({
     tool_success,
