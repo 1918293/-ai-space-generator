@@ -146,6 +146,19 @@ test('tool success does not imply task or user-visible success', () => {
   assert.equal(result.user_visible_success, false);
 });
 
+test('task outcome equality ignores object key insertion order', () => {
+  const result = closeOutcome({
+    execution_receipt: { status: 'SUCCESS' },
+    expected_outcome: { status: 'PASS', metrics: { a: 1, b: 2 } },
+    observed_outcome: { metrics: { b: 2, a: 1 }, status: 'PASS' },
+    user_visible_success: true,
+  });
+
+  assert.equal(result.tool_success, true);
+  assert.equal(result.task_success, true);
+  assert.equal(result.user_visible_success, true);
+});
+
 test('stale current authority cannot authorize even session execution', () => {
   const result = classifyAdmission(record({
     intent: 'resume_auto_on_new_task',
