@@ -145,3 +145,15 @@ test('tool success does not imply task or user-visible success', () => {
   assert.equal(result.task_success, false);
   assert.equal(result.user_visible_success, false);
 });
+
+test('stale current authority cannot authorize even session execution', () => {
+  const result = classifyAdmission(record({
+    intent: 'resume_auto_on_new_task',
+    basis: 'CURRENT_AUTHORITY',
+    authority: 'SESSION',
+    authority_freshness: 'STALE',
+    risk: 'LOW',
+  }));
+  assert.equal(result.outcome, OUTCOMES.ABSTAIN);
+  assert.equal(result.reason, GAPS.AUTHORITY);
+});
