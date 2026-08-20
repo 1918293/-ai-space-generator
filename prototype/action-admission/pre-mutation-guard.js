@@ -10,6 +10,8 @@ const MUTATION_DECISIONS = Object.freeze({
 
 const MUTATION_REASONS = Object.freeze({
   ADMISSION_REQUIRED: 'ADMISSION_REQUIRED',
+  OPERATION_MISMATCH: 'OPERATION_MISMATCH',
+  TARGET_MISMATCH: 'TARGET_MISMATCH',
   STALE_TARGET: 'STALE_TARGET',
   SCOPE_MISMATCH: 'SCOPE_MISMATCH',
   NO_DELTA: 'NO_DELTA',
@@ -33,6 +35,22 @@ function classifyMutationGuard(proposal) {
       MUTATION_DECISIONS.ABSTAIN,
       MUTATION_REASONS.ADMISSION_REQUIRED,
       'durable mutation requires a durable admission outcome'
+    );
+  }
+
+  if (!value.approved_operation || value.planned_operation !== value.approved_operation) {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.OPERATION_MISMATCH,
+      'planned mutation operation must match the admitted operation'
+    );
+  }
+
+  if (!value.approved_target || value.planned_target !== value.approved_target) {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.TARGET_MISMATCH,
+      'planned mutation target must match the admitted target'
     );
   }
 
@@ -93,6 +111,9 @@ function summarizeMutationShadow(observations) {
   const falseBlocks = observations.filter(
     (entry) => entry.guard_outcome !== MUTATION_DECISIONS.MUTATE_CANDIDATE && entry.actual_write_was_necessary === true
   ).length;
+  const routingBlocks = observations.filter(
+    (entry) => entry.guard_reason === MUTATION_REASONS.OPERATION_MISMATCH || entry.guard_reason === MUTATION_REASONS.TARGET_MISMATCH
+  ).length;
   const mutationCandidates = observations.filter(
     (entry) => entry.guard_outcome === MUTATION_DECISIONS.MUTATE_CANDIDATE
   ).length;
@@ -100,6 +121,7 @@ function summarizeMutationShadow(observations) {
   return Object.freeze({
     total_observations: observations.length,
     avoided_noop_writes: avoidedNoOps,
+    prevented_wrong_surface_mutations: routingBlocks,
     false_blocks: falseBlocks,
     mutation_candidates: mutationCandidates,
     actual_mutations_performed_by_shadow: 0,
