@@ -44,20 +44,16 @@ function classifyAdmission(record) {
     return abstain(GAPS.SPECIFICATION, 'authority_freshness is invalid');
   }
 
+  if (value.basis === 'CURRENT_AUTHORITY' && freshness !== 'CURRENT') {
+    return abstain(GAPS.AUTHORITY, 'historical or stale authority must be revalidated');
+  }
+
   if (value.authority !== 'SESSION' && value.basis === 'DERIVED') {
     return abstain(GAPS.AUTHORITY, 'derived interpretation cannot authorize durable effects');
   }
 
   if (value.authority !== 'SESSION' && value.basis === 'UNKNOWN') {
     return abstain(GAPS.AUTHORITY, 'unknown basis cannot authorize durable effects');
-  }
-
-  if (
-    value.basis === 'CURRENT_AUTHORITY' &&
-    value.authority !== 'SESSION' &&
-    freshness !== 'CURRENT'
-  ) {
-    return abstain(GAPS.AUTHORITY, 'historical or stale authority must be revalidated');
   }
 
   if (value.risk === 'HIGH' && value.basis !== 'EXPLICIT') {
