@@ -12,6 +12,7 @@ const MUTATION_REASONS = Object.freeze({
   ADMISSION_REQUIRED: 'ADMISSION_REQUIRED',
   OPERATION_MISMATCH: 'OPERATION_MISMATCH',
   TARGET_MISMATCH: 'TARGET_MISMATCH',
+  PRECONDITION_MISMATCH: 'PRECONDITION_MISMATCH',
   STALE_TARGET: 'STALE_TARGET',
   SCOPE_MISMATCH: 'SCOPE_MISMATCH',
   NO_DELTA: 'NO_DELTA',
@@ -52,6 +53,17 @@ function classifyMutationGuard(proposal) {
       MUTATION_DECISIONS.ABSTAIN,
       MUTATION_REASONS.TARGET_MISMATCH,
       'planned mutation target must match the admitted target'
+    );
+  }
+
+  if (
+    !value.approved_precondition_token ||
+    value.planned_precondition_token !== value.approved_precondition_token
+  ) {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.PRECONDITION_MISMATCH,
+      'planned mutation must use the exact version/precondition token captured at admission'
     );
   }
 
@@ -121,7 +133,10 @@ function summarizeMutationShadow(observations) {
     (entry) => entry.guard_outcome !== MUTATION_DECISIONS.MUTATE_CANDIDATE && entry.actual_write_was_necessary === true
   ).length;
   const routingBlocks = observations.filter(
-    (entry) => entry.guard_reason === MUTATION_REASONS.OPERATION_MISMATCH || entry.guard_reason === MUTATION_REASONS.TARGET_MISMATCH
+    (entry) =>
+      entry.guard_reason === MUTATION_REASONS.OPERATION_MISMATCH ||
+      entry.guard_reason === MUTATION_REASONS.TARGET_MISMATCH ||
+      entry.guard_reason === MUTATION_REASONS.PRECONDITION_MISMATCH
   ).length;
   const mutationCandidates = observations.filter(
     (entry) => entry.guard_outcome === MUTATION_DECISIONS.MUTATE_CANDIDATE
