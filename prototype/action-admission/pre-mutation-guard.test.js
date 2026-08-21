@@ -18,6 +18,8 @@ function proposal(overrides = {}) {
     planned_operation: 'UPDATE_FILE',
     approved_target: 'prototype/action-admission/example.js',
     planned_target: 'prototype/action-admission/example.js',
+    approved_precondition_token: 'blob-sha-v1',
+    planned_precondition_token: 'blob-sha-v1',
     target_freshness: 'CURRENT',
     scope_match: true,
     current_content_hash: 'old',
@@ -56,6 +58,25 @@ test('same operation aimed at the wrong target is blocked', () => {
   }));
   assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
   assert.equal(result.reason, MUTATION_REASONS.TARGET_MISMATCH);
+});
+
+test('planned mutation cannot swap the version token after admission', () => {
+  const result = classifyMutationGuard(proposal({
+    approved_precondition_token: 'blob-sha-v1',
+    planned_precondition_token: 'blob-sha-v2',
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.PRECONDITION_MISMATCH);
+});
+
+test('missing version token cannot be replaced by a CURRENT freshness claim', () => {
+  const result = classifyMutationGuard(proposal({
+    approved_precondition_token: null,
+    planned_precondition_token: null,
+    target_freshness: 'CURRENT',
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.PRECONDITION_MISMATCH);
 });
 
 test('missing durable admission cannot reach mutation layer', () => {
@@ -113,7 +134,7 @@ test('enforcement candidate still passes through mutation guard rather than auto
   assert.equal(result.outcome, MUTATION_DECISIONS.MUTATE_CANDIDATE);
 });
 
-test('shadow summary counts both no-op and wrong-surface prevention', () => {
+test('shadow summary counts no-op, wrong-surface, and precondition prevention', () => {
   const observations = [
     {
       guard_outcome: MUTATION_DECISIONS.NO_OP,
@@ -128,6 +149,12 @@ test('shadow summary counts both no-op and wrong-surface prevention', () => {
       actual_write_was_necessary: false,
     },
     {
+      guard_outcome: MUTATION_DECISIONS.ABSTAIN,
+      guard_reason: MUTATION_REASONS.PRECONDITION_MISMATCH,
+      actual_write_would_be_noop: false,
+      actual_write_was_necessary: false,
+    },
+    {
       guard_outcome: MUTATION_DECISIONS.MUTATE_CANDIDATE,
       guard_reason: null,
       actual_write_would_be_noop: false,
@@ -135,9 +162,9 @@ test('shadow summary counts both no-op and wrong-surface prevention', () => {
     },
   ];
   const summary = summarizeMutationShadow(observations);
-  assert.equal(summary.total_observations, 3);
+  assert.equal(summary.total_observations, 4);
   assert.equal(summary.avoided_noop_writes, 1);
-  assert.equal(summary.prevented_wrong_surface_mutations, 1);
+  assert.equal(summary.prevented_wrong_surface_mutations, 2);
   assert.equal(summary.false_blocks, 0);
   assert.equal(summary.mutation_candidates, 1);
   assert.equal(summary.actual_mutations_performed_by_shadow, 0);
