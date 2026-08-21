@@ -6,8 +6,10 @@ const assert = require('node:assert/strict');
 const { OUTCOMES } = require('./admission');
 const {
   MUTATION_DECISIONS,
+  MUTATION_CLOSURES,
   MUTATION_REASONS,
   classifyMutationGuard,
+  closeMutationReadback,
   summarizeMutationShadow,
 } = require('./pre-mutation-guard');
 
@@ -303,6 +305,39 @@ test('create without a dedupe mode is blocked', () => {
   const result = classifyMutationGuard(createProposal({ create_dedupe_mode: '' }));
   assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
   assert.equal(result.reason, MUTATION_REASONS.DEDUPE_REQUIRED);
+});
+
+test('post-write readback closes as VERIFIED only when observed state matches expected state', () => {
+  const result = closeMutationReadback({
+    expected_state_fingerprint: 'state-v2',
+    observed_state_fingerprint: 'state-v2',
+    readback_status: 'SUCCESS',
+  });
+  assert.equal(result.closure, MUTATION_CLOSURES.VERIFIED);
+  assert.equal(result.auto_retry_allowed, false);
+  assert.equal(result.next_action, 'NONE');
+});
+
+test('post-write readback divergence never auto-retries', () => {
+  const result = closeMutationReadback({
+    expected_state_fingerprint: 'state-v2',
+    observed_state_fingerprint: 'state-v3',
+    readback_status: 'SUCCESS',
+  });
+  assert.equal(result.closure, MUTATION_CLOSURES.DIVERGED);
+  assert.equal(result.auto_retry_allowed, false);
+  assert.equal(result.next_action, 'FRESH_READ_AND_READMISSION_REQUIRED');
+});
+
+test('failed or missing readback closes as UNKNOWN and requires fresh re-admission', () => {
+  const result = closeMutationReadback({
+    expected_state_fingerprint: 'state-v2',
+    observed_state_fingerprint: null,
+    readback_status: 'FAILED',
+  });
+  assert.equal(result.closure, MUTATION_CLOSURES.UNKNOWN);
+  assert.equal(result.auto_retry_allowed, false);
+  assert.equal(result.next_action, 'FRESH_READ_AND_READMISSION_REQUIRED');
 });
 
 test('shadow summary counts no-op, wrong-surface, and duplicate-create prevention', () => {
