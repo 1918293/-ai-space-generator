@@ -15,6 +15,9 @@ function updateProposal(overrides = {}) {
   return {
     admission_outcome: OUTCOMES.PERSIST_CANDIDATE,
     mutation_kind: 'UPDATE_EXISTING',
+    update_strategy: 'STRONG_PRECONDITION',
+    mutation_risk: 'MEDIUM',
+    critical_effect: false,
     approved_operation: 'UPDATE_FILE',
     planned_operation: 'UPDATE_FILE',
     approved_target: 'prototype/action-admission/example.js',
@@ -26,6 +29,10 @@ function updateProposal(overrides = {}) {
     current_content_hash: 'old',
     proposed_content_hash: 'new',
     has_meaningful_delta: true,
+    approved_request_fingerprint: 'payload-v1',
+    planned_request_fingerprint: 'payload-v1',
+    prior_attempt_state: 'NONE',
+    post_write_readback_required: true,
     expected_outcome: 'durable state changes as proposed',
     ...overrides,
   };
@@ -35,6 +42,8 @@ function createProposal(overrides = {}) {
   return {
     admission_outcome: OUTCOMES.PERSIST_CANDIDATE,
     mutation_kind: 'CREATE_RESOURCE',
+    mutation_risk: 'MEDIUM',
+    critical_effect: false,
     approved_operation: 'CREATE_ISSUE',
     planned_operation: 'CREATE_ISSUE',
     approved_target: 'repo:1918293/-ai-space-generator/issues',
@@ -44,6 +53,7 @@ function createProposal(overrides = {}) {
     planned_request_fingerprint: 'issue-payload-v1',
     create_dedupe_mode: 'FRESH_DUPLICATE_CHECK',
     prior_attempt_state: 'NONE',
+    post_write_readback_required: true,
     duplicate_check_freshness: 'CURRENT',
     duplicate_match_found: false,
     expected_outcome: 'one matching issue exists and its receipt is returned',
@@ -81,7 +91,7 @@ test('same operation aimed at the wrong target is blocked', () => {
   assert.equal(result.reason, MUTATION_REASONS.TARGET_MISMATCH);
 });
 
-test('planned update cannot swap the version token after admission', () => {
+test('strong update cannot swap the version token after admission', () => {
   const result = classifyMutationGuard(updateProposal({
     approved_precondition_token: 'blob-sha-v1',
     planned_precondition_token: 'blob-sha-v2',
@@ -90,14 +100,82 @@ test('planned update cannot swap the version token after admission', () => {
   assert.equal(result.reason, MUTATION_REASONS.PRECONDITION_MISMATCH);
 });
 
-test('missing version token cannot be replaced by a CURRENT freshness claim', () => {
+test('strong update requires version token even when freshness says CURRENT', () => {
   const result = classifyMutationGuard(updateProposal({
     approved_precondition_token: null,
     planned_precondition_token: null,
-    target_freshness: 'CURRENT',
   }));
   assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
   assert.equal(result.reason, MUTATION_REASONS.PRECONDITION_MISMATCH);
+});
+
+test('Balanced permits low-risk best-effort metadata update with readback controls', () => {
+  const result = classifyMutationGuard(updateProposal({
+    update_strategy: 'BEST_EFFORT',
+    mutation_risk: 'LOW',
+    approved_operation: 'UPDATE_PR_METADATA',
+    planned_operation: 'UPDATE_PR_METADATA',
+    approved_target: 'pull/13',
+    planned_target: 'pull/13',
+    approved_precondition_token: null,
+    planned_precondition_token: null,
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.MUTATE_CANDIDATE);
+});
+
+test('Balanced blocks high-risk best-effort update', () => {
+  const result = classifyMutationGuard(updateProposal({
+    update_strategy: 'BEST_EFFORT',
+    mutation_risk: 'HIGH',
+    approved_precondition_token: null,
+    planned_precondition_token: null,
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.STRONG_PRECONDITION_REQUIRED);
+});
+
+test('Balanced blocks critical-effect best-effort update even at medium risk', () => {
+  const result = classifyMutationGuard(updateProposal({
+    update_strategy: 'BEST_EFFORT',
+    critical_effect: true,
+    approved_precondition_token: null,
+    planned_precondition_token: null,
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.STRONG_PRECONDITION_REQUIRED);
+});
+
+test('best-effort update blocks ambiguous retry', () => {
+  const result = classifyMutationGuard(updateProposal({
+    update_strategy: 'BEST_EFFORT',
+    approved_precondition_token: null,
+    planned_precondition_token: null,
+    prior_attempt_state: 'UNKNOWN',
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.AMBIGUOUS_RETRY);
+});
+
+test('best-effort update requires request fingerprint binding', () => {
+  const result = classifyMutationGuard(updateProposal({
+    update_strategy: 'BEST_EFFORT',
+    approved_precondition_token: null,
+    planned_precondition_token: null,
+    planned_request_fingerprint: 'payload-v2',
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.REQUEST_MISMATCH);
+});
+
+test('best-effort update requires post-write readback', () => {
+  const result = classifyMutationGuard(updateProposal({
+    update_strategy: 'BEST_EFFORT',
+    approved_precondition_token: null,
+    planned_precondition_token: null,
+    post_write_readback_required: false,
+  }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.READBACK_REQUIRED);
 });
 
 test('missing durable admission cannot reach mutation layer', () => {
@@ -150,18 +228,13 @@ test('missing expected observable outcome blocks update', () => {
   assert.equal(result.reason, MUTATION_REASONS.EXPECTED_OUTCOME_REQUIRED);
 });
 
-test('fresh scoped meaningful update becomes mutation candidate', () => {
+test('fresh scoped meaningful strong update becomes mutation candidate', () => {
   const result = classifyMutationGuard(updateProposal());
   assert.equal(result.outcome, MUTATION_DECISIONS.MUTATE_CANDIDATE);
   assert.equal(result.reason, null);
 });
 
-test('enforcement candidate still passes through guard rather than auto-enforcing', () => {
-  const result = classifyMutationGuard(updateProposal({ admission_outcome: OUTCOMES.ENFORCE_CANDIDATE }));
-  assert.equal(result.outcome, MUTATION_DECISIONS.MUTATE_CANDIDATE);
-});
-
-test('live Issue #12 style create passes after fresh duplicate check', () => {
+test('live Issue #12 style best-effort create passes after fresh duplicate check', () => {
   const result = classifyMutationGuard(createProposal());
   assert.equal(result.outcome, MUTATION_DECISIONS.MUTATE_CANDIDATE);
   assert.equal(result.reason, null);
@@ -171,6 +244,12 @@ test('best-effort create becomes NO_OP when equivalent resource already exists',
   const result = classifyMutationGuard(createProposal({ duplicate_match_found: true }));
   assert.equal(result.outcome, MUTATION_DECISIONS.NO_OP);
   assert.equal(result.reason, MUTATION_REASONS.DUPLICATE_EXISTS);
+});
+
+test('best-effort create blocks high-risk operation without server idempotency', () => {
+  const result = classifyMutationGuard(createProposal({ mutation_risk: 'HIGH' }));
+  assert.equal(result.outcome, MUTATION_DECISIONS.ABSTAIN);
+  assert.equal(result.reason, MUTATION_REASONS.STRONG_PRECONDITION_REQUIRED);
 });
 
 test('best-effort create blocks retry when prior attempt outcome is unknown', () => {
@@ -200,6 +279,7 @@ test('create request fingerprint cannot change after admission', () => {
 test('server-idempotent create allows safe retry with the same key and request', () => {
   const result = classifyMutationGuard(createProposal({
     create_dedupe_mode: 'SERVER_IDEMPOTENCY',
+    mutation_risk: 'HIGH',
     approved_idempotency_key: 'idem-123',
     planned_idempotency_key: 'idem-123',
     prior_attempt_state: 'UNKNOWN',
