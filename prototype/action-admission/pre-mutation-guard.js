@@ -32,6 +32,8 @@ const DURABLE_ADMISSIONS = new Set([
   OUTCOMES.ENFORCE_CANDIDATE,
 ]);
 
+const SAFE_BEST_EFFORT_PRIOR_STATES = new Set(['NONE', 'CONFIRMED_FAILED']);
+
 function decision(outcome, reason = null, details = null) {
   return Object.freeze({ outcome, reason, details });
 }
@@ -124,11 +126,11 @@ function classifyCreate(value) {
   }
 
   if (value.create_dedupe_mode === 'FRESH_DUPLICATE_CHECK') {
-    if (!value.prior_attempt_state || value.prior_attempt_state === 'UNKNOWN') {
+    if (!SAFE_BEST_EFFORT_PRIOR_STATES.has(value.prior_attempt_state)) {
       return decision(
         MUTATION_DECISIONS.ABSTAIN,
         MUTATION_REASONS.AMBIGUOUS_RETRY,
-        'a create with unknown prior outcome cannot be retried without server idempotency'
+        'best-effort create requires no prior attempt or a confirmed failed prior attempt'
       );
     }
 
@@ -137,6 +139,14 @@ function classifyCreate(value) {
         MUTATION_DECISIONS.ABSTAIN,
         MUTATION_REASONS.STALE_DUPLICATE_CHECK,
         'best-effort create requires a fresh duplicate check'
+      );
+    }
+
+    if (value.duplicate_match_found !== true && value.duplicate_match_found !== false) {
+      return decision(
+        MUTATION_DECISIONS.ABSTAIN,
+        MUTATION_REASONS.DEDUPE_REQUIRED,
+        'best-effort create requires an explicit duplicate-check result'
       );
     }
 
