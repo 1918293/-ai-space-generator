@@ -13,6 +13,8 @@ const MUTATION_REASONS = Object.freeze({
   OPERATION_MISMATCH: 'OPERATION_MISMATCH',
   TARGET_MISMATCH: 'TARGET_MISMATCH',
   MUTATION_KIND_REQUIRED: 'MUTATION_KIND_REQUIRED',
+  STRATEGY_REQUIRED: 'STRATEGY_REQUIRED',
+  STRONG_PRECONDITION_REQUIRED: 'STRONG_PRECONDITION_REQUIRED',
   PRECONDITION_MISMATCH: 'PRECONDITION_MISMATCH',
   STALE_TARGET: 'STALE_TARGET',
   SCOPE_MISMATCH: 'SCOPE_MISMATCH',
@@ -24,6 +26,7 @@ const MUTATION_REASONS = Object.freeze({
   STALE_DUPLICATE_CHECK: 'STALE_DUPLICATE_CHECK',
   DUPLICATE_EXISTS: 'DUPLICATE_EXISTS',
   AMBIGUOUS_RETRY: 'AMBIGUOUS_RETRY',
+  READBACK_REQUIRED: 'READBACK_REQUIRED',
   EXPECTED_OUTCOME_REQUIRED: 'EXPECTED_OUTCOME_REQUIRED',
 });
 
@@ -33,6 +36,7 @@ const DURABLE_ADMISSIONS = new Set([
 ]);
 
 const SAFE_BEST_EFFORT_PRIOR_STATES = new Set(['NONE', 'CONFIRMED_FAILED']);
+const BEST_EFFORT_RISKS = new Set(['LOW', 'MEDIUM']);
 
 function decision(outcome, reason = null, details = null) {
   return Object.freeze({ outcome, reason, details });
@@ -49,23 +53,73 @@ function requireExpectedOutcome(value) {
   return null;
 }
 
-function classifyUpdate(value) {
-  if (
-    !value.approved_precondition_token ||
-    value.planned_precondition_token !== value.approved_precondition_token
-  ) {
+function requireBalancedBestEffort(value) {
+  if (!BEST_EFFORT_RISKS.has(value.mutation_risk) || value.critical_effect === true) {
     return decision(
       MUTATION_DECISIONS.ABSTAIN,
-      MUTATION_REASONS.PRECONDITION_MISMATCH,
-      'planned mutation must use the exact version/precondition token captured at admission'
+      MUTATION_REASONS.STRONG_PRECONDITION_REQUIRED,
+      'high-risk or critical durable mutations require a strong server-side precondition/idempotency control'
     );
   }
 
+  if (!SAFE_BEST_EFFORT_PRIOR_STATES.has(value.prior_attempt_state)) {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.AMBIGUOUS_RETRY,
+      'best-effort mutation cannot auto-retry after an unknown prior outcome'
+    );
+  }
+
+  if (
+    !value.approved_request_fingerprint ||
+    value.planned_request_fingerprint !== value.approved_request_fingerprint
+  ) {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.REQUEST_MISMATCH,
+      'best-effort mutation payload must match the admitted request fingerprint'
+    );
+  }
+
+  if (value.post_write_readback_required !== true) {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.READBACK_REQUIRED,
+      'best-effort mutation requires post-write readback verification'
+    );
+  }
+
+  return null;
+}
+
+function classifyUpdate(value) {
   if (value.target_freshness !== 'CURRENT') {
     return decision(
       MUTATION_DECISIONS.ABSTAIN,
       MUTATION_REASONS.STALE_TARGET,
       'target must be freshly read before mutation'
+    );
+  }
+
+  if (value.update_strategy === 'STRONG_PRECONDITION') {
+    if (
+      !value.approved_precondition_token ||
+      value.planned_precondition_token !== value.approved_precondition_token
+    ) {
+      return decision(
+        MUTATION_DECISIONS.ABSTAIN,
+        MUTATION_REASONS.PRECONDITION_MISMATCH,
+        'planned mutation must use the exact version/precondition token captured at admission'
+      );
+    }
+  } else if (value.update_strategy === 'BEST_EFFORT') {
+    const balancedGate = requireBalancedBestEffort(value);
+    if (balancedGate) return balancedGate;
+  } else {
+    return decision(
+      MUTATION_DECISIONS.ABSTAIN,
+      MUTATION_REASONS.STRATEGY_REQUIRED,
+      'update strategy must be STRONG_PRECONDITION or BEST_EFFORT'
     );
   }
 
@@ -126,13 +180,8 @@ function classifyCreate(value) {
   }
 
   if (value.create_dedupe_mode === 'FRESH_DUPLICATE_CHECK') {
-    if (!SAFE_BEST_EFFORT_PRIOR_STATES.has(value.prior_attempt_state)) {
-      return decision(
-        MUTATION_DECISIONS.ABSTAIN,
-        MUTATION_REASONS.AMBIGUOUS_RETRY,
-        'best-effort create requires no prior attempt or a confirmed failed prior attempt'
-      );
-    }
+    const balancedGate = requireBalancedBestEffort(value);
+    if (balancedGate) return balancedGate;
 
     if (value.duplicate_check_freshness !== 'CURRENT') {
       return decision(
