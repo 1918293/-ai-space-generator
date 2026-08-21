@@ -8,6 +8,12 @@ const MUTATION_DECISIONS = Object.freeze({
   ABSTAIN: 'ABSTAIN',
 });
 
+const MUTATION_CLOSURES = Object.freeze({
+  VERIFIED: 'VERIFIED',
+  DIVERGED: 'DIVERGED',
+  UNKNOWN: 'UNKNOWN',
+});
+
 const MUTATION_REASONS = Object.freeze({
   ADMISSION_REQUIRED: 'ADMISSION_REQUIRED',
   OPERATION_MISMATCH: 'OPERATION_MISMATCH',
@@ -267,6 +273,33 @@ function classifyMutationGuard(proposal) {
   );
 }
 
+function closeMutationReadback({ expected_state_fingerprint, observed_state_fingerprint, readback_status }) {
+  if (readback_status !== 'SUCCESS' || !observed_state_fingerprint) {
+    return Object.freeze({
+      closure: MUTATION_CLOSURES.UNKNOWN,
+      auto_retry_allowed: false,
+      next_action: 'FRESH_READ_AND_READMISSION_REQUIRED',
+    });
+  }
+
+  if (
+    expected_state_fingerprint &&
+    observed_state_fingerprint === expected_state_fingerprint
+  ) {
+    return Object.freeze({
+      closure: MUTATION_CLOSURES.VERIFIED,
+      auto_retry_allowed: false,
+      next_action: 'NONE',
+    });
+  }
+
+  return Object.freeze({
+    closure: MUTATION_CLOSURES.DIVERGED,
+    auto_retry_allowed: false,
+    next_action: 'FRESH_READ_AND_READMISSION_REQUIRED',
+  });
+}
+
 function summarizeMutationShadow(observations) {
   if (!Array.isArray(observations) || observations.length === 0) {
     throw new TypeError('observations must be a non-empty array');
@@ -307,7 +340,9 @@ function summarizeMutationShadow(observations) {
 
 module.exports = {
   MUTATION_DECISIONS,
+  MUTATION_CLOSURES,
   MUTATION_REASONS,
   classifyMutationGuard,
+  closeMutationReadback,
   summarizeMutationShadow,
 };
