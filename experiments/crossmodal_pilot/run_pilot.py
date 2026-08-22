@@ -71,9 +71,10 @@ def main():
 
     base_a = make_scene(7, "POSITIVE-A")
     base_b = make_scene(19, "POSITIVE-B")
-    hard_negative = make_scene(7, "SAME-TOPIC-DIFFERENT")
-    cv2.rectangle(hard_negative, (140, 130), (830, 500), (255, 255, 255), -1)
-    cv2.putText(hard_negative, "DIFFERENT LAYOUT", (180, 330), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (20, 20, 20), 3, cv2.LINE_AA)
+    # Hard negative: same visible topic label but independently generated geometry.
+    # It must not reuse source pixels; otherwise it is a real edited-variant positive.
+    hard_negative = make_scene(31, "POSITIVE-A")
+    cv2.putText(hard_negative, "DIFFERENT ARTIFACT", (250, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 2, cv2.LINE_AA)
 
     images = {
         "a_source": base_a,
