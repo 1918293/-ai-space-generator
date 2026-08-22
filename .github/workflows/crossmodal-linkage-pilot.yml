@@ -1,0 +1,45 @@
+name: Crossmodal Linkage Pilot
+
+on:
+  push:
+    branches:
+      - exp/crossmodal-linkage-pilot-20260822
+    paths:
+      - 'experiments/crossmodal_pilot/**'
+      - '.github/workflows/crossmodal-linkage-pilot.yml'
+  pull_request:
+    paths:
+      - 'experiments/crossmodal_pilot/**'
+      - '.github/workflows/crossmodal-linkage-pilot.yml'
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install minimal dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy opencv-python-headless
+
+      - name: Run reproducible synthetic regression pilot
+        run: python experiments/crossmodal_pilot/run_pilot.py
+
+      - name: Upload pilot metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossmodal-pilot-results
+          path: pilot_output/
+          retention-days: 3
