@@ -40,28 +40,51 @@ def extract_sift(sift, img):
     return kp, des
 
 
-def match_pair(kp1, des1, kp2, des2):
+def hull_coverage(points: np.ndarray, shape) -> float:
+    if len(points) < 3:
+        return 0.0
+    hull = cv2.convexHull(points.astype(np.float32).reshape(-1, 1, 2))
+    area = float(cv2.contourArea(hull))
+    h, w = shape[:2]
+    return area / float(h * w)
+
+
+def match_pair(kp1, des1, shape1, kp2, des2, shape2):
+    empty = {
+        "good": 0,
+        "inliers": 0,
+        "inlier_ratio": 0.0,
+        "query_coverage": 0.0,
+        "target_coverage": 0.0,
+        "median_reproj": None,
+    }
     if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
-        return {"good": 0, "inliers": 0, "inlier_ratio": 0.0, "median_reproj": None}
+        return empty
     bf = cv2.BFMatcher(cv2.NORM_L2)
     knn = bf.knnMatch(des1, des2, k=2)
     good = [m for m, n in knn if m.distance < 0.72 * n.distance]
     if len(good) < 4:
-        return {"good": len(good), "inliers": 0, "inlier_ratio": 0.0, "median_reproj": None}
+        return {**empty, "good": len(good)}
     src = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
     H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 4.0)
     if H is None or mask is None:
-        return {"good": len(good), "inliers": 0, "inlier_ratio": 0.0, "median_reproj": None}
+        return {**empty, "good": len(good)}
     mask = mask.ravel().astype(bool)
     inliers = int(mask.sum())
     reproj = cv2.perspectiveTransform(src, H)
     err = np.linalg.norm(reproj[:, 0, :] - dst[:, 0, :], axis=1)
     med = float(np.median(err[mask])) if inliers else None
+    src_in = src[:, 0, :][mask]
+    dst_in = dst[:, 0, :][mask]
+    q_cov = hull_coverage(src_in, shape1)
+    t_cov = hull_coverage(dst_in, shape2)
     return {
         "good": len(good),
         "inliers": inliers,
         "inlier_ratio": round(inliers / len(good), 4),
+        "query_coverage": round(q_cov, 4),
+        "target_coverage": round(t_cov, 4),
         "median_reproj": None if med is None else round(med, 4),
     }
 
@@ -72,7 +95,7 @@ def main():
     base_a = make_scene(7, "POSITIVE-A")
     base_b = make_scene(19, "POSITIVE-B")
     # Hard negative: same visible topic label but independently generated geometry.
-    # It must not reuse source pixels; otherwise it is a real edited-variant positive.
+    # Shared text may create many local inliers, so spatial coverage must protect identity.
     hard_negative = make_scene(31, "POSITIVE-A")
     cv2.putText(hard_negative, "DIFFERENT ARTIFACT", (250, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 2, cv2.LINE_AA)
 
@@ -89,7 +112,6 @@ def main():
     for name, img in images.items():
         cv2.imwrite(str(OUT / f"{name}.jpg"), img)
 
-    # One-time descriptor cache benchmark.
     t0 = time.perf_counter()
     cache = {name: extract_sift(sift, img) for name, img in images.items()}
     extraction_ms = (time.perf_counter() - t0) * 1000
@@ -105,9 +127,16 @@ def main():
     rows = []
     t1 = time.perf_counter()
     for test_name, q, t, expected in tests:
-        metrics = match_pair(*cache[q], *cache[t])
-        # Conservative synthetic pilot gate only; not a universal research threshold.
-        predicted = "MATCH" if metrics["inliers"] >= 12 and metrics["inlier_ratio"] >= 0.35 else "NO_MATCH"
+        qkp, qdes = cache[q]
+        tkp, tdes = cache[t]
+        metrics = match_pair(qkp, qdes, images[q].shape, tkp, tdes, images[t].shape)
+        # Calibration gate for this synthetic CI control only, never a universal research threshold.
+        predicted = "MATCH" if (
+            metrics["inliers"] >= 12
+            and metrics["inlier_ratio"] >= 0.35
+            and metrics["query_coverage"] >= 0.08
+            and metrics["target_coverage"] >= 0.08
+        ) else "NO_MATCH"
         rows.append({
             "test": test_name,
             "query": q,
@@ -119,20 +148,19 @@ def main():
         })
     cached_match_ms = (time.perf_counter() - t1) * 1000
 
-    # Compare one representative pair with and without descriptor reuse.
     repeats = 8
     t2 = time.perf_counter()
     for _ in range(repeats):
         kp1, des1 = extract_sift(sift, images["a_source"])
         kp2, des2 = extract_sift(sift, images["a_target"])
-        match_pair(kp1, des1, kp2, des2)
+        match_pair(kp1, des1, images["a_source"].shape, kp2, des2, images["a_target"].shape)
     recompute_ms_per_pair = ((time.perf_counter() - t2) * 1000) / repeats
 
     kp1, des1 = cache["a_source"]
     kp2, des2 = cache["a_target"]
     t3 = time.perf_counter()
     for _ in range(repeats):
-        match_pair(kp1, des1, kp2, des2)
+        match_pair(kp1, des1, images["a_source"].shape, kp2, des2, images["a_target"].shape)
     cached_ms_per_pair = ((time.perf_counter() - t3) * 1000) / repeats
 
     summary = {
