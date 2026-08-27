@@ -1,8 +1,20 @@
 {
   "status": "EXP_EXECUTABLE_HANDOFF_READY",
-  "version": "0.1",
+  "version": "0.2",
   "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR.",
+  "profiles": [
+    "profiles/upper_body_strong_slim_v01.json"
+  ],
   "runners": {
+    "qwencloud_hosted": {
+      "file": "run_qwencloud_salon.py",
+      "model_default": "qwen-image-3.0-pro",
+      "runtime": "CPU client + hosted inference",
+      "inputs": "source + garment reference + structure control",
+      "recommended_first": true,
+      "required_env": ["DASHSCOPE_API_KEY"],
+      "dry_run": "DRY_RUN=1"
+    },
     "fitvton": {
       "file": "run_fitvton_salon.sh",
       "jobs": [
@@ -27,7 +39,7 @@
       "model": "Qwen-Image-Edit-2511",
       "optimization": "step-distilled + FP8",
       "steps": 8,
-      "recommended_first": true
+      "recommended_first_when_self_hosting": true
     }
   },
   "validated_locally": [
@@ -39,12 +51,14 @@
     "adobe_firefly": "ATTEMPTED + FAILED_ACCESS_DENIED",
     "picsart_runway_gen4_ref": "PREFLIGHT_VALID + 2_CREDITS_REQUIRED",
     "picsart_qwen_edit": "KNOWN_4_CREDITS_REQUIRED",
-    "github_actions": "NO_GPU_OR_SELF_HOSTED_RUNNER_FOUND"
+    "github_actions_gpu": "NO_GPU_OR_SELF_HOSTED_RUNNER_FOUND",
+    "qwencloud_hosted": "RUNNER_READY + API_KEY_REQUIRED"
   },
   "not_executed": [
+    "QwenCloud qwen-image-3.0-pro inference",
     "FitVTON inference",
-    "Qwen Image Edit inference",
+    "Qwen Image Edit self-hosted inference",
     "MHR / InstantHMR inference"
   ],
-  "next_gate": "compatible GPU or sufficient remote-generation credits/access"
+  "next_gate": "DASHSCOPE_API_KEY for hosted QwenCloud, or compatible GPU/remote-generation access"
 }
