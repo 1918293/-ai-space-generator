@@ -1,12 +1,8 @@
 name: Salon Hugging Face Zero Probe
 
+# Manual-only by design. A real Zero GPU inference is expensive/shared capacity and
+# has already been validated end-to-end. Normal PR CI only compiles the runner.
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/salon-hf-zero-validation.yml"
-      - "experiments/salon-reconstruction/run_hf_zero_fast_salon.py"
   workflow_dispatch:
 
 permissions:
