@@ -1,0 +1,50 @@
+{
+  "status": "EXP_EXECUTABLE_HANDOFF_READY",
+  "version": "0.1",
+  "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR.",
+  "runners": {
+    "fitvton": {
+      "file": "run_fitvton_salon.sh",
+      "jobs": [
+        "slim + medium-tall + long upper + untucked",
+        "slim + tall + long upper + untucked"
+      ],
+      "required_checkpoints": [
+        "default_lora_weights.safetensors",
+        "texture_lora_weights.safetensors"
+      ]
+    },
+    "qwen": {
+      "file": "run_qwen_salon.py",
+      "model_default": "Qwen/Qwen-Image-Edit-2511",
+      "jobs": [
+        "source + garment + target keypoints",
+        "source + garment + target silhouette"
+      ]
+    },
+    "qwen_lightx2v_fp8": {
+      "file": "run_qwen_lightx2v_fp8.sh",
+      "model": "Qwen-Image-Edit-2511",
+      "optimization": "step-distilled + FP8",
+      "steps": 8,
+      "recommended_first": true
+    }
+  },
+  "validated_locally": [
+    "bash syntax: run_fitvton_salon.sh",
+    "bash syntax: run_qwen_lightx2v_fp8.sh",
+    "python compile: run_qwen_salon.py"
+  ],
+  "actual_remote_execution_attempts": {
+    "adobe_firefly": "ATTEMPTED + FAILED_ACCESS_DENIED",
+    "picsart_runway_gen4_ref": "PREFLIGHT_VALID + 2_CREDITS_REQUIRED",
+    "picsart_qwen_edit": "KNOWN_4_CREDITS_REQUIRED",
+    "github_actions": "NO_GPU_OR_SELF_HOSTED_RUNNER_FOUND"
+  },
+  "not_executed": [
+    "FitVTON inference",
+    "Qwen Image Edit inference",
+    "MHR / InstantHMR inference"
+  ],
+  "next_gate": "compatible GPU or sufficient remote-generation credits/access"
+}
