@@ -1,0 +1,81 @@
+name: Salon Runner Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "experiments/salon-reconstruction/**"
+      - ".github/workflows/salon-runner-validation.yml"
+      - ".github/workflows/salon-qwencloud.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qwencloud-dry-run:
+    name: qwencloud-dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install validation dependencies
+        run: python -m pip install --disable-pip-version-check requests pillow
+
+      - name: Build synthetic private pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/salon-pack
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+
+          root = Path('/tmp/salon-pack')
+          source = Image.new('RGB', (96, 128), (224, 214, 202))
+          d = ImageDraw.Draw(source)
+          d.ellipse((28, 14, 68, 54), fill=(170, 125, 95))
+          d.rectangle((24, 52, 72, 118), fill=(35, 35, 35))
+          source.save(root / '01_Source_Original.png')
+
+          garment = Image.new('RGB', (96, 128), (35, 35, 35))
+          gd = ImageDraw.Draw(garment)
+          gd.text((12, 48), 'CALIFORNIA', fill=(235, 210, 190))
+          garment.save(root / '02_Garment_Reference_CALIFORNIA.png')
+
+          structure = Image.new('RGB', (96, 128), 'black')
+          sd = ImageDraw.Draw(structure)
+          sd.line([(48, 18), (48, 92)], fill='white', width=3)
+          sd.line([(48, 48), (28, 70)], fill='white', width=3)
+          sd.line([(48, 48), (68, 70)], fill='white', width=3)
+          structure.save(root / '03_Target_Keypoints_UpperBody_Strong.png')
+          PY
+
+      - name: Validate QwenCloud three-image payload
+        env:
+          PACK_DIR: /tmp/salon-pack
+          DASHSCOPE_API_KEY: placeholder-not-used-in-dry-run
+          DRY_RUN: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python experiments/salon-reconstruction/run_qwencloud_salon.py > /tmp/qwencloud-payload.json
+          grep -q 'qwen-image-3.0-pro' /tmp/qwencloud-payload.json
+          test "$(grep -c '<data-uri ' /tmp/qwencloud-payload.json)" -eq 3
+          grep -q 'upper_body_strong_slim_v01' /tmp/qwencloud-payload.json
+          echo 'QwenCloud hosted client dry-run: PASS'
+
+      - name: Compile all Salon runners
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            experiments/salon-reconstruction/run_qwencloud_salon.py \
+            experiments/salon-reconstruction/run_qwen_salon.py
+          bash -n experiments/salon-reconstruction/run_fitvton_salon.sh
+          bash -n experiments/salon-reconstruction/run_qwen_lightx2v_fp8.sh
