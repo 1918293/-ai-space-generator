@@ -1,0 +1,150 @@
+name: Salon Private Zero Run
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/salon-private-zero-run.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  private-qwen-zero:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check gradio_client pillow requests
+
+      - name: Generate ephemeral transport key
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/salon-private
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/salon-private/private.pem 2>/dev/null
+          openssl pkey -in /tmp/salon-private/private.pem -pubout -out /tmp/salon-private/public.pem
+          echo "RUN_ID=${GITHUB_RUN_ID}" > /tmp/salon-private/run.txt
+
+      - name: Publish public key only
+        uses: actions/upload-artifact@v4
+        with:
+          name: salon-transport-public-key-${{ github.run_id }}
+          path: |
+            /tmp/salon-private/public.pem
+            /tmp/salon-private/run.txt
+          retention-days: 1
+
+      - name: Wait for encrypted transport manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH_REF: exp/salon-reconstruction-v0.1
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/runtime-private/salon-${GITHUB_RUN_ID}.json?ref=exp%2Fsalon-reconstruction-v0.1"
+          for i in $(seq 1 120); do
+            if curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$API" -o /tmp/salon-private/content.json; then
+              python - <<'PY'
+          import base64, json
+          src=json.load(open('/tmp/salon-private/content.json'))
+          raw=base64.b64decode(src['content'])
+          open('/tmp/salon-private/transport.json','wb').write(raw)
+          PY
+              echo "Encrypted transport manifest received"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for encrypted transport manifest" >&2
+          exit 1
+
+      - name: Download and decrypt private pack
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, requests
+          m=json.load(open('/tmp/salon-private/transport.json'))
+          for key,out in [('payload_url','/tmp/salon-private/payload.enc'),('wrapped_key_url','/tmp/salon-private/key.enc')]:
+              r=requests.get(m[key], timeout=120)
+              r.raise_for_status()
+              open(out,'wb').write(r.content)
+          PY
+          openssl pkeyutl -decrypt -inkey /tmp/salon-private/private.pem -in /tmp/salon-private/key.enc -out /tmp/salon-private/aes.pass
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/tmp/salon-private/aes.pass -in /tmp/salon-private/payload.enc -out /tmp/salon-private/pack.zip
+          mkdir -p /tmp/salon-private/pack
+          unzip -q /tmp/salon-private/pack.zip -d /tmp/salon-private/pack
+          test -s /tmp/salon-private/pack/01_Source_Original.png
+          test -s /tmp/salon-private/pack/02_Garment_Reference_CALIFORNIA.png
+          test -s /tmp/salon-private/pack/03_Target_Keypoints_UpperBody_Strong.png
+          echo "PRIVATE_PACK_DECRYPT=PASS"
+
+      - name: Execute private Qwen 2511 Lightning reconstruction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from gradio_client import Client, handle_file
+          import shutil
+
+          root=Path('/tmp/salon-private/pack')
+          client=Client('LPX55/Qwen-Image-Edit-2511-Turbo-Lightning', verbose=False)
+          gallery=[
+              {'image':handle_file(str(root/'01_Source_Original.png')),'caption':None},
+              {'image':handle_file(str(root/'02_Garment_Reference_CALIFORNIA.png')),'caption':None},
+              {'image':handle_file(str(root/'03_Target_Keypoints_UpperBody_Strong.png')),'caption':None},
+          ]
+          prompt='''Reconstruct the same person from Image 1 as a clearly and substantially slimmer upper-body version. Image 1 is identity, face, hair, hands, phone, lighting and salon-scene authority. Image 2 is the black washed CALIFORNIA / LONG BEACH / SUNSET T-shirt design, print, material and garment authority. Image 3 is target upper-body geometry authority. Rebuild shoulder width, upper-arm volume, ribcage and torso width, waist and abdomen visual width, sleeves, arm-to-torso spacing and T-shirt drape coherently. Do not merely squeeze or liquify source pixels. The person must read clearly slimmer at first glance. Preserve the same face, hairstyle, hair color, downward gaze, phone, hand identity, shirt identity and readable print, and retain a believable relationship to the original salon wood-wall scene. Naturalness is a final QA gate, not a reason to make slimming subtle. Output one photorealistic portrait only.'''
+          result=client.predict(
+              images=gallery,
+              prompt=prompt,
+              seed=47,
+              randomize_seed=False,
+              true_guidance_scale=1.0,
+              num_inference_steps=4,
+              height=1024,
+              width=576,
+              rewrite_prompt=False,
+              num_images_per_prompt=1,
+              api_name='/infer',
+          )
+          outputs=result[0] if isinstance(result,tuple) else result
+          if not outputs:
+              raise SystemExit('No Qwen output')
+          first=outputs[0]
+          image=first.get('image',first) if isinstance(first,dict) else first
+          path=image if isinstance(image,str) else image.get('path') if isinstance(image,dict) else None
+          if not path:
+              raise SystemExit(f'No output path: {first}')
+          src=Path(path)
+          if not src.exists() or src.stat().st_size==0:
+              raise SystemExit(f'Output missing: {src}')
+          shutil.copy2(src,'/tmp/salon-private/result.webp')
+          print('PRIVATE_QWEN_ZERO_INFERENCE=PASS')
+          print('OUTPUT_BYTES',Path('/tmp/salon-private/result.webp').stat().st_size)
+          PY
+
+      - name: Encrypt reconstruction result
+        if: success()
+        run: |
+          set -euo pipefail
+          openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/tmp/salon-private/aes.pass -in /tmp/salon-private/result.webp -out /tmp/salon-private/result.webp.enc
+          sha256sum /tmp/salon-private/result.webp.enc > /tmp/salon-private/result.sha256
+
+      - name: Upload encrypted result only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salon-private-zero-result-${{ github.run_id }}
+          path: |
+            /tmp/salon-private/result.webp.enc
+            /tmp/salon-private/result.sha256
+          retention-days: 1
+
+      - name: Cleanup private material
+        if: always()
+        run: |
+          rm -rf /tmp/salon-private || true
