@@ -1,6 +1,6 @@
 {
   "status": "EXP_EXECUTABLE_HANDOFF_READY",
-  "version": "0.6",
+  "version": "0.7",
   "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR or private presigned URLs supplied through GitHub Secrets.",
   "profiles": [
     "profiles/upper_body_strong_slim_v01.json"
@@ -58,7 +58,8 @@
     "github_actions_hf_zero_validation": {
       "file": ".github/workflows/salon-hf-zero-validation.yml",
       "runtime": "ubuntu-latest + Hugging Face Zero",
-      "trigger_scope": "Only this validation workflow or run_hf_zero_fast_salon.py changes, plus manual dispatch, to avoid wasting Zero GPU on documentation-only changes.",
+      "trigger": "workflow_dispatch only",
+      "reason": "Real Zero GPU inference is shared/expensive capacity and is already end-to-end validated; normal PR changes must not consume it automatically.",
       "latest_production_runner_validation": "PASS"
     },
     "fitvton": {
