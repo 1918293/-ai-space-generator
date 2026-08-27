@@ -3,6 +3,14 @@ name: Salon Free Zero GPU Reconstruction
 on:
   workflow_dispatch:
     inputs:
+      backend:
+        description: "Zero backend: lora_fast or lightning"
+        required: false
+        default: "lora_fast"
+      variant:
+        description: "Prompt variant: preserve_garment, strong_keypoints, identity_first"
+        required: false
+        default: "preserve_garment"
       seed:
         description: "Qwen image seed"
         required: false
@@ -24,8 +32,12 @@ jobs:
       OUT_DIR: /tmp/salon-output
       SALON_PACK_URL: ${{ secrets.SALON_PACK_URL }}
       SALON_RESULT_UPLOAD_URL: ${{ secrets.SALON_RESULT_UPLOAD_URL }}
+      HF_ZERO_BACKEND: ${{ inputs.backend }}
+      HF_ZERO_VARIANT: ${{ inputs.variant }}
+      HF_ZERO_INPUT_MODE: source_garment_structure
       SEED: ${{ inputs.seed }}
       HF_ZERO_STEPS: ${{ inputs.steps }}
+      HF_ZERO_GUIDANCE: "1.0"
       HF_ZERO_LORA: Studio-DeLight
     steps:
       - uses: actions/checkout@v6
@@ -40,6 +52,7 @@ jobs:
           set -euo pipefail
           test -n "$SALON_PACK_URL" || { echo "::error::Missing SALON_PACK_URL secret"; exit 78; }
           test -n "$SALON_RESULT_UPLOAD_URL" || { echo "::error::Missing SALON_RESULT_UPLOAD_URL secret"; exit 78; }
+          case "$HF_ZERO_BACKEND" in lora_fast|lightning) ;; *) echo "::error::Invalid backend"; exit 2;; esac
 
       - name: Install Zero GPU client dependencies
         run: python -m pip install --disable-pip-version-check gradio_client pillow
@@ -58,14 +71,14 @@ jobs:
             find "$root" -maxdepth 1 -type f -exec cp {} "$PACK_DIR/" \;
           fi
 
-      - name: Run free hosted Qwen 2511 Zero GPU reconstruction
+      - name: Run hosted Qwen 2511 Zero GPU reconstruction
         run: python experiments/salon-reconstruction/run_hf_zero_fast_salon.py
 
       - name: Upload result to private destination
         shell: bash
         run: |
           set -euo pipefail
-          result="$OUT_DIR/hf_zero_upper_body_strong.png"
+          result="$OUT_DIR/hf_zero_${HF_ZERO_BACKEND}_${HF_ZERO_VARIANT}.png"
           test -f "$result" || { echo "::error::No reconstruction result produced"; exit 3; }
           curl --fail --silent --show-error \
             -X PUT \
