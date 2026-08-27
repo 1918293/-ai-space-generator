@@ -26,7 +26,7 @@ jobs:
       - name: Generate ephemeral transport key
         run: |
           set -euo pipefail
-          mkdir -p /tmp/salon-private
+          mkdir -p /tmp/salon-private/pack
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/salon-private/private.pem 2>/dev/null
           openssl pkey -in /tmp/salon-private/private.pem -pubout -out /tmp/salon-private/public.pem
           echo "RUN_ID=${GITHUB_RUN_ID}" > /tmp/salon-private/run.txt
@@ -40,48 +40,51 @@ jobs:
             /tmp/salon-private/run.txt
           retention-days: 1
 
-      - name: Wait for encrypted transport manifest
+      - name: Wait for RSA-encrypted private URL manifest
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH_REF: exp/salon-reconstruction-v0.1
         run: |
           set -euo pipefail
-          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/runtime-private/salon-${GITHUB_RUN_ID}.json?ref=exp%2Fsalon-reconstruction-v0.1"
-          for i in $(seq 1 120); do
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/runtime-private/salon-${GITHUB_RUN_ID}.b64?ref=exp%2Fsalon-reconstruction-v0.1"
+          for i in $(seq 1 180); do
             if curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$API" -o /tmp/salon-private/content.json; then
               python - <<'PY'
           import base64, json
           src=json.load(open('/tmp/salon-private/content.json'))
-          raw=base64.b64decode(src['content'])
-          open('/tmp/salon-private/transport.json','wb').write(raw)
+          body=base64.b64decode(src['content']).decode('ascii').strip()
+          open('/tmp/salon-private/urls.enc','wb').write(base64.b64decode(body))
           PY
-              echo "Encrypted transport manifest received"
+              openssl pkeyutl -decrypt -inkey /tmp/salon-private/private.pem -in /tmp/salon-private/urls.enc -out /tmp/salon-private/transport.json
+              echo "PRIVATE_URL_MANIFEST_DECRYPT=PASS"
               exit 0
             fi
             sleep 5
           done
-          echo "Timed out waiting for encrypted transport manifest" >&2
+          echo "Timed out waiting for encrypted URL manifest" >&2
           exit 1
 
-      - name: Download and decrypt private pack
+      - name: Download private runtime inputs
         run: |
-          set -euo pipefail
           python - <<'PY'
           import json, requests
+          from pathlib import Path
+          root=Path('/tmp/salon-private/pack')
           m=json.load(open('/tmp/salon-private/transport.json'))
-          for key,out in [('payload_url','/tmp/salon-private/payload.enc'),('wrapped_key_url','/tmp/salon-private/key.enc')]:
-              r=requests.get(m[key], timeout=120)
+          mapping={
+              'source_url':'01_Source_Original.png',
+              'garment_url':'02_Garment_Reference_CALIFORNIA.png',
+              'structure_url':'03_Target_Keypoints_UpperBody_Strong.png',
+          }
+          for key,name in mapping.items():
+              r=requests.get(m[key],timeout=120,allow_redirects=True)
               r.raise_for_status()
-              open(out,'wb').write(r.content)
+              p=root/name
+              p.write_bytes(r.content)
+              if p.stat().st_size < 100:
+                  raise RuntimeError(f'Input unexpectedly small: {name}')
+          Path('/tmp/salon-private/result.pass').write_text(m['result_pass'],encoding='ascii')
+          print('PRIVATE_INPUT_DOWNLOAD=PASS')
           PY
-          openssl pkeyutl -decrypt -inkey /tmp/salon-private/private.pem -in /tmp/salon-private/key.enc -out /tmp/salon-private/aes.pass
-          openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/tmp/salon-private/aes.pass -in /tmp/salon-private/payload.enc -out /tmp/salon-private/pack.zip
-          mkdir -p /tmp/salon-private/pack
-          unzip -q /tmp/salon-private/pack.zip -d /tmp/salon-private/pack
-          test -s /tmp/salon-private/pack/01_Source_Original.png
-          test -s /tmp/salon-private/pack/02_Garment_Reference_CALIFORNIA.png
-          test -s /tmp/salon-private/pack/03_Target_Keypoints_UpperBody_Strong.png
-          echo "PRIVATE_PACK_DECRYPT=PASS"
 
       - name: Execute private Qwen 2511 Lightning reconstruction
         run: |
@@ -131,7 +134,7 @@ jobs:
         if: success()
         run: |
           set -euo pipefail
-          openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/tmp/salon-private/aes.pass -in /tmp/salon-private/result.webp -out /tmp/salon-private/result.webp.enc
+          openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/tmp/salon-private/result.pass -in /tmp/salon-private/result.webp -out /tmp/salon-private/result.webp.enc
           sha256sum /tmp/salon-private/result.webp.enc > /tmp/salon-private/result.sha256
 
       - name: Upload encrypted result only
@@ -146,5 +149,4 @@ jobs:
 
       - name: Cleanup private material
         if: always()
-        run: |
-          rm -rf /tmp/salon-private || true
+        run: rm -rf /tmp/salon-private || true
