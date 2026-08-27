@@ -24,7 +24,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Gradio client
-        run: python -m pip install --disable-pip-version-check gradio_client
+        run: python -m pip install --disable-pip-version-check gradio_client pillow
 
       - name: Probe official Qwen Zero Space API
         shell: bash
@@ -37,8 +37,66 @@ jobs:
           client = Client("Qwen/Qwen-Image-Edit-2511", verbose=False)
           api = client.view_api(return_format="dict")
           print(json.dumps(api, indent=2, default=str))
-          text = json.dumps(api, default=str)
-          if "infer" not in text.lower() and "predict" not in text.lower():
-              raise SystemExit("No callable inference endpoint discovered")
+          endpoint = (api.get("named_endpoints") or {}).get("/infer")
+          if endpoint is None:
+              raise SystemExit("Named /infer endpoint not discovered")
           print("Official Qwen Zero Space API probe: PASS")
+          PY
+
+      - name: Run one-step anonymous Zero GPU inference with synthetic images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          from gradio_client import Client, handle_file
+
+          root = Path('/tmp/hf-zero-synthetic')
+          root.mkdir(parents=True, exist_ok=True)
+
+          # Three non-private synthetic controls: source, garment-like reference, structure.
+          source = Image.new('RGB', (256, 256), (220, 210, 200))
+          d = ImageDraw.Draw(source)
+          d.ellipse((92, 28, 164, 100), fill=(170, 125, 95))
+          d.rectangle((72, 96, 184, 232), fill=(45, 45, 45))
+          source_path = root / 'source.png'
+          source.save(source_path)
+
+          garment = Image.new('RGB', (256, 256), (42, 42, 42))
+          gd = ImageDraw.Draw(garment)
+          gd.text((60, 112), 'CALIFORNIA', fill=(235, 210, 190))
+          garment_path = root / 'garment.png'
+          garment.save(garment_path)
+
+          structure = Image.new('RGB', (256, 256), 'black')
+          sd = ImageDraw.Draw(structure)
+          sd.line([(128, 36), (128, 208)], fill='white', width=6)
+          sd.line([(128, 92), (88, 142)], fill='white', width=6)
+          sd.line([(128, 92), (168, 142)], fill='white', width=6)
+          structure_path = root / 'structure.png'
+          structure.save(structure_path)
+
+          images = [
+              {"image": handle_file(str(source_path))},
+              {"image": handle_file(str(garment_path))},
+              {"image": handle_file(str(structure_path))},
+          ]
+
+          client = Client("Qwen/Qwen-Image-Edit-2511", verbose=False)
+          result, seed = client.predict(
+              images,
+              "Keep the first synthetic subject recognizable, use the second image only as a dark garment reference, and use the third image as a simple structure cue. Return one normal image.",
+              47,
+              False,
+              1.0,
+              1,
+              256,
+              256,
+              False,
+              api_name="/infer",
+          )
+          if not result:
+              raise SystemExit("Zero GPU returned no image")
+          print(f"Official Qwen Zero GPU one-step inference: PASS; seed={seed}; results={len(result)}")
           PY
