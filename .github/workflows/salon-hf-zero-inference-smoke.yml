@@ -1,115 +1,18 @@
-name: Salon HF Zero Inference Smoke
+name: Salon HF Zero Inference Smoke (Deprecated)
 
+# Historical official-Qwen Zero test. The official Space currently requests a GPU
+# duration above the anonymous Zero-GPU allowance. This known gate is already recorded
+# by salon-hf-zero-validation.yml and should not create repeated failing CI runs.
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/salon-hf-zero-inference-smoke.yml'
-      - 'experiments/salon-reconstruction/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  qwen-zero-inference-smoke:
+  deprecated:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-
-      - name: Install smoke dependencies
-        run: python -m pip install --disable-pip-version-check gradio_client pillow
-
-      - name: Build synthetic multi-image inputs
-        run: |
-          python - <<'PY'
-          from PIL import Image, ImageDraw
-          from pathlib import Path
-          p = Path('/tmp/salon-zero-smoke')
-          p.mkdir(exist_ok=True)
-
-          a = Image.new('RGB', (256, 256), 'white')
-          d = ImageDraw.Draw(a)
-          d.rectangle((78, 55, 178, 225), outline='black', width=5)
-          d.ellipse((98, 20, 158, 80), outline='black', width=5)
-          d.text((82, 115), 'SOURCE', fill='black')
-          a.save(p/'source.png')
-
-          b = Image.new('RGB', (256, 256), 'white')
-          d = ImageDraw.Draw(b)
-          d.rectangle((65, 70, 191, 220), fill='black')
-          d.text((82, 125), 'SHIRT', fill='white')
-          b.save(p/'garment.png')
-
-          c = Image.new('RGB', (256, 256), 'black')
-          d = ImageDraw.Draw(c)
-          d.line((128, 30, 128, 215), fill='white', width=6)
-          d.line((128, 75, 92, 135), fill='white', width=6)
-          d.line((128, 75, 164, 135), fill='white', width=6)
-          d.line((128, 145, 104, 225), fill='white', width=6)
-          d.line((128, 145, 152, 225), fill='white', width=6)
-          c.save(p/'structure.png')
-          PY
-
-      - name: Execute official Qwen Zero GPU inference
-        run: |
-          python - <<'PY'
-          from gradio_client import Client, handle_file
-          from pathlib import Path
-          import shutil, json
-
-          root = Path('/tmp/salon-zero-smoke')
-          client = Client('Qwen/Qwen-Image-Edit-2511', verbose=False)
-          gallery = [
-              {'image': handle_file(str(root/'source.png')), 'caption': None},
-              {'image': handle_file(str(root/'garment.png')), 'caption': None},
-              {'image': handle_file(str(root/'structure.png')), 'caption': None},
-          ]
-          prompt = (
-              'Use the first image as the main composition, the second as a black garment reference, '
-              'and the third as a simple structure guide. Produce one coherent simple edited image. '
-              'This is a synthetic API smoke test.'
-          )
-          result = client.predict(
-              images=gallery,
-              prompt=prompt,
-              seed=47,
-              randomize_seed=False,
-              true_guidance_scale=2.0,
-              num_inference_steps=1,
-              height=256,
-              width=256,
-              rewrite_prompt=False,
-              api_name='/infer',
-          )
-          print('RAW_RESULT_TYPE', type(result).__name__)
-          print('RAW_RESULT', str(result)[:2000])
-
-          outputs = result[0] if isinstance(result, tuple) else result
-          if not outputs:
-              raise SystemExit('Zero GPU inference returned no gallery output')
-
-          first = outputs[0]
-          image = first.get('image', first) if isinstance(first, dict) else first
-          path = image.get('path') if isinstance(image, dict) else None
-          if not path:
-              raise SystemExit(f'No output path in result: {first}')
-          src = Path(path)
-          if not src.exists() or src.stat().st_size == 0:
-              raise SystemExit(f'Output file missing/empty: {src}')
-          dst = root/'zero_gpu_result.png'
-          shutil.copy2(src, dst)
-          print('ZERO_GPU_INFERENCE_SMOKE=PASS')
-          print('OUTPUT_BYTES', dst.stat().st_size)
-          PY
-
-      - name: Upload synthetic smoke result
-        uses: actions/upload-artifact@v4
-        with:
-          name: salon-hf-zero-synthetic-smoke
-          path: /tmp/salon-zero-smoke/zero_gpu_result.png
-          retention-days: 1
+      - run: |
+          echo "Deprecated: official Qwen Space Zero inference has a known duration-policy gate."
+          echo "Use salon-hf-zero-validation.yml for current contract checks."
