@@ -1,0 +1,48 @@
+name: Salon HF Zero Alt Probe
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/salon-hf-zero-alt-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-fast-zero-spaces:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install Gradio client
+        run: python -m pip install --disable-pip-version-check gradio_client
+      - name: Probe candidate contracts
+        run: |
+          python - <<'PY'
+          from gradio_client import Client
+          import json
+
+          spaces = [
+              'LPX55/Qwen-Image-Edit-2511-Turbo-Lightning',
+              'prithivMLmods/Qwen-Image-Edit-2511-LoRAs-Fast',
+          ]
+          ok = 0
+          for space in spaces:
+              print('\n=== SPACE', space, '===')
+              try:
+                  client = Client(space, verbose=False)
+                  api = client.view_api(return_format='dict')
+                  print(json.dumps(api, indent=2, default=str)[:16000])
+                  named = list((api or {}).get('named_endpoints', {}).keys())
+                  print('NAMED_ENDPOINTS', named)
+                  ok += 1
+              except Exception as e:
+                  print('PROBE_ERROR', type(e).__name__, str(e))
+          if ok == 0:
+              raise SystemExit('No candidate Zero GPU space API could be reached')
+          print('ALT_ZERO_API_PROBE=PASS', ok)
+          PY
