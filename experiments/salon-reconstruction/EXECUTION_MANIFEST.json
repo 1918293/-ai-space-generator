@@ -1,10 +1,11 @@
 {
   "status": "EXP_EXECUTABLE_HANDOFF_READY",
-  "version": "0.5",
+  "version": "0.6",
   "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR or private presigned URLs supplied through GitHub Secrets.",
   "profiles": [
     "profiles/upper_body_strong_slim_v01.json"
   ],
+  "primary_execution_path": "hf_zero_fast",
   "runners": {
     "hf_zero_fast": {
       "file": "run_hf_zero_fast_salon.py",
@@ -14,7 +15,8 @@
       "default_lora": "Studio-DeLight",
       "default_steps": 4,
       "api_key_required": false,
-      "recommended_first": true
+      "recommended_first": true,
+      "production_runner_end_to_end_synthetic_validation": "PASS"
     },
     "github_actions_hf_zero": {
       "file": ".github/workflows/salon-hf-zero.yml",
@@ -56,7 +58,8 @@
     "github_actions_hf_zero_validation": {
       "file": ".github/workflows/salon-hf-zero-validation.yml",
       "runtime": "ubuntu-latest + Hugging Face Zero",
-      "trigger_scope": "Only this validation workflow or run_hf_zero_fast_salon.py changes, plus manual dispatch, to avoid wasting Zero GPU on documentation-only changes."
+      "trigger_scope": "Only this validation workflow or run_hf_zero_fast_salon.py changes, plus manual dispatch, to avoid wasting Zero GPU on documentation-only changes.",
+      "latest_production_runner_validation": "PASS"
     },
     "fitvton": {
       "file": "run_fitvton_salon.sh",
@@ -98,11 +101,12 @@
     "qwencloud_three_image_payload": "PASS",
     "official_qwen_space_api_contract": "PASS",
     "official_qwen_space_inference": "BLOCKED_ZERO_DURATION_POLICY",
-    "fast_qwen_zero_3_image_1_step_synthetic_inference": "PASS",
-    "fast_qwen_zero_actual_remote_inference_proven": true
+    "fast_qwen_zero_direct_3_image_1_step_synthetic_inference": "PASS",
+    "production_hf_zero_runner_3_image_1_step_synthetic_inference": "PASS",
+    "production_hf_zero_runner_output_png_verify": "PASS"
   },
   "actual_remote_execution_attempts": {
-    "hf_zero_fast": "ACTUAL_3_IMAGE_SYNTHETIC_INFERENCE_PASS",
+    "hf_zero_fast": "ACTUAL_PRODUCTION_RUNNER_SYNTHETIC_INFERENCE_PASS",
     "official_qwen_hf_zero": "API_CONTRACT_PASS + INFERENCE_BLOCKED_BY_ZERO_DURATION_POLICY",
     "adobe_firefly": "ATTEMPTED + FAILED_ACCESS_DENIED",
     "picsart_runway_gen4_ref": "PREFLIGHT_VALID + 2_CREDITS_REQUIRED",
@@ -117,5 +121,5 @@
     "Qwen Image Edit self-hosted inference",
     "MHR / InstantHMR inference"
   ],
-  "next_gate": "Safe private input/output transport (SALON_PACK_URL + SALON_RESULT_UPLOAD_URL), or direct private internet-connected execution of run_hf_zero_fast_salon.py"
+  "next_gate": "Only safe private input/output transport remains: SALON_PACK_URL + SALON_RESULT_UPLOAD_URL, or direct private internet-connected execution of run_hf_zero_fast_salon.py"
 }
