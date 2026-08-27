@@ -1,0 +1,23 @@
+{
+  "id": "upper_body_strong_slim_v01",
+  "status": "EXP_TARGET_SPEC",
+  "primary_objective": "Make the visible upper body clearly and substantially slimmer at first glance while preserving same-person visual identity.",
+  "editable": {
+    "shoulder_width": "reduce clearly",
+    "upper_arm_volume": "reduce clearly",
+    "ribcage_torso_width": "reduce strongly",
+    "waist_abdomen_visual_width": "reduce strongly",
+    "shirt_drape": "reconstruct over the slimmer body; preserve oversized/washed-shirt identity while removing unnecessary boxy bulk",
+    "posture": "may subtly recenter or lengthen torso",
+    "occlusion": "rebuild sleeves, arms, hands and phone relationships when needed"
+  },
+  "anchors": [
+    "same person identity and face",
+    "same hairstyle and hair color",
+    "same black washed CALIFORNIA / LONG BEACH / SUNSET T-shirt identity and readable print",
+    "same phone and hand identity",
+    "same salon / wood-wall visual relationship"
+  ],
+  "hard_rule": "Naturalness is a final visual QA gate, not a limiter on slimming strength.",
+  "privacy": "No portrait or control images belong in this public repository. Runtime assets are private/local."
+}
