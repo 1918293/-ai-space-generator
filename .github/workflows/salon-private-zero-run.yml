@@ -1,12 +1,8 @@
 name: Salon Private Zero Run
 
+# Manual-only: this workflow waits for an encrypted transport manifest and must never
+# start automatically on ordinary PR/documentation changes.
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/salon-private-zero-run.yml'
-      - 'experiments/salon-reconstruction/run_hf_zero_fast_salon.py'
-      - 'experiments/salon-reconstruction/profiles/**'
-      - 'runtime-private/triggers/**'
   workflow_dispatch:
 
 permissions:
