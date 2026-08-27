@@ -1,7 +1,7 @@
 {
   "status": "EXP_EXECUTABLE_HANDOFF_READY",
-  "version": "0.2",
-  "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR.",
+  "version": "0.3",
+  "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR or private presigned URLs supplied through GitHub Secrets.",
   "profiles": [
     "profiles/upper_body_strong_slim_v01.json"
   ],
@@ -14,6 +14,17 @@
       "recommended_first": true,
       "required_env": ["DASHSCOPE_API_KEY"],
       "dry_run": "DRY_RUN=1"
+    },
+    "github_actions_qwencloud": {
+      "file": ".github/workflows/salon-qwencloud.yml",
+      "runtime": "ubuntu-latest + hosted QwenCloud inference",
+      "trigger": "workflow_dispatch",
+      "required_secrets": [
+        "DASHSCOPE_API_KEY",
+        "SALON_PACK_URL",
+        "SALON_RESULT_UPLOAD_URL"
+      ],
+      "privacy": "Downloads a private pack, uploads the result to a private presigned destination, publishes no portrait artifact to the public repository, and deletes private runner files in an always() cleanup step."
     },
     "fitvton": {
       "file": "run_fitvton_salon.sh",
@@ -45,14 +56,17 @@
   "validated_locally": [
     "bash syntax: run_fitvton_salon.sh",
     "bash syntax: run_qwen_lightx2v_fp8.sh",
-    "python compile: run_qwen_salon.py"
+    "python compile: run_qwen_salon.py",
+    "python compile: run_qwencloud_salon.py",
+    "real private source/garment/structure assets encoded successfully in QwenCloud DRY_RUN payload"
   ],
   "actual_remote_execution_attempts": {
     "adobe_firefly": "ATTEMPTED + FAILED_ACCESS_DENIED",
     "picsart_runway_gen4_ref": "PREFLIGHT_VALID + 2_CREDITS_REQUIRED",
     "picsart_qwen_edit": "KNOWN_4_CREDITS_REQUIRED",
     "github_actions_gpu": "NO_GPU_OR_SELF_HOSTED_RUNNER_FOUND",
-    "qwencloud_hosted": "RUNNER_READY + API_KEY_REQUIRED"
+    "qwencloud_hosted": "RUNNER_READY + API_KEY_REQUIRED",
+    "github_actions_qwencloud": "WORKFLOW_READY + THREE_PRIVATE_SECRETS_REQUIRED"
   },
   "not_executed": [
     "QwenCloud qwen-image-3.0-pro inference",
@@ -60,5 +74,5 @@
     "Qwen Image Edit self-hosted inference",
     "MHR / InstantHMR inference"
   ],
-  "next_gate": "DASHSCOPE_API_KEY for hosted QwenCloud, or compatible GPU/remote-generation access"
+  "next_gate": "DASHSCOPE_API_KEY + private SALON_PACK_URL + private SALON_RESULT_UPLOAD_URL for the recommended hosted workflow"
 }
