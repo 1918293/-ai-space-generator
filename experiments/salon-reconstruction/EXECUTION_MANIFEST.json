@@ -1,17 +1,39 @@
 {
   "status": "EXP_EXECUTABLE_HANDOFF_READY",
-  "version": "0.4",
+  "version": "0.5",
   "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR or private presigned URLs supplied through GitHub Secrets.",
   "profiles": [
     "profiles/upper_body_strong_slim_v01.json"
   ],
   "runners": {
+    "hf_zero_fast": {
+      "file": "run_hf_zero_fast_salon.py",
+      "space": "prithivMLmods/Qwen-Image-Edit-2511-LoRAs-Fast",
+      "runtime": "CPU client + free hosted Hugging Face Zero GPU",
+      "inputs": "source + garment reference + structure control",
+      "default_lora": "Studio-DeLight",
+      "default_steps": 4,
+      "api_key_required": false,
+      "recommended_first": true
+    },
+    "github_actions_hf_zero": {
+      "file": ".github/workflows/salon-hf-zero.yml",
+      "runtime": "ubuntu-latest + free hosted Zero GPU inference",
+      "trigger": "workflow_dispatch",
+      "required_secrets": [
+        "SALON_PACK_URL",
+        "SALON_RESULT_UPLOAD_URL"
+      ],
+      "model_credential_required": false,
+      "privacy": "Downloads a private pack, uploads the result only to a private presigned destination, publishes no portrait artifact to the public repository, and deletes private runner files in an always() cleanup step."
+    },
     "qwencloud_hosted": {
       "file": "run_qwencloud_salon.py",
       "model_default": "qwen-image-3.0-pro",
       "runtime": "CPU client + hosted inference",
       "inputs": "source + garment reference + structure control",
-      "recommended_first": true,
+      "recommended_first": false,
+      "role": "hosted fallback",
       "required_env": ["DASHSCOPE_API_KEY"],
       "dry_run": "DRY_RUN=1"
     },
@@ -23,14 +45,18 @@
         "DASHSCOPE_API_KEY",
         "SALON_PACK_URL",
         "SALON_RESULT_UPLOAD_URL"
-      ],
-      "privacy": "Downloads a private pack, uploads the result to a private presigned destination, publishes no portrait artifact to the public repository, and deletes private runner files in an always() cleanup step."
+      ]
     },
     "github_actions_runner_validation": {
       "file": ".github/workflows/salon-runner-validation.yml",
       "runtime": "ubuntu-latest",
       "uses_private_portrait": false,
-      "purpose": "Validate three-image QwenCloud payload construction and compile all Salon runners without API credentials or inference spend."
+      "purpose": "Validate hosted payload construction and compile all Salon runners without inference spend."
+    },
+    "github_actions_hf_zero_validation": {
+      "file": ".github/workflows/salon-hf-zero-validation.yml",
+      "runtime": "ubuntu-latest + Hugging Face Zero",
+      "trigger_scope": "Only this validation workflow or run_hf_zero_fast_salon.py changes, plus manual dispatch, to avoid wasting Zero GPU on documentation-only changes."
     },
     "fitvton": {
       "file": "run_fitvton_salon.sh",
@@ -67,24 +93,29 @@
     "real private source/garment/structure assets encoded successfully in QwenCloud DRY_RUN payload"
   ],
   "validated_on_github_actions": {
-    "contract_validation_run_93": "PASS",
-    "salon_runner_validation_run_1": "PASS",
+    "contract_validation": "PASS",
+    "salon_runner_validation": "PASS",
     "qwencloud_three_image_payload": "PASS",
-    "all_salon_runner_compile_checks": "PASS"
+    "official_qwen_space_api_contract": "PASS",
+    "official_qwen_space_inference": "BLOCKED_ZERO_DURATION_POLICY",
+    "fast_qwen_zero_3_image_1_step_synthetic_inference": "PASS",
+    "fast_qwen_zero_actual_remote_inference_proven": true
   },
   "actual_remote_execution_attempts": {
+    "hf_zero_fast": "ACTUAL_3_IMAGE_SYNTHETIC_INFERENCE_PASS",
+    "official_qwen_hf_zero": "API_CONTRACT_PASS + INFERENCE_BLOCKED_BY_ZERO_DURATION_POLICY",
     "adobe_firefly": "ATTEMPTED + FAILED_ACCESS_DENIED",
     "picsart_runway_gen4_ref": "PREFLIGHT_VALID + 2_CREDITS_REQUIRED",
     "picsart_qwen_edit": "KNOWN_4_CREDITS_REQUIRED",
     "github_actions_gpu": "NO_GPU_OR_SELF_HOSTED_RUNNER_FOUND",
-    "qwencloud_hosted": "RUNNER_READY + API_KEY_REQUIRED",
-    "github_actions_qwencloud": "WORKFLOW_READY + THREE_PRIVATE_SECRETS_REQUIRED"
+    "qwencloud_hosted": "RUNNER_READY + API_KEY_REQUIRED"
   },
   "not_executed": [
+    "Newest private Salon portrait through Hugging Face Zero runner",
     "QwenCloud qwen-image-3.0-pro inference",
     "FitVTON inference",
     "Qwen Image Edit self-hosted inference",
     "MHR / InstantHMR inference"
   ],
-  "next_gate": "DASHSCOPE_API_KEY + private SALON_PACK_URL + private SALON_RESULT_UPLOAD_URL for the recommended hosted workflow"
+  "next_gate": "Safe private input/output transport (SALON_PACK_URL + SALON_RESULT_UPLOAD_URL), or direct private internet-connected execution of run_hf_zero_fast_salon.py"
 }
