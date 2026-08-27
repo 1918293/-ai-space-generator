@@ -1,6 +1,6 @@
 {
   "status": "EXP_EXECUTABLE_HANDOFF_READY",
-  "version": "0.3",
+  "version": "0.4",
   "privacy": "Do not commit portrait/source/control images to this public repository; provide them at runtime via PACK_DIR or private presigned URLs supplied through GitHub Secrets.",
   "profiles": [
     "profiles/upper_body_strong_slim_v01.json"
@@ -25,6 +25,12 @@
         "SALON_RESULT_UPLOAD_URL"
       ],
       "privacy": "Downloads a private pack, uploads the result to a private presigned destination, publishes no portrait artifact to the public repository, and deletes private runner files in an always() cleanup step."
+    },
+    "github_actions_runner_validation": {
+      "file": ".github/workflows/salon-runner-validation.yml",
+      "runtime": "ubuntu-latest",
+      "uses_private_portrait": false,
+      "purpose": "Validate three-image QwenCloud payload construction and compile all Salon runners without API credentials or inference spend."
     },
     "fitvton": {
       "file": "run_fitvton_salon.sh",
@@ -60,6 +66,12 @@
     "python compile: run_qwencloud_salon.py",
     "real private source/garment/structure assets encoded successfully in QwenCloud DRY_RUN payload"
   ],
+  "validated_on_github_actions": {
+    "contract_validation_run_93": "PASS",
+    "salon_runner_validation_run_1": "PASS",
+    "qwencloud_three_image_payload": "PASS",
+    "all_salon_runner_compile_checks": "PASS"
+  },
   "actual_remote_execution_attempts": {
     "adobe_firefly": "ATTEMPTED + FAILED_ACCESS_DENIED",
     "picsart_runway_gen4_ref": "PREFLIGHT_VALID + 2_CREDITS_REQUIRED",
