@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/salon-private-zero-run.yml'
+      - 'experiments/salon-reconstruction/run_hf_zero_fast_salon.py'
+      - 'experiments/salon-reconstruction/profiles/**'
       - 'runtime-private/triggers/**'
   workflow_dispatch:
 
@@ -27,7 +29,7 @@ jobs:
       - name: Generate ephemeral transport key
         run: |
           set -euo pipefail
-          mkdir -p /tmp/salon-private/pack
+          mkdir -p /tmp/salon-private/pack /tmp/salon-private/output
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/salon-private/private.pem 2>/dev/null
           openssl pkey -in /tmp/salon-private/private.pem -pubout -out /tmp/salon-private/public.pem
           echo "RUN_ID=${GITHUB_RUN_ID}" > /tmp/salon-private/run.txt
@@ -69,77 +71,65 @@ jobs:
           python - <<'PY'
           import json, requests
           from pathlib import Path
+
           root=Path('/tmp/salon-private/pack')
           m=json.load(open('/tmp/salon-private/transport.json'))
           urls=m['image_urls']
           if not (1 <= len(urls) <= 3):
               raise RuntimeError('image_urls must contain 1–3 URLs')
-          for i,url in enumerate(urls,1):
+
+          names = [
+              '01_Source_Original.png',
+              '02_Garment_Reference_CALIFORNIA.png',
+              '03_Target_Keypoints_UpperBody_Strong.png',
+          ]
+          for url,name in zip(urls,names):
               r=requests.get(url,timeout=120,allow_redirects=True)
               r.raise_for_status()
-              p=root/f'image_{i}.png'
+              p=root/name
               p.write_bytes(r.content)
               if p.stat().st_size < 100:
-                  raise RuntimeError(f'Input unexpectedly small: image_{i}')
+                  raise RuntimeError(f'Input unexpectedly small: {name}')
+
+          mode={1:'source_only',2:'source_garment',3:'source_garment_structure'}[len(urls)]
           Path('/tmp/salon-private/result.pass').write_text(m['result_pass'],encoding='ascii')
-          Path('/tmp/salon-private/variant.txt').write_text(m.get('variant','strong_keypoints'),encoding='utf-8')
-          print('PRIVATE_INPUT_DOWNLOAD=PASS',len(urls),m.get('variant'))
+          Path('/tmp/salon-private/variant.txt').write_text(m.get('variant','preserve_garment'),encoding='utf-8')
+          Path('/tmp/salon-private/input_mode.txt').write_text(mode,encoding='utf-8')
+          print('PRIVATE_INPUT_DOWNLOAD=PASS',len(urls),mode,m.get('variant'))
           PY
 
       - name: Execute private Qwen 2511 Lightning reconstruction
+        shell: bash
         run: |
+          set -euo pipefail
+          export PACK_DIR=/tmp/salon-private/pack
+          export OUT_DIR=/tmp/salon-private/output
+          export HF_ZERO_BACKEND=lightning
+          export HF_ZERO_INPUT_MODE="$(cat /tmp/salon-private/input_mode.txt)"
+          export HF_ZERO_VARIANT="$(cat /tmp/salon-private/variant.txt)"
+          export HF_ZERO_STEPS=4
+          export HF_ZERO_GUIDANCE=1.0
+          export HF_ZERO_HEIGHT=1024
+          export HF_ZERO_WIDTH=576
+          export SEED=47
+          python experiments/salon-reconstruction/run_hf_zero_fast_salon.py
+          result="$OUT_DIR/hf_zero_${HF_ZERO_BACKEND}_${HF_ZERO_VARIANT}.png"
+          test -s "$result"
+          cp "$result" /tmp/salon-private/result.png
           python - <<'PY'
-          from pathlib import Path
-          from gradio_client import Client, handle_file
-          import shutil
-
-          root=Path('/tmp/salon-private/pack')
-          files=sorted(root.glob('image_*.png'))
-          gallery=[{'image':handle_file(str(p)),'caption':None} for p in files]
-          variant=Path('/tmp/salon-private/variant.txt').read_text().strip()
-
-          prompts={
-            'strong_keypoints': '''Reconstruct the same person from Image 1 as a clearly and substantially slimmer upper-body version. Preserve the same person, face, hairstyle, hair color, downward gaze, hands, phone and black washed CALIFORNIA / LONG BEACH / SUNSET T-shirt identity. Use the additional images as garment and geometry references. Rebuild shoulder width, upper-arm volume, ribcage, torso and waist coherently. Do not liquify or simply squeeze pixels. The result must read clearly slimmer at first glance while remaining a believable salon portrait.''',
-            'preserve_garment_silhouette': '''Edit Image 1 into the same person with a clearly slimmer and more elegant upper-body silhouette. Image 1 is the primary authority for identity, face, hair, hands, phone, pose family, lighting and scene. Image 2 is authority for the exact black washed oversized T-shirt: keep its original crew neckline, both shoulders fully covered, original short sleeves, loose untucked length covering the waist and abdomen, and the readable CALIFORNIA / LONG BEACH / SUNSET graphic. Do NOT turn it into a crop top, sleeveless top, cold-shoulder top, fitted tank or exposed-midriff garment. Image 3 is only a body-silhouette direction: narrow shoulders moderately, reduce upper-arm bulk clearly, reduce ribcage/torso/waist visual width strongly and improve arm-to-torso spacing. Re-drape the same oversized shirt naturally over the slimmer body instead of shrinking the shirt like skin. Keep the hands and phone close to their original size, pose and location. Preserve the salon wood-wall background relationship. First-glance slimming must be obvious, but the result must look like an authentic photograph of the same person wearing the same T-shirt.''',
-            'source_silhouette': '''Keep Image 1 as the dominant source photograph and same-person identity. Use Image 2 only as a target body silhouette, not as clothing or identity content. Make the visible person clearly slimmer through coherent narrower shoulders, slimmer upper arms, narrower ribcage/torso and waist while preserving the exact original black washed CALIFORNIA / LONG BEACH / SUNSET T-shirt design, crew neckline, short sleeves, untucked length and coverage. Preserve face, hair, downward gaze, hands, phone and salon scene. Reconstruct natural cloth drape and occlusion; do not crop the shirt, expose the midriff, create shoulder cutouts, or distort hands/phone. The edit must be obvious at first glance but photographically believable.'''
-          }
-          prompt=prompts.get(variant,prompts['strong_keypoints'])
-          client=Client('LPX55/Qwen-Image-Edit-2511-Turbo-Lightning', verbose=False)
-          result=client.predict(
-              images=gallery,
-              prompt=prompt,
-              seed=47,
-              randomize_seed=False,
-              true_guidance_scale=1.0,
-              num_inference_steps=4,
-              height=1024,
-              width=576,
-              rewrite_prompt=False,
-              num_images_per_prompt=1,
-              api_name='/infer',
-          )
-          outputs=result[0] if isinstance(result,tuple) else result
-          if not outputs:
-              raise SystemExit('No Qwen output')
-          first=outputs[0]
-          image=first.get('image',first) if isinstance(first,dict) else first
-          path=image if isinstance(image,str) else image.get('path') if isinstance(image,dict) else None
-          if not path:
-              raise SystemExit(f'No output path: {first}')
-          src=Path(path)
-          if not src.exists() or src.stat().st_size==0:
-              raise SystemExit(f'Output missing: {src}')
-          shutil.copy2(src,'/tmp/salon-private/result.webp')
-          print('PRIVATE_QWEN_ZERO_INFERENCE=PASS',variant)
-          print('OUTPUT_BYTES',Path('/tmp/salon-private/result.webp').stat().st_size)
+          from PIL import Image
+          p='/tmp/salon-private/result.png'
+          with Image.open(p) as im:
+              im.verify()
+          print('PRIVATE_QWEN_ZERO_INFERENCE=PASS')
           PY
 
       - name: Encrypt reconstruction result
         if: success()
         run: |
           set -euo pipefail
-          openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/tmp/salon-private/result.pass -in /tmp/salon-private/result.webp -out /tmp/salon-private/result.webp.enc
-          sha256sum /tmp/salon-private/result.webp.enc > /tmp/salon-private/result.sha256
+          openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/tmp/salon-private/result.pass -in /tmp/salon-private/result.png -out /tmp/salon-private/result.png.enc
+          sha256sum /tmp/salon-private/result.png.enc > /tmp/salon-private/result.sha256
 
       - name: Upload encrypted result only
         if: success()
@@ -147,7 +137,7 @@ jobs:
         with:
           name: salon-private-zero-result-${{ github.run_id }}
           path: |
-            /tmp/salon-private/result.webp.enc
+            /tmp/salon-private/result.png.enc
             /tmp/salon-private/result.sha256
           retention-days: 1
 
