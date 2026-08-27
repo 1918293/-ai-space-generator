@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - ".github/workflows/salon-hf-zero-validation.yml"
-      - "experiments/salon-reconstruction/**"
+      - "experiments/salon-reconstruction/run_hf_zero_fast_salon.py"
   workflow_dispatch:
 
 permissions:
@@ -31,7 +31,6 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json
           from gradio_client import Client
 
           client = Client("Qwen/Qwen-Image-Edit-2511", verbose=False)
@@ -73,7 +72,7 @@ jobs:
               print("Official Qwen Zero route unexpectedly executed: PASS")
           PY
 
-      - name: Probe fast Qwen 2511 Zero route and run synthetic inference
+      - name: Validate fast Qwen 2511 Zero route with one synthetic inference
         shell: bash
         run: |
           set -euo pipefail
@@ -88,17 +87,9 @@ jobs:
           client = Client(space, verbose=False)
           api = client.view_api(return_format="dict")
           named = api.get("named_endpoints") or {}
-          endpoint = None
-          for candidate in ("/edit_image", "edit_image"):
-              if candidate in named:
-                  endpoint = candidate
-                  break
-          if endpoint is None:
-              keys = list(named.keys())
-              endpoint = next((k for k in keys if "edit_image" in k), None)
+          endpoint = next((k for k in named if "edit_image" in k), None)
           if endpoint is None:
               raise SystemExit(f"Fast Space edit endpoint not found: {list(named)}")
-          print(f"Fast Qwen Zero endpoint: {endpoint}")
 
           def to_b64(im):
               buf = io.BytesIO()
