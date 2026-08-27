@@ -8,6 +8,7 @@ on:
       - "experiments/salon-reconstruction/**"
       - ".github/workflows/salon-runner-validation.yml"
       - ".github/workflows/salon-qwencloud.yml"
+      - ".github/workflows/salon-hf-zero.yml"
   workflow_dispatch:
 
 permissions:
@@ -25,7 +26,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install validation dependencies
-        run: python -m pip install --disable-pip-version-check requests pillow
+        run: python -m pip install --disable-pip-version-check requests pillow gradio_client
 
       - name: Build synthetic private pack
         shell: bash
@@ -76,6 +77,7 @@ jobs:
           set -euo pipefail
           python -m py_compile \
             experiments/salon-reconstruction/run_qwencloud_salon.py \
+            experiments/salon-reconstruction/run_hf_zero_fast_salon.py \
             experiments/salon-reconstruction/run_qwen_salon.py
           bash -n experiments/salon-reconstruction/run_fitvton_salon.sh
           bash -n experiments/salon-reconstruction/run_qwen_lightx2v_fp8.sh
