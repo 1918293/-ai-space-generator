@@ -1,0 +1,89 @@
+name: Salon HF Zero Lightning Smoke
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/salon-hf-zero-lightning-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qwen-lightning-zero-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check gradio_client pillow
+      - name: Execute fast Zero GPU synthetic inference
+        run: |
+          python - <<'PY'
+          from PIL import Image, ImageDraw
+          from pathlib import Path
+          from gradio_client import Client, handle_file
+          import shutil
+
+          root = Path('/tmp/qwen-lightning-smoke')
+          root.mkdir(exist_ok=True)
+          for name, kind in [('source','source'),('garment','garment'),('structure','structure')]:
+              im = Image.new('RGB',(256,256),'white' if kind!='structure' else 'black')
+              d = ImageDraw.Draw(im)
+              if kind == 'source':
+                  d.ellipse((98,20,158,80),outline='black',width=5)
+                  d.rectangle((78,55,178,225),outline='black',width=5)
+              elif kind == 'garment':
+                  d.rectangle((65,70,191,220),fill='black')
+                  d.text((90,130),'SHIRT',fill='white')
+              else:
+                  d.line((128,30,128,220),fill='white',width=6)
+                  d.line((128,80,88,145),fill='white',width=6)
+                  d.line((128,80,168,145),fill='white',width=6)
+              im.save(root/f'{name}.png')
+
+          client = Client('LPX55/Qwen-Image-Edit-2511-Turbo-Lightning', verbose=False)
+          gallery = [
+              {'image': handle_file(str(root/'source.png')), 'caption': None},
+              {'image': handle_file(str(root/'garment.png')), 'caption': None},
+              {'image': handle_file(str(root/'structure.png')), 'caption': None},
+          ]
+          result = client.predict(
+              images=gallery,
+              prompt='Use image 1 as the main composition, image 2 as garment reference and image 3 as structure guide. Produce one coherent synthetic edit.',
+              seed=47,
+              randomize_seed=False,
+              true_guidance_scale=1.0,
+              num_inference_steps=1,
+              height=256,
+              width=256,
+              rewrite_prompt=False,
+              num_images_per_prompt=1,
+              api_name='/infer',
+          )
+          outputs = result[0] if isinstance(result, tuple) else result
+          print('RAW_RESULT', str(result)[:1500])
+          if not outputs:
+              raise SystemExit('No output returned')
+          first = outputs[0]
+          image = first.get('image', first) if isinstance(first, dict) else first
+          path = image.get('path') if isinstance(image, dict) else None
+          if not path:
+              raise SystemExit(f'No path: {first}')
+          src = Path(path)
+          if not src.exists() or src.stat().st_size == 0:
+              raise SystemExit(f'Missing output: {src}')
+          dst = root/'result.png'
+          shutil.copy2(src,dst)
+          print('LPX55_ZERO_INFERENCE=PASS')
+          print('OUTPUT_BYTES',dst.stat().st_size)
+          PY
+      - name: Upload safe synthetic result
+        uses: actions/upload-artifact@v4
+        with:
+          name: salon-hf-zero-lightning-synthetic
+          path: /tmp/qwen-lightning-smoke/result.png
+          retention-days: 1
