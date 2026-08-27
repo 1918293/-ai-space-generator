@@ -70,13 +70,18 @@ jobs:
               raise SystemExit('No output returned')
           first = outputs[0]
           image = first.get('image', first) if isinstance(first, dict) else first
-          path = image.get('path') if isinstance(image, dict) else None
+          if isinstance(image, str):
+              path = image
+          elif isinstance(image, dict):
+              path = image.get('path')
+          else:
+              path = None
           if not path:
               raise SystemExit(f'No path: {first}')
           src = Path(path)
           if not src.exists() or src.stat().st_size == 0:
               raise SystemExit(f'Missing output: {src}')
-          dst = root/'result.png'
+          dst = root/'result.webp'
           shutil.copy2(src,dst)
           print('LPX55_ZERO_INFERENCE=PASS')
           print('OUTPUT_BYTES',dst.stat().st_size)
@@ -85,5 +90,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: salon-hf-zero-lightning-synthetic
-          path: /tmp/qwen-lightning-smoke/result.png
+          path: /tmp/qwen-lightning-smoke/result.webp
           retention-days: 1
