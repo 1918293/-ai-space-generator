@@ -1,9 +1,14 @@
 name: Salon Private Zero Run
 
-# Manual-only: this workflow waits for an encrypted transport manifest and must never
-# start automatically on ordinary PR/documentation changes.
+# Privacy-preserving EXP execution. Ordinary code/docs commits never start it.
+# A run starts only from workflow_dispatch or an explicit one-time request file.
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - exp/salon-reconstruction-v0.1
+    paths:
+      - 'runtime-private/requests/start-*.txt'
 
 permissions:
   contents: read
@@ -14,13 +19,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: exp/salon-reconstruction-v0.1
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Install runtime dependencies
-        run: python -m pip install --disable-pip-version-check gradio_client pillow requests
+        run: python -m pip install --disable-pip-version-check gradio_client pillow requests cryptography
 
       - name: Generate ephemeral transport key
         run: |
@@ -39,7 +47,7 @@ jobs:
             /tmp/salon-private/run.txt
           retention-days: 1
 
-      - name: Wait for RSA-encrypted private URL manifest
+      - name: Wait for RSA-encrypted private transport manifest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -51,56 +59,93 @@ jobs:
           import base64, json
           src=json.load(open('/tmp/salon-private/content.json'))
           body=base64.b64decode(src['content']).decode('ascii').strip()
-          open('/tmp/salon-private/urls.enc','wb').write(base64.b64decode(body))
+          open('/tmp/salon-private/transport.enc','wb').write(base64.b64decode(body))
           PY
-              openssl pkeyutl -decrypt -inkey /tmp/salon-private/private.pem -in /tmp/salon-private/urls.enc -out /tmp/salon-private/transport.json
-              echo "PRIVATE_URL_MANIFEST_DECRYPT=PASS"
+              openssl pkeyutl -decrypt -inkey /tmp/salon-private/private.pem -in /tmp/salon-private/transport.enc -out /tmp/salon-private/transport.json
+              echo "PRIVATE_TRANSPORT_MANIFEST_DECRYPT=PASS"
               exit 0
             fi
             sleep 5
           done
-          echo "Timed out waiting for encrypted URL manifest" >&2
+          echo "Timed out waiting for encrypted transport manifest" >&2
           exit 1
 
-      - name: Download private runtime inputs
+      - name: Resolve private runtime inputs
+        shell: bash
         run: |
+          set -euo pipefail
           python - <<'PY'
-          import json, requests
+          import base64, json, os, subprocess, zipfile
           from pathlib import Path
+          import requests
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           root=Path('/tmp/salon-private/pack')
           m=json.load(open('/tmp/salon-private/transport.json'))
-          urls=m['image_urls']
-          if not (1 <= len(urls) <= 3):
-              raise RuntimeError('image_urls must contain 1–3 URLs')
+          transport=m.get('transport_mode','private_urls')
 
-          names = [
-              '01_Source_Original.png',
-              '02_Garment_Reference_CALIFORNIA.png',
-              '03_Target_Keypoints_UpperBody_Strong.png',
-          ]
-          for url,name in zip(urls,names):
-              r=requests.get(url,timeout=120,allow_redirects=True)
-              r.raise_for_status()
-              p=root/name
-              p.write_bytes(r.content)
-              if p.stat().st_size < 100:
-                  raise RuntimeError(f'Input unexpectedly small: {name}')
+          if transport == 'repo_encrypted_pack':
+              branch='origin/exp/salon-reconstruction-v0.1'
+              subprocess.run(['git','fetch','-q','origin','exp/salon-reconstruction-v0.1'],check=True)
+              prefix=m['payload_prefix'].rstrip('/')
+              count=int(m['chunk_count'])
+              pieces=[]
+              for i in range(count):
+                  path=f"{prefix}/chunk_{i:03d}.txt"
+                  pieces.append(subprocess.check_output(['git','show',f'{branch}:{path}'],text=True).strip())
+              ciphertext=base64.b64decode(''.join(pieces))
+              key=base64.b64decode(m['payload_key_b64'])
+              nonce=base64.b64decode(m['payload_nonce_b64'])
+              aad=str(m['run_id']).encode('ascii')
+              plaintext=AESGCM(key).decrypt(nonce,ciphertext,aad)
+              pack_zip=Path('/tmp/salon-private/pack.zip')
+              pack_zip.write_bytes(plaintext)
+              with zipfile.ZipFile(pack_zip,'r') as z:
+                  z.extractall(root)
+              print('PRIVATE_ENCRYPTED_PACK_DECRYPT=PASS',count)
+          elif transport == 'private_urls':
+              urls=m['image_urls']
+              if not (1 <= len(urls) <= 3):
+                  raise RuntimeError('image_urls must contain 1–3 URLs')
+              names=[
+                  '01_Source_Original.png',
+                  '02_Garment_Reference_CALIFORNIA.png',
+                  '03_Target_Keypoints_UpperBody_Strong.png',
+              ]
+              for url,name in zip(urls,names):
+                  r=requests.get(url,timeout=120,allow_redirects=True)
+                  r.raise_for_status()
+                  p=root/name
+                  p.write_bytes(r.content)
+                  if p.stat().st_size < 100:
+                      raise RuntimeError(f'Input unexpectedly small: {name}')
+              print('PRIVATE_URL_INPUT_DOWNLOAD=PASS',len(urls))
+          else:
+              raise RuntimeError(f'Unknown transport_mode: {transport}')
 
-          mode={1:'source_only',2:'source_garment',3:'source_garment_structure'}[len(urls)]
+          source=root/'01_Source_Original.png'
+          garment=root/'02_Garment_Reference_CALIFORNIA.png'
+          structure=root/'03_Target_Keypoints_UpperBody_Strong.png'
+          if not source.exists():
+              raise RuntimeError('Missing source image after transport resolution')
+          if structure.exists(): mode='source_garment_structure'
+          elif garment.exists(): mode='source_garment'
+          else: mode='source_only'
+
           Path('/tmp/salon-private/result.pass').write_text(m['result_pass'],encoding='ascii')
+          Path('/tmp/salon-private/backend.txt').write_text(m.get('backend','lora_fast'),encoding='utf-8')
           Path('/tmp/salon-private/variant.txt').write_text(m.get('variant','preserve_garment'),encoding='utf-8')
-          Path('/tmp/salon-private/input_mode.txt').write_text(mode,encoding='utf-8')
-          print('PRIVATE_INPUT_DOWNLOAD=PASS',len(urls),mode,m.get('variant'))
+          Path('/tmp/salon-private/input_mode.txt').write_text(m.get('input_mode',mode),encoding='utf-8')
+          print('PRIVATE_INPUT_RESOLVE=PASS',m.get('backend','lora_fast'),m.get('variant','preserve_garment'),m.get('input_mode',mode))
           PY
 
-      - name: Execute private Qwen 2511 Lightning reconstruction
+      - name: Execute private Qwen 2511 reconstruction
         shell: bash
         run: |
           set -euo pipefail
           export PACK_DIR=/tmp/salon-private/pack
           export OUT_DIR=/tmp/salon-private/output
-          export HF_ZERO_BACKEND=lightning
+          export HF_ZERO_BACKEND="$(cat /tmp/salon-private/backend.txt)"
           export HF_ZERO_INPUT_MODE="$(cat /tmp/salon-private/input_mode.txt)"
           export HF_ZERO_VARIANT="$(cat /tmp/salon-private/variant.txt)"
           export HF_ZERO_STEPS=4
