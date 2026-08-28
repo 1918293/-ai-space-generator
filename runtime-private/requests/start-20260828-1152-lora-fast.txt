@@ -1,0 +1,5 @@
+Salon private comparator request
+backend=lora_fast
+variant=preserve_garment
+input_mode=source_garment
+purpose=compare garment preservation against rejected Lightning V1/V2/V3
