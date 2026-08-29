@@ -1,0 +1,94 @@
+name: Salon Free Zero GPU Reconstruction
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: "Zero backend: lora_fast or lightning"
+        required: false
+        default: "lora_fast"
+      variant:
+        description: "Prompt variant: preserve_garment, strong_keypoints, identity_first"
+        required: false
+        default: "preserve_garment"
+      seed:
+        description: "Qwen image seed"
+        required: false
+        default: "47"
+      steps:
+        description: "Inference steps"
+        required: false
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  reconstruct:
+    name: free-zero-gpu-reconstruction
+    runs-on: ubuntu-latest
+    env:
+      PACK_DIR: /tmp/salon-pack
+      OUT_DIR: /tmp/salon-output
+      SALON_PACK_URL: ${{ secrets.SALON_PACK_URL }}
+      SALON_RESULT_UPLOAD_URL: ${{ secrets.SALON_RESULT_UPLOAD_URL }}
+      HF_ZERO_BACKEND: ${{ inputs.backend }}
+      HF_ZERO_VARIANT: ${{ inputs.variant }}
+      HF_ZERO_INPUT_MODE: source_garment_structure
+      SEED: ${{ inputs.seed }}
+      HF_ZERO_STEPS: ${{ inputs.steps }}
+      HF_ZERO_GUIDANCE: "1.0"
+      HF_ZERO_LORA: Studio-DeLight
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Validate private transport inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SALON_PACK_URL" || { echo "::error::Missing SALON_PACK_URL secret"; exit 78; }
+          test -n "$SALON_RESULT_UPLOAD_URL" || { echo "::error::Missing SALON_RESULT_UPLOAD_URL secret"; exit 78; }
+          case "$HF_ZERO_BACKEND" in lora_fast|lightning) ;; *) echo "::error::Invalid backend"; exit 2;; esac
+
+      - name: Install Zero GPU client dependencies
+        run: python -m pip install --disable-pip-version-check gradio_client pillow
+
+      - name: Fetch private Salon control pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACK_DIR" "$OUT_DIR"
+          curl --fail --silent --show-error --location "$SALON_PACK_URL" -o /tmp/salon-pack.zip
+          unzip -q /tmp/salon-pack.zip -d "$PACK_DIR"
+          if [ ! -f "$PACK_DIR/01_Source_Original.png" ]; then
+            nested="$(find "$PACK_DIR" -mindepth 2 -maxdepth 2 -name 01_Source_Original.png -print -quit)"
+            test -n "$nested" || { echo "::error::Source image not found in private pack"; exit 2; }
+            root="$(dirname "$nested")"
+            find "$root" -maxdepth 1 -type f -exec cp {} "$PACK_DIR/" \;
+          fi
+
+      - name: Run hosted Qwen 2511 Zero GPU reconstruction
+        run: python experiments/salon-reconstruction/run_hf_zero_fast_salon.py
+
+      - name: Upload result to private destination
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$OUT_DIR/hf_zero_${HF_ZERO_BACKEND}_${HF_ZERO_VARIANT}.png"
+          test -f "$result" || { echo "::error::No reconstruction result produced"; exit 3; }
+          curl --fail --silent --show-error \
+            -X PUT \
+            -H 'Content-Type: image/png' \
+            --upload-file "$result" \
+            "$SALON_RESULT_UPLOAD_URL"
+          echo "Private Zero GPU result upload completed."
+
+      - name: Remove private assets from runner
+        if: always()
+        shell: bash
+        run: |
+          rm -rf /tmp/salon-pack /tmp/salon-output /tmp/salon-pack.zip
