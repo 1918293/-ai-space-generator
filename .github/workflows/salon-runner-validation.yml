@@ -6,9 +6,7 @@ on:
       - main
     paths:
       - "experiments/salon-reconstruction/**"
-      - ".github/workflows/salon-runner-validation.yml"
-      - ".github/workflows/salon-qwencloud.yml"
-      - ".github/workflows/salon-hf-zero.yml"
+      - ".github/workflows/salon-*.yml"
   workflow_dispatch:
 
 permissions:

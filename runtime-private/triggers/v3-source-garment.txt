@@ -1,1 +1,0 @@
-Trigger private Qwen 2511 Lightning run: source + garment only; no abstract geometry reference.
