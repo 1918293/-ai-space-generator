@@ -15,6 +15,10 @@ permissions:
 
 jobs:
   private-qwen-zero:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(toJSON(github.event.commits.*.added), 'runtime-private/requests/start-') ||
+      contains(toJSON(github.event.commits.*.modified), 'runtime-private/requests/start-')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
