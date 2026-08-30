@@ -13,9 +13,12 @@ from src.mcp_control_bridge import (
     SCOPE_READ,
 )
 from src.mcp_control_server import SCOPE_ACCESS, build_mcp_control_server
+from src.mcp_http import build_mcp_http_app
 
 
 EXPECTED_HAO_SUBJECT = "hao-user"
+PUBLIC_HOST = "hao.example.com"
+PUBLIC_URL = "https://hao.example.com/mcp"
 
 
 class StaticVerifier(TokenVerifier):
@@ -42,7 +45,7 @@ class RejectingVerifier(TokenVerifier):
         return None
 
 
-class TestBridge:
+class FixtureBridge:
     def __init__(self):
         self.policy = HaoMCPIdentityPolicy(EXPECTED_HAO_SUBJECT)
         self.context_calls = 0
@@ -78,7 +81,7 @@ class UnusedBridge:
 def settings(*, required_scopes=None):
     return AuthSettings(
         issuer_url=AnyHttpUrl("https://auth.example.com"),
-        resource_server_url=AnyHttpUrl("https://hao.example.com/mcp"),
+        resource_server_url=AnyHttpUrl(PUBLIC_URL),
         required_scopes=list(required_scopes or [SCOPE_ACCESS]),
     )
 
@@ -88,6 +91,13 @@ def server(*, verifier=None, bridge=None):
         bridge or UnusedBridge(),
         token_verifier=verifier or RejectingVerifier(),
         auth_settings=settings(),
+    )
+
+
+def http_app(mcp):
+    return build_mcp_http_app(
+        mcp,
+        allowed_hosts=[PUBLIC_HOST, PUBLIC_HOST + ":*"],
     )
 
 
@@ -107,6 +117,16 @@ def test_mcp_server_rejects_overbroad_global_scope_configuration():
             token_verifier=RejectingVerifier(),
             auth_settings=settings(required_scopes=[SCOPE_READ, SCOPE_EXECUTE, "hao:approve"]),
         )
+
+
+def test_mcp_http_app_requires_explicit_non_wildcard_host_allowlist():
+    import pytest
+
+    mcp = server()
+    with pytest.raises(ValueError, match="MCP_ALLOWED_HOSTS_REQUIRED"):
+        build_mcp_http_app(mcp, allowed_hosts=[])
+    with pytest.raises(ValueError, match="MCP_ALLOWED_HOSTS_WILDCARD_NOT_ALLOWED"):
+        build_mcp_http_app(mcp, allowed_hosts=["*"])
 
 
 def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
@@ -153,7 +173,7 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
 def test_streamable_http_request_without_token_is_rejected_before_tool_execution():
     async def scenario():
         mcp = server()
-        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        transport = httpx2.ASGITransport(app=http_app(mcp))
         async with httpx2.AsyncClient(
             transport=transport,
             base_url="https://hao.example.com",
@@ -169,7 +189,7 @@ def test_streamable_http_request_without_token_is_rejected_before_tool_execution
 def test_streamable_http_rejected_bearer_token_is_401():
     async def scenario():
         mcp = server()
-        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        transport = httpx2.ASGITransport(app=http_app(mcp))
         async with httpx2.AsyncClient(
             transport=transport,
             base_url="https://hao.example.com",
@@ -188,7 +208,7 @@ def test_streamable_http_rejected_bearer_token_is_401():
 def test_streamable_http_publishes_base_protected_resource_scope():
     async def scenario():
         mcp = server()
-        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        transport = httpx2.ASGITransport(app=http_app(mcp))
         async with httpx2.AsyncClient(
             transport=transport,
             base_url="https://hao.example.com",
@@ -196,7 +216,7 @@ def test_streamable_http_publishes_base_protected_resource_scope():
             response = await http_client.get("/.well-known/oauth-protected-resource/mcp")
             assert response.status_code == 200
             body = response.json()
-            assert body["resource"] == "https://hao.example.com/mcp"
+            assert body["resource"] == PUBLIC_URL
             assert body["authorization_servers"] == ["https://auth.example.com/"]
             assert body["scopes_supported"] == [SCOPE_ACCESS]
 
@@ -205,21 +225,20 @@ def test_streamable_http_publishes_base_protected_resource_scope():
 
 def test_valid_http_token_reaches_tool_with_verified_hao_identity():
     async def scenario():
-        bridge = TestBridge()
+        bridge = FixtureBridge()
         mcp = server(verifier=StaticVerifier(), bridge=bridge)
-        url = "https://hao.example.com/mcp"
-        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        transport = httpx2.ASGITransport(app=http_app(mcp))
         headers = {"Authorization": "Bearer hao-read-token"}
 
         async with mcp.session_manager.run():
             async with (
                 httpx2.AsyncClient(
                     transport=transport,
-                    base_url=url,
+                    base_url=PUBLIC_URL,
                     headers=headers,
                     follow_redirects=True,
                 ) as http_client,
-                Client(streamable_http_client(url, http_client=http_client)) as client,
+                Client(streamable_http_client(PUBLIC_URL, http_client=http_client)) as client,
             ):
                 result = await client.call_tool("hao_control_context", {})
                 assert result.is_error is False
@@ -234,21 +253,20 @@ def test_valid_http_token_reaches_tool_with_verified_hao_identity():
 
 def test_read_scoped_http_token_cannot_submit_controlled_action():
     async def scenario():
-        bridge = TestBridge()
+        bridge = FixtureBridge()
         mcp = server(verifier=StaticVerifier(), bridge=bridge)
-        url = "https://hao.example.com/mcp"
-        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        transport = httpx2.ASGITransport(app=http_app(mcp))
         headers = {"Authorization": "Bearer hao-read-token"}
 
         async with mcp.session_manager.run():
             async with (
                 httpx2.AsyncClient(
                     transport=transport,
-                    base_url=url,
+                    base_url=PUBLIC_URL,
                     headers=headers,
                     follow_redirects=True,
                 ) as http_client,
-                Client(streamable_http_client(url, http_client=http_client)) as client,
+                Client(streamable_http_client(PUBLIC_URL, http_client=http_client)) as client,
             ):
                 result = await client.call_tool(
                     "hao_control_submit",
@@ -268,21 +286,20 @@ def test_read_scoped_http_token_cannot_submit_controlled_action():
 
 def test_wrong_authenticated_subject_is_rejected_by_application_policy():
     async def scenario():
-        bridge = TestBridge()
+        bridge = FixtureBridge()
         mcp = server(verifier=StaticVerifier(), bridge=bridge)
-        url = "https://hao.example.com/mcp"
-        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        transport = httpx2.ASGITransport(app=http_app(mcp))
         headers = {"Authorization": "Bearer wrong-subject-token"}
 
         async with mcp.session_manager.run():
             async with (
                 httpx2.AsyncClient(
                     transport=transport,
-                    base_url=url,
+                    base_url=PUBLIC_URL,
                     headers=headers,
                     follow_redirects=True,
                 ) as http_client,
-                Client(streamable_http_client(url, http_client=http_client)) as client,
+                Client(streamable_http_client(PUBLIC_URL, http_client=http_client)) as client,
             ):
                 result = await client.call_tool("hao_control_context", {})
                 assert result.is_error is True
