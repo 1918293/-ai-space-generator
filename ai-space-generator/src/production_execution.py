@@ -28,6 +28,8 @@ class ControlledWorkflowHandle(Protocol):
 class DurableWorkflowStarter(Protocol):
     async def start(self, run_input: DurableRunInput) -> ControlledWorkflowHandle: ...
 
+    async def attach(self, workflow_id: str) -> ControlledWorkflowHandle: ...
+
 
 @dataclass(frozen=True)
 class PendingControlledRun:
@@ -87,7 +89,8 @@ class ProductionExecutionService:
 
     Submission is separated from finalization because approval waits and provider
     recovery can outlive one chat/HTTP request. Temporal owns that waiting state;
-    the caller receives a durable handle rather than holding an open request.
+    callers can reconstruct a handle from durable workflow identity instead of
+    trusting client-side conversational memory.
     """
 
     def __init__(
@@ -126,6 +129,17 @@ class ProductionExecutionService:
             True,
             "CONTROLLED_RUN_SUBMITTED",
         )
+
+    async def resume(
+        self,
+        workflow_id: str,
+        *,
+        operational_version: int,
+    ) -> PendingControlledRun:
+        if operational_version < 1:
+            raise ValueError("OPERATIONAL_VERSION_REQUIRED")
+        handle = await self._starter.attach(workflow_id)
+        return PendingControlledRun(handle, operational_version)
 
     async def authorize(
         self,
