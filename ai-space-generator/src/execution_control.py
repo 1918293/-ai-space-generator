@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Iterable
 
@@ -24,6 +24,7 @@ class RunPhase(StrEnum):
     CLOSED = "CLOSED"
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
+    UNSYNCED = "UNSYNCED"
     AWAITING_HAO = "AWAITING_HAO"
 
 
@@ -60,6 +61,7 @@ class FailureStage(StrEnum):
     MUTATION = "MUTATION"
     VERIFICATION = "VERIFICATION"
     COMPLETION = "COMPLETION"
+    PERSISTENCE = "PERSISTENCE"
     PROJECTION = "PROJECTION"
 
 
@@ -133,9 +135,10 @@ _ALLOWED_TRANSITIONS: dict[RunPhase, set[RunPhase]] = {
     RunPhase.RESOLVED: {RunPhase.ADMITTED, RunPhase.BLOCKED, RunPhase.AWAITING_HAO},
     RunPhase.ADMITTED: {RunPhase.EXECUTING, RunPhase.BLOCKED, RunPhase.FAILED},
     RunPhase.EXECUTING: {RunPhase.OBSERVED, RunPhase.FAILED},
-    RunPhase.OBSERVED: {RunPhase.VERIFIED, RunPhase.FAILED, RunPhase.BLOCKED},
-    RunPhase.VERIFIED: {RunPhase.COMMITTED, RunPhase.CLOSED, RunPhase.FAILED},
-    RunPhase.COMMITTED: {RunPhase.CLOSED, RunPhase.FAILED},
+    RunPhase.OBSERVED: {RunPhase.VERIFIED, RunPhase.FAILED, RunPhase.BLOCKED, RunPhase.UNSYNCED},
+    RunPhase.VERIFIED: {RunPhase.COMMITTED, RunPhase.CLOSED, RunPhase.FAILED, RunPhase.UNSYNCED},
+    RunPhase.COMMITTED: {RunPhase.CLOSED, RunPhase.FAILED, RunPhase.UNSYNCED},
+    RunPhase.UNSYNCED: {RunPhase.RESOLVED, RunPhase.BLOCKED, RunPhase.AWAITING_HAO, RunPhase.FAILED},
     RunPhase.BLOCKED: {RunPhase.RESOLVED, RunPhase.AWAITING_HAO},
     RunPhase.AWAITING_HAO: {RunPhase.RESOLVED, RunPhase.ADMITTED, RunPhase.BLOCKED},
     RunPhase.FAILED: {RunPhase.RESOLVED, RunPhase.BLOCKED, RunPhase.AWAITING_HAO},
@@ -167,6 +170,9 @@ _EXPLICIT_HAO_AUTHORIZATION_REQUIRED = {
 }
 
 
+_PERSISTENCE_ACTIONS = {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}
+
+
 def _passing_evidence_kinds(receipts: Iterable[EvidenceReceipt]) -> set[EvidenceKind]:
     return {receipt.kind for receipt in receipts if receipt.passed}
 
@@ -175,13 +181,17 @@ def requires_hao_authorization(externality: ActionExternality) -> bool:
     return externality in _EXPLICIT_HAO_AUTHORIZATION_REQUIRED
 
 
+def action_requires_persistence_evidence(proposal: ActionProposal | None) -> bool:
+    return proposal is not None and proposal.archetype in _PERSISTENCE_ACTIONS
+
+
 def validate_action_contract(proposal: ActionProposal) -> ControlDecision:
     if not proposal.action_id.strip():
         return ControlDecision(False, "MISSING_ACTION_ID", FailureStage.PLAN)
     if not proposal.capability.strip() or not proposal.provider.strip() or not proposal.action_name.strip():
         return ControlDecision(False, "INCOMPLETE_TOOL_BINDING", FailureStage.BINDING)
 
-    if proposal.archetype in {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}:
+    if proposal.archetype in _PERSISTENCE_ACTIONS:
         if not proposal.expected_state_delta.strip():
             return ControlDecision(False, "MISSING_EXPECTED_STATE_DELTA", FailureStage.PLAN)
         if not proposal.idempotency_key.strip():
@@ -248,8 +258,21 @@ def add_evidence(record: ExecutionRecord, receipt: EvidenceReceipt) -> Execution
     return replace(record, evidence=record.evidence + (receipt,))
 
 
+def required_evidence(record: ExecutionRecord, claim: CompletionClaim) -> set[EvidenceKind]:
+    required = set(_COMPLETION_FLOORS[claim])
+    if claim == CompletionClaim.COMPLETED and action_requires_persistence_evidence(record.action):
+        required.update(
+            {
+                EvidenceKind.TOOL_RECEIPT,
+                EvidenceKind.STATE_READBACK,
+                EvidenceKind.VERIFICATION_PASS,
+            }
+        )
+    return required
+
+
 def can_claim(record: ExecutionRecord, claim: CompletionClaim) -> ControlDecision:
-    required = _COMPLETION_FLOORS[claim]
+    required = required_evidence(record, claim)
     present = _passing_evidence_kinds(record.evidence)
     missing = sorted(kind.value for kind in required - present)
     if missing:
@@ -264,6 +287,32 @@ def close_run(record: ExecutionRecord) -> ExecutionRecord:
     if not decision.allowed:
         raise ValueError(decision.code)
     return replace(record, phase=RunPhase.CLOSED)
+
+
+def block_run(record: ExecutionRecord, *, stage: FailureStage, code: str) -> ExecutionRecord:
+    if RunPhase.BLOCKED not in _ALLOWED_TRANSITIONS[record.phase]:
+        raise ValueError(f"BLOCK_NOT_ALLOWED_FROM:{record.phase}")
+    return replace(record, phase=RunPhase.BLOCKED, failure_stage=stage, failure_code=code)
+
+
+def mark_unsynced(
+    record: ExecutionRecord,
+    *,
+    code: str,
+    mechanism: str,
+    stage: FailureStage = FailureStage.PERSISTENCE,
+) -> ExecutionRecord:
+    if RunPhase.UNSYNCED not in _ALLOWED_TRANSITIONS[record.phase]:
+        raise ValueError(f"UNSYNCED_NOT_ALLOWED_FROM:{record.phase}")
+    if not code.strip() or not mechanism.strip():
+        raise ValueError("UNSYNCED_REQUIRES_CODE_AND_MECHANISM")
+    return replace(
+        record,
+        phase=RunPhase.UNSYNCED,
+        failure_stage=stage,
+        failure_code=code,
+        last_failure_mechanism=mechanism,
+    )
 
 
 def record_failure(
@@ -293,8 +342,8 @@ def can_retry(
     material_delta: bool,
     retry_basis: str,
 ) -> ControlDecision:
-    if record.phase != RunPhase.FAILED:
-        return ControlDecision(False, "RETRY_REQUIRES_FAILED_STATE", FailureStage.PLAN)
+    if record.phase not in {RunPhase.FAILED, RunPhase.UNSYNCED}:
+        return ControlDecision(False, "RETRY_REQUIRES_FAILED_OR_UNSYNCED_STATE", FailureStage.PLAN)
     if not mechanism.strip():
         return ControlDecision(False, "MISSING_FAILURE_MECHANISM", FailureStage.PLAN)
     if mechanism == record.last_failure_mechanism and not material_delta:
