@@ -68,7 +68,6 @@ def _post_effect_failure(
     code: str,
     mechanism: str,
 ) -> ExecutionRecord:
-    """Preserve that a side effect may already exist outside the controller."""
     if action_requires_persistence_evidence(proposal):
         return mark_unsynced(
             record,
@@ -89,7 +88,6 @@ def apply_tool_outcome(
     proposal: ActionProposal,
     tool_outcome: ToolOutcome,
 ) -> tuple[ExecutionRecord, ControlDecision]:
-    """Pure reducer from EXECUTING + provider outcome to OBSERVED or typed failure."""
     if executing.phase != RunPhase.EXECUTING:
         return executing, ControlDecision(False, "TOOL_OUTCOME_REQUIRES_EXECUTING", FailureStage.PLAN)
 
@@ -130,7 +128,6 @@ def apply_verification_outcome(
     proposal: ActionProposal,
     verification: VerificationOutcome,
 ) -> tuple[ExecutionRecord, ControlDecision]:
-    """Pure reducer from OBSERVED + verifier result to VERIFIED or loud non-success."""
     if observed.phase != RunPhase.OBSERVED:
         return observed, ControlDecision(False, "VERIFICATION_REQUIRES_OBSERVED", FailureStage.PLAN)
 
@@ -148,25 +145,27 @@ def apply_verification_outcome(
     for receipt in verification.receipts:
         verified = add_evidence(verified, receipt)
 
-    passing_kinds = {receipt.kind for receipt in verified.evidence if receipt.passed}
-    if EvidenceKind.VERIFICATION_PASS not in passing_kinds:
+    verification_claim = can_claim(verified, CompletionClaim.VERIFIED)
+    if not verification_claim.allowed:
         failed = _post_effect_failure(
             verified,
             proposal,
             stage=FailureStage.VERIFICATION,
-            code="VERIFIER_DID_NOT_PRODUCE_VERIFICATION_RECEIPT",
-            mechanism="missing-verification-receipt",
+            code="VERIFIER_DID_NOT_PRODUCE_ACTION_SCOPED_VERIFICATION_RECEIPT",
+            mechanism="missing-action-scoped-verification-receipt",
         )
         return failed, ControlDecision(False, failed.failure_code, failed.failure_stage)
 
-    if action_requires_persistence_evidence(proposal) and EvidenceKind.STATE_READBACK not in passing_kinds:
-        unsynced = mark_unsynced(
-            verified,
-            stage=FailureStage.PERSISTENCE,
-            code="MUTATION_WITHOUT_STATE_READBACK",
-            mechanism="missing-state-readback",
-        )
-        return unsynced, ControlDecision(False, unsynced.failure_code, unsynced.failure_stage)
+    if action_requires_persistence_evidence(proposal):
+        persistence_claim = can_claim(verified, CompletionClaim.PERSISTED)
+        if not persistence_claim.allowed:
+            unsynced = mark_unsynced(
+                verified,
+                stage=FailureStage.PERSISTENCE,
+                code="MUTATION_WITHOUT_ACTION_SCOPED_STATE_READBACK",
+                mechanism="missing-action-scoped-state-readback",
+            )
+            return unsynced, ControlDecision(False, unsynced.failure_code, unsynced.failure_stage)
 
     verified = transition(verified, RunPhase.VERIFIED)
     return verified, ControlDecision(True, "VERIFIED")
@@ -181,7 +180,6 @@ def run_controlled_action(
     hao_authorized_scopes: Iterable[str] = (),
     close_when_complete: bool = True,
 ) -> ControlledRunResult:
-    """Run one bounded action while the controller owns every state transition."""
     admitted, admission = admit_action(
         record,
         proposal,
@@ -198,7 +196,7 @@ def run_controlled_action(
 
     try:
         tool_outcome = executor.execute(proposal)
-    except Exception as exc:  # runtime boundary: exceptions become typed failures
+    except Exception as exc:
         failed = record_failure(
             executing,
             stage=FailureStage.TOOL_EXECUTION,
