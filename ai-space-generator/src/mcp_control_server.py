@@ -42,6 +42,28 @@ class ToolResult(BaseModel):
     operational_version: int | None = None
 
 
+async def _confirm_authorization(
+    workflow_id: str,
+    scope: str,
+    approved: bool,
+    reason: str = "",
+) -> ApprovalConfirmation | Elicit[ApprovalConfirmation]:
+    """Human-only resolver for one exact authorization decision.
+
+    This lives at module scope deliberately: MCP evaluates postponed annotations
+    against module globals when registering a tool. The Resolve marker keeps the
+    resulting confirmation parameter out of the model-visible input schema.
+    """
+    decision = "APPROVE" if approved else "REJECT"
+    return Elicit(
+        (
+            f"Confirm Hao System decision: {decision} workflow {workflow_id} for exact scope "
+            f"'{scope}'. This may unblock a real side effect."
+        ),
+        ApprovalConfirmation,
+    )
+
+
 def _oauth_meta(scopes: list[str]) -> dict[str, Any]:
     # OpenAI plugin clients historically also inspect this compatibility copy.
     # Server-side bearer verification remains authoritative regardless of hints.
@@ -181,21 +203,6 @@ def build_mcp_control_server(
         except (PermissionError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
-    async def confirm_authorization(
-        workflow_id: str,
-        scope: str,
-        approved: bool,
-        reason: str = "",
-    ) -> ApprovalConfirmation | Elicit[ApprovalConfirmation]:
-        decision = "APPROVE" if approved else "REJECT"
-        return Elicit(
-            (
-                f"Confirm Hao System decision: {decision} workflow {workflow_id} for exact scope "
-                f"'{scope}'. This may unblock a real side effect."
-            ),
-            ApprovalConfirmation,
-        )
-
     @mcp.tool(
         title="Authorize controlled Hao action",
         description=(
@@ -216,7 +223,7 @@ def build_mcp_control_server(
         approved: bool,
         confirmation: Annotated[
             ElicitationResult[ApprovalConfirmation],
-            Resolve(confirm_authorization),
+            Resolve(_confirm_authorization),
         ],
         reason: str = "",
     ) -> ToolResult:
