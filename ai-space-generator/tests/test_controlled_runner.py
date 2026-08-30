@@ -32,6 +32,12 @@ class CountingVerifier:
             True,
             receipts=(
                 EvidenceReceipt(
+                    "READBACK-1",
+                    EvidenceKind.STATE_READBACK,
+                    True,
+                    "fake-provider-readback",
+                ),
+                EvidenceReceipt(
                     "VERIFY-1",
                     EvidenceKind.VERIFICATION_PASS,
                     True,
@@ -240,7 +246,7 @@ def test_external_action_without_authorization_never_reaches_executor():
     assert result.admission.requires_hao_authorization is True
 
 
-def test_external_action_with_exact_authorization_scope_can_execute():
+def test_external_action_with_exact_authorization_and_readback_can_close():
     executor = CountingExecutor()
     verifier = CountingVerifier()
     result = run_controlled_action(
@@ -253,3 +259,58 @@ def test_external_action_with_exact_authorization_scope_can_execute():
     assert executor.calls == 1
     assert verifier.calls == 1
     assert result.record.phase == RunPhase.CLOSED
+
+
+def test_side_effect_success_without_readback_becomes_unsynced_not_done():
+    executor = CountingExecutor()
+    verifier = CountingVerifier(
+        VerificationOutcome(
+            True,
+            receipts=(
+                EvidenceReceipt(
+                    "VERIFY-1",
+                    EvidenceKind.VERIFICATION_PASS,
+                    True,
+                    "fake-verifier",
+                ),
+                EvidenceReceipt(
+                    "ACCEPT-GATE-1",
+                    EvidenceKind.ACCEPTANCE_GATE_PASS,
+                    True,
+                    "fake-verifier",
+                ),
+            ),
+        )
+    )
+    result = run_controlled_action(
+        record(),
+        publish_action(),
+        executor=executor,
+        verifier=verifier,
+        hao_authorized_scopes={"SEND_EXTERNAL"},
+    )
+    assert result.record.phase == RunPhase.UNSYNCED
+    assert result.record.failure_stage == FailureStage.PERSISTENCE
+    assert result.record.failure_code == "MUTATION_WITHOUT_STATE_READBACK"
+    assert result.completion.allowed is False
+
+
+def test_side_effect_verification_failure_is_unsynced_to_prevent_duplicate_retry():
+    executor = CountingExecutor()
+    verifier = CountingVerifier(
+        VerificationOutcome(
+            False,
+            error_code="READBACK_MISMATCH",
+            failure_stage=FailureStage.PERSISTENCE,
+        )
+    )
+    result = run_controlled_action(
+        record(),
+        publish_action(),
+        executor=executor,
+        verifier=verifier,
+        hao_authorized_scopes={"SEND_EXTERNAL"},
+    )
+    assert result.record.phase == RunPhase.UNSYNCED
+    assert result.record.failure_code == "READBACK_MISMATCH"
+    assert result.record.last_failure_mechanism == "readback_mismatch"
