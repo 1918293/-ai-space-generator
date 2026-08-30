@@ -136,7 +136,11 @@ async def make_service(env, tmp_path, broker, task_queue):
         env.client,
         task_queue=task_queue,
         workflows=[HaoExecutionControlWorkflow],
-        activities=[activities.execute_tool, activities.verify_outcome],
+        activities=[
+            activities.preflight_authority,
+            activities.execute_tool,
+            activities.verify_outcome,
+        ],
     )
     service = ProductionExecutionService(
         gateway=gateway(),
