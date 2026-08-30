@@ -36,7 +36,12 @@ class TemporalControlledRunHandle:
 
 
 class TemporalWorkflowStarter:
-    """Production adapter from the control facade to Temporal Client."""
+    """Production adapter from the control facade to Temporal Client.
+
+    Handles are reconstructable from workflow IDs so MCP/HTTP calls do not need
+    to retain an in-memory Python object between submit, approval, status, and
+    finalization requests.
+    """
 
     def __init__(self, client: Any, *, task_queue: str) -> None:
         if not task_queue.strip():
@@ -54,4 +59,11 @@ class TemporalWorkflowStarter:
             id=workflow_id,
             task_queue=self._task_queue,
         )
+        return TemporalControlledRunHandle(handle, workflow_id)
+
+    async def attach(self, workflow_id: str) -> TemporalControlledRunHandle:
+        workflow_id = workflow_id.strip()
+        if not workflow_id:
+            raise ValueError("WORKFLOW_RUN_ID_REQUIRED")
+        handle = self._client.get_workflow_handle(workflow_id)
         return TemporalControlledRunHandle(handle, workflow_id)
