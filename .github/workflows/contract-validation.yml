@@ -45,4 +45,5 @@ jobs:
           tests/test_authoritative_completion.py
           tests/test_production_execution.py
           tests/test_production_temporal_integration.py
+          tests/test_authority_snapshot_semantics.py
           -q
