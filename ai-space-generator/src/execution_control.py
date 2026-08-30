@@ -115,6 +115,7 @@ class ExecutionRecord:
     goal_valid: bool
     acceptance_criteria: tuple[str, ...]
     authority_refs: tuple[str, ...] = ()
+    required_action_authority_refs: tuple[str, ...] = ()
     required_action_tags: tuple[str, ...] = ()
     forbidden_action_tags: tuple[str, ...] = ()
     phase: RunPhase = RunPhase.RESOLVED
@@ -282,7 +283,8 @@ def admit_action(
         )
         return blocked, task_binding
 
-    missing_authority = [ref for ref in proposal.required_authority_refs if ref not in record.authority_refs]
+    required_authority = set(record.required_action_authority_refs) | set(proposal.required_authority_refs)
+    missing_authority = [ref for ref in sorted(required_authority) if ref not in record.authority_refs]
     if missing_authority:
         blocked = replace(record, phase=RunPhase.BLOCKED, action=proposal, failure_stage=FailureStage.AUTHORITY, failure_code="AUTHORITY_REF_UNRESOLVED")
         return blocked, ControlDecision(False, "AUTHORITY_REF_UNRESOLVED", FailureStage.AUTHORITY)
