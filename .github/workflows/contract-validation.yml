@@ -37,4 +37,5 @@ jobs:
           tests/test_temporal_control.py
           tests/test_temporal_workflow_integration.py
           tests/test_historical_execution_regressions.py
+          tests/test_projection_control.py
           -q
