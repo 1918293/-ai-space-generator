@@ -67,12 +67,13 @@ def mutate_action(**overrides):
     return ActionProposal(**values)
 
 
-def receipt(kind, evidence_id=None):
+def receipt(kind, evidence_id=None, scope=""):
     return EvidenceReceipt(
         evidence_id=evidence_id or f"E-{kind.value}",
         kind=kind,
         passed=True,
         source="direct-test",
+        claim_scope=scope,
     )
 
 
@@ -127,18 +128,12 @@ def test_external_action_is_admitted_when_exact_scope_is_authorized():
 
 
 def test_mutation_requires_expected_delta_and_idempotency_key():
-    updated, decision = admit_action(
-        base_record(),
-        mutate_action(expected_state_delta=""),
-    )
+    updated, decision = admit_action(base_record(), mutate_action(expected_state_delta=""))
     assert decision.allowed is False
     assert decision.code == "MISSING_EXPECTED_STATE_DELTA"
     assert updated.phase == RunPhase.BLOCKED
 
-    updated, decision = admit_action(
-        base_record(),
-        mutate_action(idempotency_key=""),
-    )
+    updated, decision = admit_action(base_record(), mutate_action(idempotency_key=""))
     assert decision.allowed is False
     assert decision.code == "MISSING_IDEMPOTENCY_KEY"
 
@@ -146,13 +141,41 @@ def test_mutation_requires_expected_delta_and_idempotency_key():
 def test_publish_cannot_claim_read_only_externality():
     updated, decision = admit_action(
         base_record(),
-        mutate_action(
-            archetype=ActionArchetype.PUBLISH,
-            externality=ActionExternality.READ_ONLY,
-        ),
+        mutate_action(archetype=ActionArchetype.PUBLISH, externality=ActionExternality.READ_ONLY),
     )
     assert decision.allowed is False
     assert decision.failed_at == FailureStage.POLICY
+
+
+def test_task_required_action_tags_block_wrong_tool_mode_before_execution():
+    record = base_record(
+        required_action_tags=("LOCAL_EDIT", "PRESERVE_OUTSIDE_MASK"),
+        forbidden_action_tags=("FULL_GENERATION",),
+    )
+    wrong = mutate_action(
+        capability="image_generation",
+        provider="image_model",
+        action_name="full_generate",
+        assurance_tags=("FULL_GENERATION",),
+    )
+    updated, decision = admit_action(record, wrong)
+    assert decision.allowed is False
+    assert decision.failed_at == FailureStage.POLICY
+    assert decision.code.startswith("MISSING_REQUIRED_ACTION_TAGS:")
+    assert updated.phase == RunPhase.BLOCKED
+
+
+def test_forbidden_action_tag_blocks_even_if_required_tags_are_spoofed_together():
+    record = base_record(
+        required_action_tags=("LOCAL_EDIT",),
+        forbidden_action_tags=("FULL_GENERATION",),
+    )
+    contradictory = mutate_action(
+        assurance_tags=("LOCAL_EDIT", "FULL_GENERATION"),
+    )
+    _, decision = admit_action(record, contradictory)
+    assert decision.allowed is False
+    assert decision.code == "FORBIDDEN_ACTION_TAGS:FULL_GENERATION"
 
 
 def test_state_machine_does_not_allow_skipping_observation_and_verification():
@@ -165,7 +188,7 @@ def test_state_machine_does_not_allow_skipping_observation_and_verification():
     assert verified.phase == RunPhase.VERIFIED
 
 
-def test_tool_receipt_is_enough_only_for_executed_claim():
+def test_tool_receipt_is_enough_only_for_executed_claim_without_action_scope():
     record = add_evidence(base_record(), receipt(EvidenceKind.TOOL_RECEIPT))
     assert can_claim(record, CompletionClaim.EXECUTED).allowed is True
     assert can_claim(record, CompletionClaim.PERSISTED).allowed is False
@@ -195,17 +218,49 @@ def test_read_completion_requires_verification_and_acceptance_gate():
     assert can_claim(record, CompletionClaim.COMPLETED).allowed is True
 
 
-def test_mutation_completion_also_requires_tool_receipt_and_state_readback():
-    record = base_record(action=mutate_action())
-    record = add_evidence(record, receipt(EvidenceKind.VERIFICATION_PASS))
-    record = add_evidence(record, receipt(EvidenceKind.ACCEPTANCE_GATE_PASS))
+def test_mutation_completion_requires_action_scoped_tool_readback_verify_and_gate():
+    action = mutate_action()
+    record = base_record(action=action)
+    record = add_evidence(record, receipt(EvidenceKind.VERIFICATION_PASS, scope=action.action_id))
+    record = add_evidence(record, receipt(EvidenceKind.ACCEPTANCE_GATE_PASS, scope=action.action_id))
     decision = can_claim(record, CompletionClaim.COMPLETED)
     assert decision.allowed is False
     assert "STATE_READBACK" in decision.code
     assert "TOOL_RECEIPT" in decision.code
-    record = add_evidence(record, receipt(EvidenceKind.TOOL_RECEIPT))
-    record = add_evidence(record, receipt(EvidenceKind.STATE_READBACK))
+    record = add_evidence(record, receipt(EvidenceKind.TOOL_RECEIPT, scope=action.action_id))
+    record = add_evidence(record, receipt(EvidenceKind.STATE_READBACK, scope=action.action_id))
     assert can_claim(record, CompletionClaim.COMPLETED).allowed is True
+
+
+def test_stale_evidence_from_previous_action_cannot_close_current_action():
+    action = mutate_action()
+    record = base_record(action=action)
+    for kind in (
+        EvidenceKind.TOOL_RECEIPT,
+        EvidenceKind.STATE_READBACK,
+        EvidenceKind.VERIFICATION_PASS,
+        EvidenceKind.ACCEPTANCE_GATE_PASS,
+    ):
+        record = add_evidence(record, receipt(kind, scope="PREVIOUS-ACTION"))
+    decision = can_claim(record, CompletionClaim.COMPLETED)
+    assert decision.allowed is False
+    assert "VERIFICATION_PASS" in decision.code
+
+
+def test_duplicate_evidence_id_is_idempotent_only_when_content_is_identical():
+    first = receipt(EvidenceKind.VERIFICATION_PASS, evidence_id="E-1")
+    record = add_evidence(base_record(), first)
+    assert add_evidence(record, first) == record
+    with pytest.raises(ValueError, match="EVIDENCE_ID_CONFLICT"):
+        add_evidence(
+            record,
+            EvidenceReceipt(
+                "E-1",
+                EvidenceKind.STATE_READBACK,
+                True,
+                "other-source",
+            ),
+        )
 
 
 def test_close_run_is_a_completion_firewall():
@@ -237,23 +292,14 @@ def test_same_failure_retry_is_blocked_without_material_delta():
         code="INTER_ACTION_ID_NOT_FOUND",
         mechanism="id-binding",
     )
-    decision = can_retry(
-        failed,
-        mechanism="id-binding",
-        material_delta=False,
-        retry_basis="",
-    )
+    decision = can_retry(failed, mechanism="id-binding", material_delta=False, retry_basis="")
     assert decision.allowed is False
     assert decision.code == "NO_DELTA_RETRY_BLOCKED"
 
 
 def test_unsynced_state_also_blocks_same_mechanism_retry_without_delta():
     observed = base_record(phase=RunPhase.OBSERVED, action=mutate_action())
-    unsynced = mark_unsynced(
-        observed,
-        code="READBACK_MISMATCH",
-        mechanism="readback-mismatch",
-    )
+    unsynced = mark_unsynced(observed, code="READBACK_MISMATCH", mechanism="readback-mismatch")
     assert unsynced.phase == RunPhase.UNSYNCED
     decision = can_retry(
         unsynced,
@@ -291,11 +337,7 @@ def test_retry_is_allowed_only_when_material_delta_has_a_basis():
 
 def test_header_is_rendered_from_control_state_not_model_free_text():
     record = base_record(mode=Mode.EXP, task="Stable Task")
-    assert render_header(
-        record,
-        date="2026-08-30",
-        time_with_offset="09:15+08:00",
-    ) == (
+    assert render_header(record, date="2026-08-30", time_with_offset="09:15+08:00") == (
         "[MODE=EXP][TASK=Stable Task]\n"
         "[DATE=2026-08-30][TIME=09:15+08:00]"
     )
