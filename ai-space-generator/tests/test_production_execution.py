@@ -48,7 +48,16 @@ def gateway():
                     action_name="read",
                     archetype=ActionArchetype.READ,
                     externality=ActionExternality.READ_ONLY,
-                )
+                ),
+                ActionBinding(
+                    binding_id="message.send",
+                    capability="external_message",
+                    provider="trusted-message-provider",
+                    action_name="send",
+                    archetype=ActionArchetype.PUBLISH,
+                    externality=ActionExternality.EXTERNAL_REVERSIBLE,
+                    authorization_scope_prefix="SEND_EXTERNAL",
+                ),
             ]
         ),
         PolicyProvider(),
@@ -76,63 +85,126 @@ def request():
     )
 
 
-class ClosedRunner:
-    async def run(self, run_input):
-        action = run_input.proposal
+def external_request():
+    return ModelIngressRequest(
+        run_id="RUN-PROD-EXT",
+        sequence=1,
+        intent=ModelActionIntent(
+            intent_id="INTENT-EXT",
+            requested_capability="external_message",
+            binding_id="message.send",
+            expected_state_delta="send one controlled message",
+            authorization_target="recipient-1",
+        ),
+    )
+
+
+class FakeHandle:
+    def __init__(self, run_input, *, close=True):
+        self.run_input = run_input
+        self._close = close
+        self.signals = []
+
+    @property
+    def workflow_id(self):
+        return self.run_input.record.run_id
+
+    async def authorize(self, scope, approved, reason=""):
+        self.signals.append((scope, approved, reason))
+
+    async def current_state(self):
+        return self.run_input.record
+
+    async def result(self):
+        action = self.run_input.proposal
+        if not self._close:
+            record = replace(
+                self.run_input.record,
+                action=action,
+                phase=RunPhase.BLOCKED,
+            )
+            return DurableRunResult(
+                record,
+                ControlDecision(True, "ADMITTED"),
+                ControlDecision(False, "BLOCKED"),
+            )
+
+        receipts = [
+            EvidenceReceipt(
+                "VERIFY-1",
+                EvidenceKind.VERIFICATION_PASS,
+                True,
+                "runtime-verifier",
+                claim_scope=action.action_id,
+                origin=EvidenceOrigin.VERIFIER,
+            ),
+            EvidenceReceipt(
+                "GATE-1",
+                EvidenceKind.ACCEPTANCE_GATE_PASS,
+                True,
+                "runtime-verifier",
+                claim_scope=action.action_id,
+                origin=EvidenceOrigin.VERIFIER,
+            ),
+        ]
+        if action.archetype in {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}:
+            receipts.extend(
+                [
+                    EvidenceReceipt(
+                        "TOOL-1",
+                        EvidenceKind.TOOL_RECEIPT,
+                        True,
+                        "provider",
+                        claim_scope=action.action_id,
+                        origin=EvidenceOrigin.PROVIDER,
+                    ),
+                    EvidenceReceipt(
+                        "READBACK-1",
+                        EvidenceKind.STATE_READBACK,
+                        True,
+                        "provider-readback",
+                        claim_scope=action.action_id,
+                        origin=EvidenceOrigin.PROVIDER,
+                    ),
+                ]
+            )
         record = replace(
-            run_input.record,
+            self.run_input.record,
             action=action,
             phase=RunPhase.CLOSED,
-            evidence=(
-                EvidenceReceipt(
-                    "VERIFY-1",
-                    EvidenceKind.VERIFICATION_PASS,
-                    True,
-                    "runtime-verifier",
-                    claim_scope=action.action_id,
-                    origin=EvidenceOrigin.VERIFIER,
-                ),
-                EvidenceReceipt(
-                    "GATE-1",
-                    EvidenceKind.ACCEPTANCE_GATE_PASS,
-                    True,
-                    "runtime-verifier",
-                    claim_scope=action.action_id,
-                    origin=EvidenceOrigin.VERIFIER,
-                ),
-            ),
+            evidence=tuple(receipts),
         )
         allowed = ControlDecision(True, "CLAIM_ALLOWED:COMPLETED")
         return DurableRunResult(record, ControlDecision(True, "ADMITTED"), allowed)
 
 
-class BlockedRunner:
-    async def run(self, run_input):
-        record = replace(
-            run_input.record,
-            action=run_input.proposal,
-            phase=RunPhase.BLOCKED,
-        )
-        return DurableRunResult(
-            record,
-            ControlDecision(True, "ADMITTED"),
-            ControlDecision(False, "BLOCKED"),
-        )
+class FakeStarter:
+    def __init__(self, *, close=True):
+        self.close = close
+        self.handles = []
+
+    async def start(self, run_input):
+        handle = FakeHandle(run_input, close=self.close)
+        self.handles.append(handle)
+        return handle
+
+
+def service(tmp_path, *, close=True):
+    return ProductionExecutionService(
+        gateway=gateway(),
+        starter=FakeStarter(close=close),
+        attestor=CompletionAttestor(SECRET),
+        completion_store=SQLiteAuthoritativeCompletionStore(
+            str(tmp_path / "completion.sqlite")
+        ),
+    )
 
 
 def test_production_facade_is_the_only_path_that_mints_and_commits_completion(tmp_path):
     import asyncio
 
-    attestor = CompletionAttestor(SECRET)
-    store = SQLiteAuthoritativeCompletionStore(str(tmp_path / "completion.sqlite"))
-    service = ProductionExecutionService(
-        gateway=gateway(),
-        runner=ClosedRunner(),
-        attestor=attestor,
-        completion_store=store,
-    )
     result = asyncio.run(
-        service.execute(
+        service(tmp_path).execute(
             state(),
             request(),
             issued_at="2026-08-30T14:20:00+08:00",
@@ -148,16 +220,8 @@ def test_production_facade_is_the_only_path_that_mints_and_commits_completion(tm
 def test_nonclosed_controlled_run_cannot_mint_authoritative_completion(tmp_path):
     import asyncio
 
-    service = ProductionExecutionService(
-        gateway=gateway(),
-        runner=BlockedRunner(),
-        attestor=CompletionAttestor(SECRET),
-        completion_store=SQLiteAuthoritativeCompletionStore(
-            str(tmp_path / "completion.sqlite")
-        ),
-    )
     result = asyncio.run(
-        service.execute(
+        service(tmp_path, close=False).execute(
             state(),
             request(),
             issued_at="2026-08-30T14:20:00+08:00",
@@ -166,6 +230,33 @@ def test_nonclosed_controlled_run_cannot_mint_authoritative_completion(tmp_path)
     assert result.authoritative is False
     assert result.attestation is None
     assert result.code == "CONTROLLED_RUN_NOT_CLOSED:BLOCKED"
+
+
+def test_submit_returns_durable_handle_and_approval_is_a_signal_not_an_open_request(tmp_path):
+    import asyncio
+
+    async def scenario():
+        svc = service(tmp_path)
+        submission = await svc.submit(state(), external_request())
+        assert submission.accepted is True
+        assert submission.pending is not None
+        assert submission.pending.handle.workflow_id == "RUN-PROD-EXT"
+        await svc.authorize(
+            submission.pending,
+            scope="SEND_EXTERNAL:recipient-1",
+            approved=True,
+            reason="Hao approved exact recipient",
+        )
+        assert submission.pending.handle.signals == [
+            ("SEND_EXTERNAL:recipient-1", True, "Hao approved exact recipient")
+        ]
+        result = await svc.finalize(
+            submission.pending,
+            issued_at="2026-08-30T14:21:00+08:00",
+        )
+        assert result.authoritative is True
+
+    asyncio.run(scenario())
 
 
 def test_out_of_band_native_or_manual_effect_is_quarantined_not_promoted():
