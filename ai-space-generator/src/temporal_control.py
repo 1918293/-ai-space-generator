@@ -8,8 +8,10 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from .controlled_runner import (
+    AuthorityPreflightOutcome,
     ToolOutcome,
     VerificationOutcome,
+    apply_authority_preflight,
     apply_tool_outcome,
     apply_verification_outcome,
 )
@@ -57,6 +59,10 @@ class DurableRunResult:
     completion: ControlDecision
 
 
+class AsyncAuthorityGuard(Protocol):
+    async def verify_current(self, proposal: ActionProposal) -> AuthorityPreflightOutcome: ...
+
+
 class AsyncToolBroker(Protocol):
     async def execute(self, proposal: ActionProposal) -> ToolOutcome: ...
 
@@ -71,15 +77,26 @@ class AsyncOutcomeVerifier(Protocol):
 
 
 class ExecutionActivities:
-    """Worker-side bridge to real providers.
+    """Worker-side bridge to current Authority and real providers."""
 
-    The workflow never holds provider credentials and never performs network I/O.
-    Side effects happen only in these Activities through an injected broker.
-    """
-
-    def __init__(self, broker: AsyncToolBroker, verifier: AsyncOutcomeVerifier) -> None:
+    def __init__(
+        self,
+        broker: AsyncToolBroker,
+        verifier: AsyncOutcomeVerifier,
+        authority_guard: AsyncAuthorityGuard | None = None,
+    ) -> None:
         self._broker = broker
         self._verifier = verifier
+        self._authority_guard = authority_guard
+
+    @activity.defn(name="hao_preflight_authority")
+    async def preflight_authority(self, proposal: ActionProposal) -> AuthorityPreflightOutcome:
+        if self._authority_guard is None:
+            return AuthorityPreflightOutcome(
+                False,
+                error_code="AUTHORITY_GUARD_NOT_CONFIGURED",
+            )
+        return await self._authority_guard.verify_current(proposal)
 
     @activity.defn(name="hao_execute_tool")
     async def execute_tool(self, proposal: ActionProposal) -> ToolOutcome:
@@ -98,11 +115,9 @@ class ExecutionActivities:
 class HaoExecutionControlWorkflow:
     """Durable owner of one controlled Hao System action.
 
-    Temporal owns the long-lived transition state. Provider I/O is isolated in
-    Activities. Automatic Activity retries are disabled at this layer because
-    Hao System retry admission must first classify the prior failure and prove a
-    material delta; idempotent provider-specific retry can be added explicitly by
-    the broker after that decision.
+    Approval can take arbitrarily long. Current Authority is therefore checked
+    again *after* approval and immediately before any side effect. The workflow
+    never assumes that the snapshot used to propose an action is still Current.
     """
 
     def __init__(self) -> None:
@@ -135,6 +150,7 @@ class HaoExecutionControlWorkflow:
         self._record = run_input.record
         self._proposal = run_input.proposal
         self._approved_scopes.update(run_input.initial_authorized_scopes)
+        no_automatic_retry = RetryPolicy(maximum_attempts=1)
 
         admitted, admission = admit_action(
             self._record,
@@ -156,16 +172,8 @@ class HaoExecutionControlWorkflow:
                 )
                 return DurableRunResult(
                     self._record,
-                    ControlDecision(
-                        False,
-                        "HAO_AUTHORIZATION_REJECTED",
-                        FailureStage.POLICY,
-                    ),
-                    ControlDecision(
-                        False,
-                        "ACTION_NOT_ADMITTED",
-                        FailureStage.POLICY,
-                    ),
+                    ControlDecision(False, "HAO_AUTHORIZATION_REJECTED", FailureStage.POLICY),
+                    ControlDecision(False, "ACTION_NOT_ADMITTED", FailureStage.POLICY),
                 )
 
             self._record = transition(self._record, RunPhase.RESOLVED)
@@ -183,8 +191,36 @@ class HaoExecutionControlWorkflow:
                 ControlDecision(False, "ACTION_NOT_ADMITTED", admission.failed_at),
             )
 
+        if self._proposal.authority_snapshot_fingerprint:
+            try:
+                preflight = await workflow.execute_activity(
+                    "hao_preflight_authority",
+                    self._proposal,
+                    start_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=no_automatic_retry,
+                    result_type=AuthorityPreflightOutcome,
+                )
+            except Exception as exc:
+                self._record = block_run(
+                    self._record,
+                    stage=FailureStage.AUTHORITY,
+                    code=f"AUTHORITY_PREFLIGHT_ACTIVITY_EXCEPTION:{type(exc).__name__}",
+                )
+                return DurableRunResult(
+                    self._record,
+                    admission,
+                    ControlDecision(False, self._record.failure_code, FailureStage.AUTHORITY),
+                )
+
+            self._record, preflight_decision = apply_authority_preflight(
+                self._record,
+                self._proposal,
+                preflight,
+            )
+            if not preflight_decision.allowed:
+                return DurableRunResult(self._record, admission, preflight_decision)
+
         self._record = transition(self._record, RunPhase.EXECUTING)
-        no_automatic_retry = RetryPolicy(maximum_attempts=1)
 
         try:
             tool_outcome = await workflow.execute_activity(
