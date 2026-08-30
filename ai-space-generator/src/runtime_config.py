@@ -112,12 +112,10 @@ class RuntimeSettings:
 
         if production and not database_url.startswith(("postgresql://", "postgres://")):
             raise ValueError("PRODUCTION_POSTGRES_REQUIRED")
-        if not temporal_endpoint.strip():
-            raise ValueError("TEMPORAL_ENDPOINT_REQUIRED")
 
         # API-facing configuration is mandatory for both roles in one settings
-        # contract so API and worker are guaranteed to describe the same runtime
-        # deployment rather than drifting into incompatible configurations.
+        # contract so API and worker describe the same deployment identity rather
+        # than drifting into incompatible runtime configurations.
         public_mcp_url = _https_url(
             _required(values, "HAO_PUBLIC_MCP_URL"),
             field="HAO_PUBLIC_MCP_URL",
@@ -130,9 +128,9 @@ class RuntimeSettings:
         _validate_allowlist(hosts, _host_from_url(public_mcp_url))
         origins = _csv(values, "HAO_MCP_ALLOWED_ORIGINS")
         for origin in origins:
-            _https_url(origin, field="HAO_MCP_ALLOWED_ORIGINS", production=production)
             if origin == "*" or origin.startswith("*."):
                 raise ValueError("MCP_ALLOWED_ORIGINS_WILDCARD_NOT_ALLOWED")
+            _https_url(origin, field="HAO_MCP_ALLOWED_ORIGINS", production=production)
 
         oauth_issuer_url = _https_url(
             _required(values, "HAO_OAUTH_ISSUER_URL"),
@@ -147,15 +145,15 @@ class RuntimeSettings:
         if oauth_resource_url != public_mcp_url:
             raise ValueError("OAUTH_RESOURCE_MUST_EQUAL_PUBLIC_MCP_URL")
 
-        oauth_audience = _required(values, "HAO_OAUTH_AUDIENCE")
+        oauth_audience = _required(values, "HAO_OAUTH_AUDIENCE").rstrip("/")
+        if oauth_audience != public_mcp_url:
+            raise ValueError("OAUTH_AUDIENCE_MUST_EQUAL_PUBLIC_MCP_URL")
+
         expected_hao_subject = _required(values, "HAO_EXPECTED_SUBJECT")
         attestation_key_id = _required(values, "HAO_ATTESTATION_KEY_ID")
         attestation_secret = _required(values, "HAO_ATTESTATION_SECRET")
         if len(attestation_secret.encode("utf-8")) < 32:
             raise ValueError("ATTESTATION_SECRET_MIN_32_BYTES")
-
-        if production and region != "asia-east1":
-            raise ValueError("PRODUCTION_REGION_MUST_BE_ASIA_EAST1")
 
         return cls(
             environment=environment,
