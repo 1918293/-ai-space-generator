@@ -214,11 +214,11 @@ def build_mcp_control_server(
         workflow_id: str,
         scope: str,
         approved: bool,
-        reason: str = "",
         confirmation: Annotated[
             ElicitationResult[ApprovalConfirmation],
             Resolve(confirm_authorization),
-        ] = None,
+        ],
+        reason: str = "",
     ) -> ToolResult:
         if not isinstance(confirmation, AcceptedElicitation) or not confirmation.data.confirm:
             return ToolResult(
