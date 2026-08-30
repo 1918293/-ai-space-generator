@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Iterable, Protocol
 
 from .execution_control import (
-    ActionArchetype,
     ActionProposal,
     CompletionClaim,
     ControlDecision,
@@ -69,12 +68,7 @@ def _post_effect_failure(
     code: str,
     mechanism: str,
 ) -> ExecutionRecord:
-    """Preserve the fact that a mutation/publication may already exist externally.
-
-    A successful side-effecting tool call followed by readback/verification failure
-    is not equivalent to 'nothing happened'. It becomes UNSYNCED so a retry cannot
-    silently duplicate the external effect.
-    """
+    """Preserve that a side effect may already exist outside the controller."""
     if action_requires_persistence_evidence(proposal):
         return mark_unsynced(
             record,
@@ -90,6 +84,94 @@ def _post_effect_failure(
     )
 
 
+def apply_tool_outcome(
+    executing: ExecutionRecord,
+    proposal: ActionProposal,
+    tool_outcome: ToolOutcome,
+) -> tuple[ExecutionRecord, ControlDecision]:
+    """Pure reducer from EXECUTING + provider outcome to OBSERVED or typed failure."""
+    if executing.phase != RunPhase.EXECUTING:
+        return executing, ControlDecision(False, "TOOL_OUTCOME_REQUIRES_EXECUTING", FailureStage.PLAN)
+
+    if not tool_outcome.success:
+        failed = record_failure(
+            executing,
+            stage=tool_outcome.failure_stage,
+            code=tool_outcome.error_code or "TOOL_EXECUTION_FAILED",
+            mechanism=(tool_outcome.error_code or "tool-execution-failed").lower(),
+        )
+        return failed, ControlDecision(False, failed.failure_code, failed.failure_stage)
+
+    if not tool_outcome.receipt_id.strip() or not tool_outcome.source.strip():
+        failed = record_failure(
+            executing,
+            stage=FailureStage.TOOL_OUTPUT,
+            code="TOOL_SUCCESS_WITHOUT_RECEIPT",
+            mechanism="missing-tool-receipt",
+        )
+        return failed, ControlDecision(False, failed.failure_code, failed.failure_stage)
+
+    observed = add_evidence(
+        executing,
+        EvidenceReceipt(
+            evidence_id=tool_outcome.receipt_id,
+            kind=EvidenceKind.TOOL_RECEIPT,
+            passed=True,
+            source=tool_outcome.source,
+            claim_scope=proposal.action_id,
+        ),
+    )
+    observed = transition(observed, RunPhase.OBSERVED)
+    return observed, ControlDecision(True, "TOOL_OUTCOME_OBSERVED")
+
+
+def apply_verification_outcome(
+    observed: ExecutionRecord,
+    proposal: ActionProposal,
+    verification: VerificationOutcome,
+) -> tuple[ExecutionRecord, ControlDecision]:
+    """Pure reducer from OBSERVED + verifier result to VERIFIED or loud non-success."""
+    if observed.phase != RunPhase.OBSERVED:
+        return observed, ControlDecision(False, "VERIFICATION_REQUIRES_OBSERVED", FailureStage.PLAN)
+
+    if not verification.passed:
+        failed = _post_effect_failure(
+            observed,
+            proposal,
+            stage=verification.failure_stage,
+            code=verification.error_code or "VERIFICATION_FAILED",
+            mechanism=(verification.error_code or "verification-failed").lower(),
+        )
+        return failed, ControlDecision(False, failed.failure_code, failed.failure_stage)
+
+    verified = observed
+    for receipt in verification.receipts:
+        verified = add_evidence(verified, receipt)
+
+    passing_kinds = {receipt.kind for receipt in verified.evidence if receipt.passed}
+    if EvidenceKind.VERIFICATION_PASS not in passing_kinds:
+        failed = _post_effect_failure(
+            verified,
+            proposal,
+            stage=FailureStage.VERIFICATION,
+            code="VERIFIER_DID_NOT_PRODUCE_VERIFICATION_RECEIPT",
+            mechanism="missing-verification-receipt",
+        )
+        return failed, ControlDecision(False, failed.failure_code, failed.failure_stage)
+
+    if action_requires_persistence_evidence(proposal) and EvidenceKind.STATE_READBACK not in passing_kinds:
+        unsynced = mark_unsynced(
+            verified,
+            stage=FailureStage.PERSISTENCE,
+            code="MUTATION_WITHOUT_STATE_READBACK",
+            mechanism="missing-state-readback",
+        )
+        return unsynced, ControlDecision(False, unsynced.failure_code, unsynced.failure_stage)
+
+    verified = transition(verified, RunPhase.VERIFIED)
+    return verified, ControlDecision(True, "VERIFIED")
+
+
 def run_controlled_action(
     record: ExecutionRecord,
     proposal: ActionProposal,
@@ -99,12 +181,7 @@ def run_controlled_action(
     hao_authorized_scopes: Iterable[str] = (),
     close_when_complete: bool = True,
 ) -> ControlledRunResult:
-    """Run exactly one bounded action through deterministic control ownership.
-
-    The model may propose an action, but it cannot advance phases, convert a tool
-    response into a verified result, or emit CLOSED. Those transitions happen
-    here from executable evidence only.
-    """
+    """Run one bounded action while the controller owns every state transition."""
     admitted, admission = admit_action(
         record,
         proposal,
@@ -134,43 +211,9 @@ def run_controlled_action(
             ControlDecision(False, failed.failure_code, failed.failure_stage),
         )
 
-    if not tool_outcome.success:
-        failed = record_failure(
-            executing,
-            stage=tool_outcome.failure_stage,
-            code=tool_outcome.error_code or "TOOL_EXECUTION_FAILED",
-            mechanism=(tool_outcome.error_code or "tool-execution-failed").lower(),
-        )
-        return ControlledRunResult(
-            failed,
-            admission,
-            ControlDecision(False, failed.failure_code, failed.failure_stage),
-        )
-
-    if not tool_outcome.receipt_id.strip() or not tool_outcome.source.strip():
-        failed = record_failure(
-            executing,
-            stage=FailureStage.TOOL_OUTPUT,
-            code="TOOL_SUCCESS_WITHOUT_RECEIPT",
-            mechanism="missing-tool-receipt",
-        )
-        return ControlledRunResult(
-            failed,
-            admission,
-            ControlDecision(False, failed.failure_code, failed.failure_stage),
-        )
-
-    observed = add_evidence(
-        executing,
-        EvidenceReceipt(
-            evidence_id=tool_outcome.receipt_id,
-            kind=EvidenceKind.TOOL_RECEIPT,
-            passed=True,
-            source=tool_outcome.source,
-            claim_scope=proposal.action_id,
-        ),
-    )
-    observed = transition(observed, RunPhase.OBSERVED)
+    observed, tool_decision = apply_tool_outcome(executing, proposal, tool_outcome)
+    if not tool_decision.allowed:
+        return ControlledRunResult(observed, admission, tool_decision)
 
     try:
         verification = verifier.verify(observed, proposal, tool_outcome)
@@ -188,55 +231,15 @@ def run_controlled_action(
             ControlDecision(False, failed.failure_code, failed.failure_stage),
         )
 
-    if not verification.passed:
-        failed = _post_effect_failure(
-            observed,
-            proposal,
-            stage=verification.failure_stage,
-            code=verification.error_code or "VERIFICATION_FAILED",
-            mechanism=(verification.error_code or "verification-failed").lower(),
-        )
-        return ControlledRunResult(
-            failed,
-            admission,
-            ControlDecision(False, failed.failure_code, failed.failure_stage),
-        )
+    verified, verification_decision = apply_verification_outcome(
+        observed,
+        proposal,
+        verification,
+    )
+    if not verification_decision.allowed:
+        return ControlledRunResult(verified, admission, verification_decision)
 
-    verified = observed
-    for receipt in verification.receipts:
-        verified = add_evidence(verified, receipt)
-
-    passing_kinds = {receipt.kind for receipt in verified.evidence if receipt.passed}
-    if EvidenceKind.VERIFICATION_PASS not in passing_kinds:
-        failed = _post_effect_failure(
-            verified,
-            proposal,
-            stage=FailureStage.VERIFICATION,
-            code="VERIFIER_DID_NOT_PRODUCE_VERIFICATION_RECEIPT",
-            mechanism="missing-verification-receipt",
-        )
-        return ControlledRunResult(
-            failed,
-            admission,
-            ControlDecision(False, failed.failure_code, failed.failure_stage),
-        )
-
-    if action_requires_persistence_evidence(proposal) and EvidenceKind.STATE_READBACK not in passing_kinds:
-        unsynced = mark_unsynced(
-            verified,
-            stage=FailureStage.PERSISTENCE,
-            code="MUTATION_WITHOUT_STATE_READBACK",
-            mechanism="missing-state-readback",
-        )
-        return ControlledRunResult(
-            unsynced,
-            admission,
-            ControlDecision(False, unsynced.failure_code, unsynced.failure_stage),
-        )
-
-    verified = transition(verified, RunPhase.VERIFIED)
     completion = can_claim(verified, CompletionClaim.COMPLETED)
-
     if close_when_complete and completion.allowed:
         verified = close_run(verified)
 
