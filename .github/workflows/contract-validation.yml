@@ -35,4 +35,5 @@ jobs:
           tests/test_execution_control.py
           tests/test_controlled_runner.py
           tests/test_temporal_control.py
+          tests/test_temporal_workflow_integration.py
           -q
