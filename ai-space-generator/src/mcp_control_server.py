@@ -24,6 +24,12 @@ from .mcp_control_bridge import (
 )
 
 
+# `AuthSettings.required_scopes` applies globally to every HTTP request. Keep
+# that middleware requirement to a neutral access scope and enforce the
+# capability-specific read/execute/approve scopes inside each tool policy.
+SCOPE_ACCESS = "hao:access"
+
+
 class ApprovalConfirmation(BaseModel):
     confirm: bool = Field(
         description="Confirm this exact Hao System authorization decision and scope."
@@ -64,10 +70,15 @@ async def _confirm_authorization(
     )
 
 
-def _oauth_meta(scopes: list[str]) -> dict[str, Any]:
-    # OpenAI plugin clients historically also inspect this compatibility copy.
-    # Server-side bearer verification remains authoritative regardless of hints.
-    return {"securitySchemes": [{"type": "oauth2", "scopes": scopes}]}
+def _oauth_meta(tool_scope: str) -> dict[str, Any]:
+    # The base scope is required by HTTP middleware; the tool scope is enforced
+    # again server-side by MCPControlBridge/HaoMCPIdentityPolicy. Metadata is a
+    # client hint, never the authorization authority.
+    return {
+        "securitySchemes": [
+            {"type": "oauth2", "scopes": [SCOPE_ACCESS, tool_scope]}
+        ]
+    }
 
 
 def build_mcp_control_server(
@@ -85,6 +96,18 @@ def build_mcp_control_server(
     """
     if token_verifier is None or auth_settings is None:
         raise ValueError("MCP_OAUTH_CONFIGURATION_REQUIRED")
+
+    # MCP SDK v2 defines `required_scopes` as a global all-requests requirement.
+    # Requiring read+execute+approve here would silently grant every caller the
+    # approval scope. Fail closed unless deployment uses the neutral base scope;
+    # precise capabilities remain per-tool server policy.
+    global_scopes = {
+        str(scope).strip()
+        for scope in (getattr(auth_settings, "required_scopes", None) or [])
+        if str(scope).strip()
+    }
+    if global_scopes != {SCOPE_ACCESS}:
+        raise ValueError("MCP_GLOBAL_REQUIRED_SCOPES_MUST_EQUAL_HAO_ACCESS")
 
     mcp = MCPServer(
         "hao-system-control",
@@ -119,7 +142,7 @@ def build_mcp_control_server(
             idempotent_hint=True,
             open_world_hint=False,
         ),
-        meta=_oauth_meta([SCOPE_READ]),
+        meta=_oauth_meta(SCOPE_READ),
     )
     def hao_control_context() -> ToolResult:
         try:
@@ -137,7 +160,7 @@ def build_mcp_control_server(
     @mcp.tool(
         title="Submit controlled Hao action",
         description=(
-            "Submit one action intent to the Hao Execution Control Plane. The server owns run IDs, "
+            "Submit one action intent to the Hao Execution Runtime. The server owns run IDs, "
             "Mode/TASK, policy, safety classification, action metadata, and workflow state."
         ),
         annotations=ToolAnnotations(
@@ -146,7 +169,7 @@ def build_mcp_control_server(
             idempotent_hint=False,
             open_world_hint=True,
         ),
-        meta=_oauth_meta([SCOPE_EXECUTE]),
+        meta=_oauth_meta(SCOPE_EXECUTE),
     )
     async def hao_control_submit(
         requested_capability: str,
@@ -186,7 +209,7 @@ def build_mcp_control_server(
             idempotent_hint=True,
             open_world_hint=False,
         ),
-        meta=_oauth_meta([SCOPE_READ]),
+        meta=_oauth_meta(SCOPE_READ),
     )
     async def hao_control_status(workflow_id: str) -> ToolResult:
         try:
@@ -215,7 +238,7 @@ def build_mcp_control_server(
             idempotent_hint=True,
             open_world_hint=True,
         ),
-        meta=_oauth_meta([SCOPE_APPROVE]),
+        meta=_oauth_meta(SCOPE_APPROVE),
     )
     async def hao_control_authorize(
         workflow_id: str,
@@ -268,7 +291,7 @@ def build_mcp_control_server(
             idempotent_hint=True,
             open_world_hint=False,
         ),
-        meta=_oauth_meta([SCOPE_EXECUTE]),
+        meta=_oauth_meta(SCOPE_EXECUTE),
     )
     async def hao_control_finalize(workflow_id: str) -> ToolResult:
         try:
