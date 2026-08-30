@@ -50,4 +50,5 @@ jobs:
           tests/test_mcp_control_server.py
           tests/test_task_runtime.py
           tests/test_runtime_config.py
+          tests/test_oauth_verifier.py
           -q
