@@ -104,6 +104,7 @@ class ActionProposal:
     authorization_scope: str = ""
     idempotency_key: str = ""
     rollback_available: bool = False
+    assurance_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,8 @@ class ExecutionRecord:
     goal_valid: bool
     acceptance_criteria: tuple[str, ...]
     authority_refs: tuple[str, ...] = ()
+    required_action_tags: tuple[str, ...] = ()
+    forbidden_action_tags: tuple[str, ...] = ()
     phase: RunPhase = RunPhase.RESOLVED
     action: ActionProposal | None = None
     evidence: tuple[EvidenceReceipt, ...] = ()
@@ -173,8 +176,23 @@ _EXPLICIT_HAO_AUTHORIZATION_REQUIRED = {
 _PERSISTENCE_ACTIONS = {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}
 
 
-def _passing_evidence_kinds(receipts: Iterable[EvidenceReceipt]) -> set[EvidenceKind]:
-    return {receipt.kind for receipt in receipts if receipt.passed}
+def _normalize_tags(values: Iterable[str]) -> set[str]:
+    return {value.strip().upper() for value in values if value.strip()}
+
+
+def _passing_evidence_kinds(
+    receipts: Iterable[EvidenceReceipt],
+    *,
+    claim_scope: str | None = None,
+) -> set[EvidenceKind]:
+    result: set[EvidenceKind] = set()
+    for receipt in receipts:
+        if not receipt.passed:
+            continue
+        if claim_scope is not None and receipt.claim_scope != claim_scope:
+            continue
+        result.add(receipt.kind)
+    return result
 
 
 def requires_hao_authorization(externality: ActionExternality) -> bool:
@@ -209,6 +227,33 @@ def validate_action_contract(proposal: ActionProposal) -> ControlDecision:
     return ControlDecision(True, "ACTION_CONTRACT_VALID")
 
 
+def _validate_task_action_binding(
+    record: ExecutionRecord,
+    proposal: ActionProposal,
+) -> ControlDecision:
+    available = _normalize_tags(proposal.assurance_tags)
+    required = _normalize_tags(record.required_action_tags)
+    forbidden = _normalize_tags(record.forbidden_action_tags)
+
+    missing = sorted(required - available)
+    if missing:
+        return ControlDecision(
+            False,
+            "MISSING_REQUIRED_ACTION_TAGS:" + ",".join(missing),
+            FailureStage.POLICY,
+        )
+
+    prohibited = sorted(forbidden & available)
+    if prohibited:
+        return ControlDecision(
+            False,
+            "FORBIDDEN_ACTION_TAGS:" + ",".join(prohibited),
+            FailureStage.POLICY,
+        )
+
+    return ControlDecision(True, "TASK_ACTION_BINDING_VALID")
+
+
 def admit_action(
     record: ExecutionRecord,
     proposal: ActionProposal,
@@ -225,6 +270,17 @@ def admit_action(
     if not contract.allowed:
         blocked = replace(record, phase=RunPhase.BLOCKED, action=proposal, failure_stage=contract.failed_at, failure_code=contract.code)
         return blocked, contract
+
+    task_binding = _validate_task_action_binding(record, proposal)
+    if not task_binding.allowed:
+        blocked = replace(
+            record,
+            phase=RunPhase.BLOCKED,
+            action=proposal,
+            failure_stage=task_binding.failed_at,
+            failure_code=task_binding.code,
+        )
+        return blocked, task_binding
 
     missing_authority = [ref for ref in proposal.required_authority_refs if ref not in record.authority_refs]
     if missing_authority:
@@ -255,6 +311,12 @@ def transition(record: ExecutionRecord, target: RunPhase) -> ExecutionRecord:
 def add_evidence(record: ExecutionRecord, receipt: EvidenceReceipt) -> ExecutionRecord:
     if not receipt.evidence_id.strip() or not receipt.source.strip():
         raise ValueError("INVALID_EVIDENCE_RECEIPT")
+    for existing in record.evidence:
+        if existing.evidence_id != receipt.evidence_id:
+            continue
+        if existing == receipt:
+            return record
+        raise ValueError(f"EVIDENCE_ID_CONFLICT:{receipt.evidence_id}")
     return replace(record, evidence=record.evidence + (receipt,))
 
 
@@ -273,7 +335,8 @@ def required_evidence(record: ExecutionRecord, claim: CompletionClaim) -> set[Ev
 
 def can_claim(record: ExecutionRecord, claim: CompletionClaim) -> ControlDecision:
     required = required_evidence(record, claim)
-    present = _passing_evidence_kinds(record.evidence)
+    action_scope = record.action.action_id if record.action is not None else None
+    present = _passing_evidence_kinds(record.evidence, claim_scope=action_scope)
     missing = sorted(kind.value for kind in required - present)
     if missing:
         return ControlDecision(False, "MISSING_EVIDENCE:" + ",".join(missing), FailureStage.COMPLETION)
