@@ -76,6 +76,13 @@ class EvidenceKind(StrEnum):
     HAO_ACCEPTANCE = "HAO_ACCEPTANCE"
 
 
+class EvidenceOrigin(StrEnum):
+    RUNTIME = "RUNTIME"
+    PROVIDER = "PROVIDER"
+    VERIFIER = "VERIFIER"
+    HAO = "HAO"
+
+
 class CompletionClaim(StrEnum):
     EXECUTED = "EXECUTED"
     PERSISTED = "PERSISTED"
@@ -97,6 +104,8 @@ class EvidenceReceipt:
     passed: bool
     source: str
     claim_scope: str = ""
+    origin: EvidenceOrigin = EvidenceOrigin.RUNTIME
+    gate_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,6 +132,8 @@ class ExecutionRecord:
     mode: Mode
     goal_valid: bool
     acceptance_criteria: tuple[str, ...]
+    required_acceptance_gate_ids: tuple[str, ...] = ()
+    hao_acceptance_required: bool = False
     authority_refs: tuple[str, ...] = ()
     authority_stamps: tuple[AuthorityStamp, ...] = ()
     required_action_authority_refs: tuple[str, ...] = ()
@@ -220,6 +231,27 @@ def _passing_evidence_kinds(
     return result
 
 
+def _passing_gate_ids(receipts: Iterable[EvidenceReceipt], claim_scope: str | None) -> set[str]:
+    return {
+        receipt.gate_id.strip()
+        for receipt in receipts
+        if receipt.passed
+        and receipt.kind == EvidenceKind.ACCEPTANCE_GATE_PASS
+        and receipt.gate_id.strip()
+        and (claim_scope is None or receipt.claim_scope == claim_scope)
+    }
+
+
+def _has_hao_acceptance(receipts: Iterable[EvidenceReceipt], claim_scope: str | None) -> bool:
+    return any(
+        receipt.passed
+        and receipt.kind == EvidenceKind.HAO_ACCEPTANCE
+        and receipt.origin == EvidenceOrigin.HAO
+        and (claim_scope is None or receipt.claim_scope == claim_scope)
+        for receipt in receipts
+    )
+
+
 def requires_hao_authorization(externality: ActionExternality) -> bool:
     return externality in _EXPLICIT_HAO_AUTHORIZATION_REQUIRED
 
@@ -252,37 +284,23 @@ def validate_action_contract(proposal: ActionProposal) -> ControlDecision:
     return ControlDecision(True, "ACTION_CONTRACT_VALID")
 
 
-def _validate_task_action_binding(
-    record: ExecutionRecord,
-    proposal: ActionProposal,
-) -> ControlDecision:
+def _validate_task_action_binding(record: ExecutionRecord, proposal: ActionProposal) -> ControlDecision:
     available = _normalize_tags(proposal.assurance_tags)
     required = _normalize_tags(record.required_action_tags)
     forbidden = _normalize_tags(record.forbidden_action_tags)
 
     missing = sorted(required - available)
     if missing:
-        return ControlDecision(
-            False,
-            "MISSING_REQUIRED_ACTION_TAGS:" + ",".join(missing),
-            FailureStage.POLICY,
-        )
+        return ControlDecision(False, "MISSING_REQUIRED_ACTION_TAGS:" + ",".join(missing), FailureStage.POLICY)
 
     prohibited = sorted(forbidden & available)
     if prohibited:
-        return ControlDecision(
-            False,
-            "FORBIDDEN_ACTION_TAGS:" + ",".join(prohibited),
-            FailureStage.POLICY,
-        )
+        return ControlDecision(False, "FORBIDDEN_ACTION_TAGS:" + ",".join(prohibited), FailureStage.POLICY)
 
     return ControlDecision(True, "TASK_ACTION_BINDING_VALID")
 
 
-def _validate_authority_snapshot(
-    record: ExecutionRecord,
-    proposal: ActionProposal,
-) -> ControlDecision:
+def _validate_authority_snapshot(record: ExecutionRecord, proposal: ActionProposal) -> ControlDecision:
     task_required = tuple(sorted(set(record.required_action_authority_refs)))
     if not task_required:
         return ControlDecision(True, "AUTHORITY_SNAPSHOT_NOT_REQUIRED")
@@ -314,13 +332,7 @@ def admit_action(
 
     task_binding = _validate_task_action_binding(record, proposal)
     if not task_binding.allowed:
-        blocked = replace(
-            record,
-            phase=RunPhase.BLOCKED,
-            action=proposal,
-            failure_stage=task_binding.failed_at,
-            failure_code=task_binding.code,
-        )
+        blocked = replace(record, phase=RunPhase.BLOCKED, action=proposal, failure_stage=task_binding.failed_at, failure_code=task_binding.code)
         return blocked, task_binding
 
     required_authority = set(record.required_action_authority_refs) | set(proposal.required_authority_refs)
@@ -338,12 +350,7 @@ def admit_action(
         allowed_scopes = {scope.strip() for scope in hao_authorized_scopes if scope.strip()}
         if not proposal.authorization_scope.strip() or proposal.authorization_scope not in allowed_scopes:
             waiting = replace(record, phase=RunPhase.AWAITING_HAO, action=proposal, failure_stage=FailureStage.POLICY, failure_code="HAO_AUTHORIZATION_REQUIRED")
-            return waiting, ControlDecision(
-                False,
-                "HAO_AUTHORIZATION_REQUIRED",
-                FailureStage.POLICY,
-                requires_hao_authorization=True,
-            )
+            return waiting, ControlDecision(False, "HAO_AUTHORIZATION_REQUIRED", FailureStage.POLICY, requires_hao_authorization=True)
 
     admitted = replace(record, phase=RunPhase.ADMITTED, action=proposal, failure_stage=None, failure_code="")
     return admitted, ControlDecision(True, "ADMITTED")
@@ -358,6 +365,8 @@ def transition(record: ExecutionRecord, target: RunPhase) -> ExecutionRecord:
 def add_evidence(record: ExecutionRecord, receipt: EvidenceReceipt) -> ExecutionRecord:
     if not receipt.evidence_id.strip() or not receipt.source.strip():
         raise ValueError("INVALID_EVIDENCE_RECEIPT")
+    if receipt.kind == EvidenceKind.HAO_ACCEPTANCE and receipt.origin != EvidenceOrigin.HAO:
+        raise ValueError("HAO_ACCEPTANCE_REQUIRES_HAO_ORIGIN")
     for existing in record.evidence:
         if existing.evidence_id != receipt.evidence_id:
             continue
@@ -367,16 +376,30 @@ def add_evidence(record: ExecutionRecord, receipt: EvidenceReceipt) -> Execution
     return replace(record, evidence=record.evidence + (receipt,))
 
 
+def record_hao_acceptance(
+    record: ExecutionRecord,
+    *,
+    evidence_id: str,
+    source_event_id: str,
+) -> ExecutionRecord:
+    action_scope = record.action.action_id if record.action is not None else ""
+    return add_evidence(
+        record,
+        EvidenceReceipt(
+            evidence_id=evidence_id,
+            kind=EvidenceKind.HAO_ACCEPTANCE,
+            passed=True,
+            source=f"hao:{source_event_id}",
+            claim_scope=action_scope,
+            origin=EvidenceOrigin.HAO,
+        ),
+    )
+
+
 def required_evidence(record: ExecutionRecord, claim: CompletionClaim) -> set[EvidenceKind]:
     required = set(_COMPLETION_FLOORS[claim])
     if claim == CompletionClaim.COMPLETED and action_requires_persistence_evidence(record.action):
-        required.update(
-            {
-                EvidenceKind.TOOL_RECEIPT,
-                EvidenceKind.STATE_READBACK,
-                EvidenceKind.VERIFICATION_PASS,
-            }
-        )
+        required.update({EvidenceKind.TOOL_RECEIPT, EvidenceKind.STATE_READBACK, EvidenceKind.VERIFICATION_PASS})
     return required
 
 
@@ -387,6 +410,19 @@ def can_claim(record: ExecutionRecord, claim: CompletionClaim) -> ControlDecisio
     missing = sorted(kind.value for kind in required - present)
     if missing:
         return ControlDecision(False, "MISSING_EVIDENCE:" + ",".join(missing), FailureStage.COMPLETION)
+
+    if claim == CompletionClaim.ACCEPTED and not _has_hao_acceptance(record.evidence, action_scope):
+        return ControlDecision(False, "MISSING_HAO_ACCEPTANCE", FailureStage.COMPLETION)
+
+    if claim == CompletionClaim.COMPLETED:
+        required_gates = {gate.strip() for gate in record.required_acceptance_gate_ids if gate.strip()}
+        present_gates = _passing_gate_ids(record.evidence, action_scope)
+        missing_gates = sorted(required_gates - present_gates)
+        if missing_gates:
+            return ControlDecision(False, "MISSING_ACCEPTANCE_GATES:" + ",".join(missing_gates), FailureStage.COMPLETION)
+        if record.hao_acceptance_required and not _has_hao_acceptance(record.evidence, action_scope):
+            return ControlDecision(False, "MISSING_HAO_ACCEPTANCE", FailureStage.COMPLETION)
+
     return ControlDecision(True, f"CLAIM_ALLOWED:{claim}")
 
 
@@ -405,53 +441,21 @@ def block_run(record: ExecutionRecord, *, stage: FailureStage, code: str) -> Exe
     return replace(record, phase=RunPhase.BLOCKED, failure_stage=stage, failure_code=code)
 
 
-def mark_unsynced(
-    record: ExecutionRecord,
-    *,
-    code: str,
-    mechanism: str,
-    stage: FailureStage = FailureStage.PERSISTENCE,
-) -> ExecutionRecord:
+def mark_unsynced(record: ExecutionRecord, *, code: str, mechanism: str, stage: FailureStage = FailureStage.PERSISTENCE) -> ExecutionRecord:
     if RunPhase.UNSYNCED not in _ALLOWED_TRANSITIONS[record.phase]:
         raise ValueError(f"UNSYNCED_NOT_ALLOWED_FROM:{record.phase}")
     if not code.strip() or not mechanism.strip():
         raise ValueError("UNSYNCED_REQUIRES_CODE_AND_MECHANISM")
-    return replace(
-        record,
-        phase=RunPhase.UNSYNCED,
-        failure_stage=stage,
-        failure_code=code,
-        last_failure_mechanism=mechanism,
-    )
+    return replace(record, phase=RunPhase.UNSYNCED, failure_stage=stage, failure_code=code, last_failure_mechanism=mechanism)
 
 
-def record_failure(
-    record: ExecutionRecord,
-    *,
-    stage: FailureStage,
-    code: str,
-    mechanism: str,
-    retry_basis: str = "",
-) -> ExecutionRecord:
+def record_failure(record: ExecutionRecord, *, stage: FailureStage, code: str, mechanism: str, retry_basis: str = "") -> ExecutionRecord:
     if not code.strip() or not mechanism.strip():
         raise ValueError("FAILURE_REQUIRES_CODE_AND_MECHANISM")
-    return replace(
-        record,
-        phase=RunPhase.FAILED,
-        failure_stage=stage,
-        failure_code=code,
-        last_failure_mechanism=mechanism,
-        last_retry_basis=retry_basis,
-    )
+    return replace(record, phase=RunPhase.FAILED, failure_stage=stage, failure_code=code, last_failure_mechanism=mechanism, last_retry_basis=retry_basis)
 
 
-def can_retry(
-    record: ExecutionRecord,
-    *,
-    mechanism: str,
-    material_delta: bool,
-    retry_basis: str,
-) -> ControlDecision:
+def can_retry(record: ExecutionRecord, *, mechanism: str, material_delta: bool, retry_basis: str) -> ControlDecision:
     if record.phase not in {RunPhase.FAILED, RunPhase.UNSYNCED}:
         return ControlDecision(False, "RETRY_REQUIRES_FAILED_OR_UNSYNCED_STATE", FailureStage.PLAN)
     if not mechanism.strip():
@@ -466,7 +470,4 @@ def can_retry(
 def render_header(record: ExecutionRecord, *, date: str, time_with_offset: str) -> str:
     if not date.strip() or not time_with_offset.strip():
         raise ValueError("DATE_AND_TIME_REQUIRED")
-    return (
-        f"[MODE={record.mode.value}][TASK={record.task}]\n"
-        f"[DATE={date}][TIME={time_with_offset}]"
-    )
+    return f"[MODE={record.mode.value}][TASK={record.task}]\n[DATE={date}][TIME={time_with_offset}]"
