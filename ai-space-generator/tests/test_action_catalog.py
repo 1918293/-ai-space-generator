@@ -9,11 +9,13 @@ from src.action_catalog import (
 from src.execution_control import (
     ActionArchetype,
     ActionExternality,
+    AuthorityStamp,
     ExecutionRecord,
     FailureStage,
     Mode,
     RunPhase,
     admit_action,
+    authority_snapshot_fingerprint,
 )
 
 
@@ -25,6 +27,7 @@ def record(**overrides):
         goal_valid=True,
         acceptance_criteria=("model cannot self-classify tool safety",),
         authority_refs=("AUTH-CURRENT",),
+        authority_stamps=(AuthorityStamp("AUTH-CURRENT", "rev-17"),),
         required_action_authority_refs=("AUTH-CURRENT",),
     )
     values.update(overrides)
@@ -99,9 +102,10 @@ def test_model_capability_claim_must_match_trusted_binding_metadata():
     assert resolution.decision.code == "CAPABILITY_BINDING_MISMATCH"
 
 
-def test_safety_metadata_comes_from_catalog_and_ids_are_runtime_generated():
+def test_safety_metadata_and_authority_snapshot_come_from_runtime():
+    current = record()
     resolution = resolve_model_intent(
-        record(),
+        current,
         ModelActionIntent(
             "I-1",
             "image_edit",
@@ -119,6 +123,10 @@ def test_safety_metadata_comes_from_catalog_and_ids_are_runtime_generated():
     assert proposal.archetype == ActionArchetype.MUTATE
     assert set(proposal.assurance_tags) == {"LOCAL_EDIT", "PRESERVE_OUTSIDE_MASK"}
     assert proposal.required_authority_refs == ("AUTH-CURRENT",)
+    assert proposal.authority_snapshot_fingerprint == authority_snapshot_fingerprint(
+        current.authority_stamps,
+        current.required_action_authority_refs,
+    )
 
 
 def test_exact_edit_task_accepts_trusted_local_edit_binding():
@@ -166,8 +174,9 @@ def test_exact_edit_task_cannot_be_reclassified_as_full_generation_by_model():
 
 
 def test_external_authorization_scope_is_derived_from_trusted_binding_and_target():
+    current = record()
     resolution = resolve_model_intent(
-        record(),
+        current,
         ModelActionIntent(
             "I-1",
             "external_message",
@@ -182,15 +191,15 @@ def test_external_authorization_scope_is_derived_from_trusted_binding_and_target
     assert proposal is not None
     assert proposal.externality == ActionExternality.EXTERNAL_IRREVERSIBLE
     assert proposal.authorization_scope == "SEND_EXTERNAL:recipient-123"
-    waiting, decision = admit_action(record(), proposal)
+    waiting, decision = admit_action(current, proposal)
     assert decision.allowed is False
     assert decision.requires_hao_authorization is True
     assert waiting.phase == RunPhase.AWAITING_HAO
 
 
-def test_task_level_required_authority_cannot_be_omitted_by_action():
+def test_missing_authority_version_blocks_intent_resolution_before_proposal():
     current = record(
-        authority_refs=(),
+        authority_stamps=(),
         required_action_authority_refs=("AUTH-CURRENT",),
     )
     resolution = resolve_model_intent(
@@ -204,7 +213,30 @@ def test_task_level_required_authority_cannot_be_omitted_by_action():
         catalog(),
         sequence=1,
     )
-    blocked, decision = admit_action(current, resolution.proposal)
+    assert resolution.proposal is None
+    assert resolution.decision.allowed is False
+    assert resolution.decision.code == "AUTHORITY_VERSION_UNRESOLVED"
+    assert resolution.decision.failed_at == FailureStage.AUTHORITY
+
+
+def test_tampered_action_snapshot_is_blocked_at_admission():
+    current = record()
+    resolution = resolve_model_intent(
+        current,
+        ModelActionIntent(
+            "I-1",
+            "image_edit",
+            "image.local_mask_edit",
+            expected_state_delta="bounded mask delta",
+        ),
+        catalog(),
+        sequence=1,
+    )
+    proposal = resolution.proposal
+    tampered = proposal.__class__(
+        **{**proposal.__dict__, "authority_snapshot_fingerprint": "stale-or-forged"}
+    )
+    blocked, decision = admit_action(current, tampered)
     assert decision.allowed is False
-    assert decision.failed_at == FailureStage.AUTHORITY
+    assert decision.code == "AUTHORITY_SNAPSHOT_MISMATCH"
     assert blocked.phase == RunPhase.BLOCKED
