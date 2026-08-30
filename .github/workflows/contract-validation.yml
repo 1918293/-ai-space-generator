@@ -39,4 +39,5 @@ jobs:
           tests/test_historical_execution_regressions.py
           tests/test_projection_control.py
           tests/test_action_catalog.py
+          tests/test_idempotent_broker.py
           -q
