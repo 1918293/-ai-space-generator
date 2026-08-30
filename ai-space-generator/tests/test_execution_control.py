@@ -16,6 +16,7 @@ from src.execution_control import (
     can_claim,
     can_retry,
     close_run,
+    mark_unsynced,
     record_failure,
     render_header,
     transition,
@@ -134,9 +135,8 @@ def test_mutation_requires_expected_delta_and_idempotency_key():
     assert decision.code == "MISSING_EXPECTED_STATE_DELTA"
     assert updated.phase == RunPhase.BLOCKED
 
-    recovered = base_record()
     updated, decision = admit_action(
-        recovered,
+        base_record(),
         mutate_action(idempotency_key=""),
     )
     assert decision.allowed is False
@@ -188,10 +188,23 @@ def test_hao_acceptance_is_distinct_from_technical_verification():
     assert can_claim(record, CompletionClaim.ACCEPTED).allowed is True
 
 
-def test_completed_claim_requires_verification_and_acceptance_gate():
+def test_read_completion_requires_verification_and_acceptance_gate():
     record = add_evidence(base_record(), receipt(EvidenceKind.VERIFICATION_PASS))
     assert can_claim(record, CompletionClaim.COMPLETED).allowed is False
     record = add_evidence(record, receipt(EvidenceKind.ACCEPTANCE_GATE_PASS))
+    assert can_claim(record, CompletionClaim.COMPLETED).allowed is True
+
+
+def test_mutation_completion_also_requires_tool_receipt_and_state_readback():
+    record = base_record(action=mutate_action())
+    record = add_evidence(record, receipt(EvidenceKind.VERIFICATION_PASS))
+    record = add_evidence(record, receipt(EvidenceKind.ACCEPTANCE_GATE_PASS))
+    decision = can_claim(record, CompletionClaim.COMPLETED)
+    assert decision.allowed is False
+    assert "STATE_READBACK" in decision.code
+    assert "TOOL_RECEIPT" in decision.code
+    record = add_evidence(record, receipt(EvidenceKind.TOOL_RECEIPT))
+    record = add_evidence(record, receipt(EvidenceKind.STATE_READBACK))
     assert can_claim(record, CompletionClaim.COMPLETED).allowed is True
 
 
@@ -227,6 +240,24 @@ def test_same_failure_retry_is_blocked_without_material_delta():
     decision = can_retry(
         failed,
         mechanism="id-binding",
+        material_delta=False,
+        retry_basis="",
+    )
+    assert decision.allowed is False
+    assert decision.code == "NO_DELTA_RETRY_BLOCKED"
+
+
+def test_unsynced_state_also_blocks_same_mechanism_retry_without_delta():
+    observed = base_record(phase=RunPhase.OBSERVED, action=mutate_action())
+    unsynced = mark_unsynced(
+        observed,
+        code="READBACK_MISMATCH",
+        mechanism="readback-mismatch",
+    )
+    assert unsynced.phase == RunPhase.UNSYNCED
+    decision = can_retry(
+        unsynced,
+        mechanism="readback-mismatch",
         material_delta=False,
         retry_basis="",
     )
