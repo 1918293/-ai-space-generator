@@ -1,5 +1,6 @@
 import asyncio
 
+import httpx2
 from mcp import Client
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
@@ -38,6 +39,8 @@ def test_mcp_server_fails_closed_without_oauth_configuration():
 
 def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
     async def scenario():
+        # In-memory Client intentionally bypasses HTTP OAuth. Use it only to
+        # inspect the registered tool surface and model-visible schemas.
         async with Client(server()) as client:
             result = await client.list_tools()
             tools = {tool.name: tool for tool in result.tools}
@@ -75,11 +78,54 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
     asyncio.run(scenario())
 
 
-def test_in_memory_tool_call_without_authenticated_request_context_fails_closed():
+def test_streamable_http_request_without_token_is_rejected_before_tool_execution():
     async def scenario():
-        async with Client(server()) as client:
-            result = await client.call_tool("hao_control_context", {})
-            assert result.is_error is True
-            assert "AUTHENTICATION_REQUIRED" in result.content[0].text
+        mcp = server()
+        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        async with httpx2.AsyncClient(
+            transport=transport,
+            base_url="https://hao.example.com",
+        ) as http_client:
+            response = await http_client.post("/mcp", json={})
+            assert response.status_code == 401
+            assert response.json()["error"] == "invalid_token"
+            assert "resource_metadata=" in response.headers["www-authenticate"]
+
+    asyncio.run(scenario())
+
+
+def test_streamable_http_rejected_bearer_token_is_401():
+    async def scenario():
+        mcp = server()
+        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        async with httpx2.AsyncClient(
+            transport=transport,
+            base_url="https://hao.example.com",
+        ) as http_client:
+            response = await http_client.post(
+                "/mcp",
+                json={},
+                headers={"Authorization": "Bearer invalid-token"},
+            )
+            assert response.status_code == 401
+            assert response.json()["error"] == "invalid_token"
+
+    asyncio.run(scenario())
+
+
+def test_streamable_http_publishes_protected_resource_metadata():
+    async def scenario():
+        mcp = server()
+        transport = httpx2.ASGITransport(app=mcp.streamable_http_app())
+        async with httpx2.AsyncClient(
+            transport=transport,
+            base_url="https://hao.example.com",
+        ) as http_client:
+            response = await http_client.get("/.well-known/oauth-protected-resource/mcp")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["resource"] == "https://hao.example.com/mcp"
+            assert body["authorization_servers"] == ["https://auth.example.com/"]
+            assert set(body["scopes_supported"]) == {"hao:read", "hao:execute", "hao:approve"}
 
     asyncio.run(scenario())
