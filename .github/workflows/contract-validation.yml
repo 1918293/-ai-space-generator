@@ -27,5 +27,5 @@ jobs:
           python-version: "3.11"
       - name: Install test dependency
         run: python -m pip install --upgrade pytest
-      - name: Run integrity contracts
-        run: python -m pytest tests/test_contracts.py tests/test_runtime_validation.py -q
+      - name: Run integrity and execution-control contracts
+        run: python -m pytest tests/test_contracts.py tests/test_runtime_validation.py tests/test_execution_control.py -q
