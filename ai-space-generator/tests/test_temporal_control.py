@@ -70,18 +70,21 @@ class Verifier:
                     EvidenceKind.STATE_READBACK,
                     True,
                     "fake-drive-readback",
+                    claim_scope=proposal.action_id,
                 ),
                 EvidenceReceipt(
                     "VERIFY-R1",
                     EvidenceKind.VERIFICATION_PASS,
                     True,
                     "fake-verifier",
+                    claim_scope=proposal.action_id,
                 ),
                 EvidenceReceipt(
                     "GATE-R1",
                     EvidenceKind.ACCEPTANCE_GATE_PASS,
                     True,
                     "fake-verifier",
+                    claim_scope=proposal.action_id,
                 ),
             ),
         )
@@ -115,3 +118,4 @@ def test_temporal_activity_boundary_delegates_only_to_injected_broker_and_verifi
         EvidenceKind.VERIFICATION_PASS,
         EvidenceKind.ACCEPTANCE_GATE_PASS,
     }
+    assert {receipt.claim_scope for receipt in verification.receipts} == {action().action_id}
