@@ -46,4 +46,6 @@ jobs:
           tests/test_production_execution.py
           tests/test_production_temporal_integration.py
           tests/test_authority_snapshot_semantics.py
+          tests/test_mcp_control_bridge.py
+          tests/test_mcp_control_server.py
           -q
