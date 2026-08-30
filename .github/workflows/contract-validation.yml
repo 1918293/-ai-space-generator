@@ -43,4 +43,5 @@ jobs:
           tests/test_operational_state.py
           tests/test_control_gateway.py
           tests/test_authoritative_completion.py
+          tests/test_production_execution.py
           -q
