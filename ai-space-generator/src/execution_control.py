@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from hashlib import sha256
+import json
 from typing import Iterable
 
 
@@ -83,6 +85,12 @@ class CompletionClaim(StrEnum):
 
 
 @dataclass(frozen=True)
+class AuthorityStamp:
+    ref: str
+    version: str
+
+
+@dataclass(frozen=True)
 class EvidenceReceipt:
     evidence_id: str
     kind: EvidenceKind
@@ -101,6 +109,7 @@ class ActionProposal:
     action_name: str
     expected_state_delta: str = ""
     required_authority_refs: tuple[str, ...] = ()
+    authority_snapshot_fingerprint: str = ""
     authorization_scope: str = ""
     idempotency_key: str = ""
     rollback_available: bool = False
@@ -115,6 +124,7 @@ class ExecutionRecord:
     goal_valid: bool
     acceptance_criteria: tuple[str, ...]
     authority_refs: tuple[str, ...] = ()
+    authority_stamps: tuple[AuthorityStamp, ...] = ()
     required_action_authority_refs: tuple[str, ...] = ()
     required_action_tags: tuple[str, ...] = ()
     forbidden_action_tags: tuple[str, ...] = ()
@@ -179,6 +189,20 @@ _PERSISTENCE_ACTIONS = {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}
 
 def _normalize_tags(values: Iterable[str]) -> set[str]:
     return {value.strip().upper() for value in values if value.strip()}
+
+
+def authority_snapshot_fingerprint(
+    stamps: Iterable[AuthorityStamp],
+    required_refs: Iterable[str],
+) -> str:
+    required = sorted({ref.strip() for ref in required_refs if ref.strip()})
+    by_ref = {stamp.ref.strip(): stamp.version.strip() for stamp in stamps if stamp.ref.strip()}
+    if any(not by_ref.get(ref) for ref in required):
+        return ""
+    payload = [(ref, by_ref[ref]) for ref in required]
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _passing_evidence_kinds(
@@ -255,6 +279,22 @@ def _validate_task_action_binding(
     return ControlDecision(True, "TASK_ACTION_BINDING_VALID")
 
 
+def _validate_authority_snapshot(
+    record: ExecutionRecord,
+    proposal: ActionProposal,
+) -> ControlDecision:
+    task_required = tuple(sorted(set(record.required_action_authority_refs)))
+    if not task_required:
+        return ControlDecision(True, "AUTHORITY_SNAPSHOT_NOT_REQUIRED")
+
+    expected = authority_snapshot_fingerprint(record.authority_stamps, task_required)
+    if not expected:
+        return ControlDecision(False, "AUTHORITY_VERSION_UNRESOLVED", FailureStage.AUTHORITY)
+    if proposal.authority_snapshot_fingerprint != expected:
+        return ControlDecision(False, "AUTHORITY_SNAPSHOT_MISMATCH", FailureStage.AUTHORITY)
+    return ControlDecision(True, "AUTHORITY_SNAPSHOT_BOUND")
+
+
 def admit_action(
     record: ExecutionRecord,
     proposal: ActionProposal,
@@ -288,6 +328,11 @@ def admit_action(
     if missing_authority:
         blocked = replace(record, phase=RunPhase.BLOCKED, action=proposal, failure_stage=FailureStage.AUTHORITY, failure_code="AUTHORITY_REF_UNRESOLVED")
         return blocked, ControlDecision(False, "AUTHORITY_REF_UNRESOLVED", FailureStage.AUTHORITY)
+
+    snapshot = _validate_authority_snapshot(record, proposal)
+    if not snapshot.allowed:
+        blocked = replace(record, phase=RunPhase.BLOCKED, action=proposal, failure_stage=snapshot.failed_at, failure_code=snapshot.code)
+        return blocked, snapshot
 
     if requires_hao_authorization(proposal.externality):
         allowed_scopes = {scope.strip() for scope in hao_authorized_scopes if scope.strip()}
