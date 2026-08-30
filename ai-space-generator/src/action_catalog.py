@@ -10,6 +10,7 @@ from .execution_control import (
     ControlDecision,
     ExecutionRecord,
     FailureStage,
+    authority_snapshot_fingerprint,
 )
 
 
@@ -115,6 +116,16 @@ def resolve_model_intent(
             ControlDecision(False, "CAPABILITY_BINDING_MISMATCH", FailureStage.ROUTING),
         )
 
+    snapshot = authority_snapshot_fingerprint(
+        record.authority_stamps,
+        record.required_action_authority_refs,
+    )
+    if record.required_action_authority_refs and not snapshot:
+        return ActionResolution(
+            None,
+            ControlDecision(False, "AUTHORITY_VERSION_UNRESOLVED", FailureStage.AUTHORITY),
+        )
+
     action_id = f"{record.run_id}:A{sequence:04d}:{binding.binding_id}"
     idempotency_key = ""
     if binding.archetype in {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}:
@@ -129,6 +140,7 @@ def resolve_model_intent(
         action_name=binding.action_name,
         expected_state_delta=intent.expected_state_delta,
         required_authority_refs=record.required_action_authority_refs,
+        authority_snapshot_fingerprint=snapshot,
         authorization_scope=_authorization_scope(binding, intent.authorization_target),
         idempotency_key=idempotency_key,
         rollback_available=binding.rollback_available,
