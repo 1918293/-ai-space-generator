@@ -116,15 +116,17 @@ def resolve_model_intent(
             ControlDecision(False, "CAPABILITY_BINDING_MISMATCH", FailureStage.ROUTING),
         )
 
-    snapshot = authority_snapshot_fingerprint(
-        record.authority_stamps,
-        record.required_action_authority_refs,
-    )
-    if record.required_action_authority_refs and not snapshot:
-        return ActionResolution(
-            None,
-            ControlDecision(False, "AUTHORITY_VERSION_UNRESOLVED", FailureStage.AUTHORITY),
+    snapshot = ""
+    if record.required_action_authority_refs:
+        snapshot = authority_snapshot_fingerprint(
+            record.authority_stamps,
+            record.required_action_authority_refs,
         )
+        if not snapshot:
+            return ActionResolution(
+                None,
+                ControlDecision(False, "AUTHORITY_VERSION_UNRESOLVED", FailureStage.AUTHORITY),
+            )
 
     action_id = f"{record.run_id}:A{sequence:04d}:{binding.binding_id}"
     idempotency_key = ""
