@@ -41,4 +41,5 @@ jobs:
           tests/test_action_catalog.py
           tests/test_idempotent_broker.py
           tests/test_operational_state.py
+          tests/test_control_gateway.py
           -q
