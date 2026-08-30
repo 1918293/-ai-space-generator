@@ -141,6 +141,21 @@ def _post_effect_failure(
     )
 
 
+def _ambiguous_effect_from_executing(
+    executing: ExecutionRecord,
+    *,
+    code: str,
+    mechanism: str,
+) -> ExecutionRecord:
+    observed_unknown = transition(executing, RunPhase.OBSERVED)
+    return mark_unsynced(
+        observed_unknown,
+        stage=FailureStage.PERSISTENCE,
+        code=code,
+        mechanism=mechanism,
+    )
+
+
 def apply_tool_outcome(
     executing: ExecutionRecord,
     proposal: ActionProposal,
@@ -150,15 +165,31 @@ def apply_tool_outcome(
         return executing, ControlDecision(False, "TOOL_OUTCOME_REQUIRES_EXECUTING", FailureStage.PLAN)
 
     if not tool_outcome.success:
+        code = tool_outcome.error_code or "TOOL_EXECUTION_FAILED"
+        mechanism = code.lower()
+        if action_requires_persistence_evidence(proposal) and tool_outcome.failure_stage == FailureStage.PERSISTENCE:
+            unsynced = _ambiguous_effect_from_executing(
+                executing,
+                code=code,
+                mechanism=mechanism,
+            )
+            return unsynced, ControlDecision(False, unsynced.failure_code, unsynced.failure_stage)
         failed = record_failure(
             executing,
             stage=tool_outcome.failure_stage,
-            code=tool_outcome.error_code or "TOOL_EXECUTION_FAILED",
-            mechanism=(tool_outcome.error_code or "tool-execution-failed").lower(),
+            code=code,
+            mechanism=mechanism,
         )
         return failed, ControlDecision(False, failed.failure_code, failed.failure_stage)
 
     if not tool_outcome.receipt_id.strip() or not tool_outcome.source.strip():
+        if action_requires_persistence_evidence(proposal):
+            unsynced = _ambiguous_effect_from_executing(
+                executing,
+                code="TOOL_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",
+                mechanism="missing-tool-receipt-effect-unknown",
+            )
+            return unsynced, ControlDecision(False, unsynced.failure_code, unsynced.failure_stage)
         failed = record_failure(
             executing,
             stage=FailureStage.TOOL_OUTPUT,
