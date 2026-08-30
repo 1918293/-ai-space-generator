@@ -90,12 +90,14 @@ class Verifier:
                 EvidenceKind.VERIFICATION_PASS,
                 True,
                 "fake-verifier",
+                claim_scope=proposal.action_id,
             ),
             EvidenceReceipt(
                 f"GATE-{self.calls}",
                 EvidenceKind.ACCEPTANCE_GATE_PASS,
                 True,
                 "fake-verifier",
+                claim_scope=proposal.action_id,
             ),
         ]
         if proposal.archetype in {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}:
@@ -105,6 +107,7 @@ class Verifier:
                     EvidenceKind.STATE_READBACK,
                     True,
                     "fake-provider-readback",
+                    claim_scope=proposal.action_id,
                 )
             )
         return VerificationOutcome(True, receipts=tuple(receipts))
@@ -148,9 +151,7 @@ def test_temporal_e2e_read_action_reaches_closed_from_real_worker():
 
 
 def test_temporal_e2e_external_action_waits_for_signal_then_executes_once():
-    result, broker, verifier = asyncio.run(
-        run_workflow(external_action(), authorize=True)
-    )
+    result, broker, verifier = asyncio.run(run_workflow(external_action(), authorize=True))
     assert result.record.phase == RunPhase.CLOSED
     assert result.completion.allowed is True
     assert broker.calls == 1
