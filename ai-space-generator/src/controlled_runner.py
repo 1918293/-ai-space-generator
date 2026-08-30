@@ -15,12 +15,21 @@ from .execution_control import (
     action_requires_persistence_evidence,
     add_evidence,
     admit_action,
+    block_run,
     can_claim,
     close_run,
     mark_unsynced,
     record_failure,
     transition,
 )
+
+
+@dataclass(frozen=True)
+class AuthorityPreflightOutcome:
+    passed: bool
+    current_fingerprint: str = ""
+    source: str = ""
+    error_code: str = ""
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,10 @@ class ControlledRunResult:
     completion: ControlDecision
 
 
+class AuthorityPreflight(Protocol):
+    def verify_current(self, proposal: ActionProposal) -> AuthorityPreflightOutcome: ...
+
+
 class ToolExecutor(Protocol):
     def execute(self, proposal: ActionProposal) -> ToolOutcome: ...
 
@@ -58,6 +71,51 @@ class OutcomeVerifier(Protocol):
         proposal: ActionProposal,
         tool_outcome: ToolOutcome,
     ) -> VerificationOutcome: ...
+
+
+def apply_authority_preflight(
+    admitted: ExecutionRecord,
+    proposal: ActionProposal,
+    preflight: AuthorityPreflightOutcome,
+) -> tuple[ExecutionRecord, ControlDecision]:
+    if admitted.phase != RunPhase.ADMITTED:
+        return admitted, ControlDecision(False, "AUTHORITY_PREFLIGHT_REQUIRES_ADMITTED", FailureStage.PLAN)
+    expected = proposal.authority_snapshot_fingerprint.strip()
+    if not expected:
+        return admitted, ControlDecision(True, "AUTHORITY_PREFLIGHT_NOT_REQUIRED")
+    if not preflight.passed:
+        blocked = block_run(
+            admitted,
+            stage=FailureStage.AUTHORITY,
+            code=preflight.error_code or "AUTHORITY_PREFLIGHT_FAILED",
+        )
+        return blocked, ControlDecision(False, blocked.failure_code, FailureStage.AUTHORITY)
+    if not preflight.current_fingerprint.strip() or preflight.current_fingerprint != expected:
+        blocked = block_run(
+            admitted,
+            stage=FailureStage.AUTHORITY,
+            code="AUTHORITY_CHANGED_SINCE_ADMISSION",
+        )
+        return blocked, ControlDecision(False, blocked.failure_code, FailureStage.AUTHORITY)
+    if not preflight.source.strip():
+        blocked = block_run(
+            admitted,
+            stage=FailureStage.AUTHORITY,
+            code="AUTHORITY_PREFLIGHT_WITHOUT_SOURCE",
+        )
+        return blocked, ControlDecision(False, blocked.failure_code, FailureStage.AUTHORITY)
+
+    checked = add_evidence(
+        admitted,
+        EvidenceReceipt(
+            evidence_id=f"AUTHORITY-PREFLIGHT:{proposal.action_id}",
+            kind=EvidenceKind.AUTHORITY_SNAPSHOT,
+            passed=True,
+            source=preflight.source,
+            claim_scope=proposal.action_id,
+        ),
+    )
+    return checked, ControlDecision(True, "AUTHORITY_CURRENT_AT_EXECUTION")
 
 
 def _post_effect_failure(
@@ -177,6 +235,7 @@ def run_controlled_action(
     *,
     executor: ToolExecutor,
     verifier: OutcomeVerifier,
+    authority_preflight: AuthorityPreflight | None = None,
     hao_authorized_scopes: Iterable[str] = (),
     close_when_complete: bool = True,
 ) -> ControlledRunResult:
@@ -191,6 +250,35 @@ def run_controlled_action(
             admission,
             ControlDecision(False, "ACTION_NOT_ADMITTED", admission.failed_at),
         )
+
+    if proposal.authority_snapshot_fingerprint:
+        if authority_preflight is None:
+            blocked = block_run(
+                admitted,
+                stage=FailureStage.AUTHORITY,
+                code="AUTHORITY_PREFLIGHT_REQUIRED",
+            )
+            return ControlledRunResult(
+                blocked,
+                admission,
+                ControlDecision(False, blocked.failure_code, FailureStage.AUTHORITY),
+            )
+        try:
+            preflight = authority_preflight.verify_current(proposal)
+        except Exception as exc:
+            blocked = block_run(
+                admitted,
+                stage=FailureStage.AUTHORITY,
+                code=f"AUTHORITY_PREFLIGHT_EXCEPTION:{type(exc).__name__}",
+            )
+            return ControlledRunResult(
+                blocked,
+                admission,
+                ControlDecision(False, blocked.failure_code, FailureStage.AUTHORITY),
+            )
+        admitted, current_decision = apply_authority_preflight(admitted, proposal, preflight)
+        if not current_decision.allowed:
+            return ControlledRunResult(admitted, admission, current_decision)
 
     executing = transition(admitted, RunPhase.EXECUTING)
 
