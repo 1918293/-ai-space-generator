@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable, Protocol
 
 from .execution_control import (
+    ActionArchetype,
     ActionProposal,
     CompletionClaim,
     ControlDecision,
@@ -12,10 +13,12 @@ from .execution_control import (
     ExecutionRecord,
     FailureStage,
     RunPhase,
+    action_requires_persistence_evidence,
     add_evidence,
     admit_action,
     can_claim,
     close_run,
+    mark_unsynced,
     record_failure,
     transition,
 )
@@ -35,6 +38,7 @@ class VerificationOutcome:
     passed: bool
     receipts: tuple[EvidenceReceipt, ...] = ()
     error_code: str = ""
+    failure_stage: FailureStage = FailureStage.VERIFICATION
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,35 @@ class OutcomeVerifier(Protocol):
         proposal: ActionProposal,
         tool_outcome: ToolOutcome,
     ) -> VerificationOutcome: ...
+
+
+def _post_effect_failure(
+    record: ExecutionRecord,
+    proposal: ActionProposal,
+    *,
+    stage: FailureStage,
+    code: str,
+    mechanism: str,
+) -> ExecutionRecord:
+    """Preserve the fact that a mutation/publication may already exist externally.
+
+    A successful side-effecting tool call followed by readback/verification failure
+    is not equivalent to 'nothing happened'. It becomes UNSYNCED so a retry cannot
+    silently duplicate the external effect.
+    """
+    if action_requires_persistence_evidence(proposal):
+        return mark_unsynced(
+            record,
+            stage=stage,
+            code=code,
+            mechanism=mechanism,
+        )
+    return record_failure(
+        record,
+        stage=stage,
+        code=code,
+        mechanism=mechanism,
+    )
 
 
 def run_controlled_action(
@@ -142,8 +175,9 @@ def run_controlled_action(
     try:
         verification = verifier.verify(observed, proposal, tool_outcome)
     except Exception as exc:
-        failed = record_failure(
+        failed = _post_effect_failure(
             observed,
+            proposal,
             stage=FailureStage.VERIFICATION,
             code=f"VERIFIER_EXCEPTION:{type(exc).__name__}",
             mechanism="verifier-exception",
@@ -155,9 +189,10 @@ def run_controlled_action(
         )
 
     if not verification.passed:
-        failed = record_failure(
+        failed = _post_effect_failure(
             observed,
-            stage=FailureStage.VERIFICATION,
+            proposal,
+            stage=verification.failure_stage,
             code=verification.error_code or "VERIFICATION_FAILED",
             mechanism=(verification.error_code or "verification-failed").lower(),
         )
@@ -173,8 +208,9 @@ def run_controlled_action(
 
     passing_kinds = {receipt.kind for receipt in verified.evidence if receipt.passed}
     if EvidenceKind.VERIFICATION_PASS not in passing_kinds:
-        failed = record_failure(
+        failed = _post_effect_failure(
             verified,
+            proposal,
             stage=FailureStage.VERIFICATION,
             code="VERIFIER_DID_NOT_PRODUCE_VERIFICATION_RECEIPT",
             mechanism="missing-verification-receipt",
@@ -183,6 +219,19 @@ def run_controlled_action(
             failed,
             admission,
             ControlDecision(False, failed.failure_code, failed.failure_stage),
+        )
+
+    if action_requires_persistence_evidence(proposal) and EvidenceKind.STATE_READBACK not in passing_kinds:
+        unsynced = mark_unsynced(
+            verified,
+            stage=FailureStage.PERSISTENCE,
+            code="MUTATION_WITHOUT_STATE_READBACK",
+            mechanism="missing-state-readback",
+        )
+        return ControlledRunResult(
+            unsynced,
+            admission,
+            ControlDecision(False, unsynced.failure_code, unsynced.failure_stage),
         )
 
     verified = transition(verified, RunPhase.VERIFIED)
