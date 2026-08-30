@@ -6,6 +6,7 @@ from src.execution_control import (
     ActionProposal,
     CompletionClaim,
     EvidenceKind,
+    EvidenceOrigin,
     EvidenceReceipt,
     ExecutionRecord,
     FailureStage,
@@ -18,6 +19,7 @@ from src.execution_control import (
     close_run,
     mark_unsynced,
     record_failure,
+    record_hao_acceptance,
     render_header,
     transition,
 )
@@ -67,13 +69,15 @@ def mutate_action(**overrides):
     return ActionProposal(**values)
 
 
-def receipt(kind, evidence_id=None, scope=""):
+def receipt(kind, evidence_id=None, scope="", *, origin=EvidenceOrigin.RUNTIME, gate_id=""):
     return EvidenceReceipt(
-        evidence_id=evidence_id or f"E-{kind.value}",
+        evidence_id=evidence_id or f"E-{kind.value}-{gate_id or 'GENERIC'}",
         kind=kind,
         passed=True,
         source="direct-test",
         claim_scope=scope,
+        origin=origin,
+        gate_id=gate_id,
     )
 
 
@@ -170,9 +174,7 @@ def test_forbidden_action_tag_blocks_even_if_required_tags_are_spoofed_together(
         required_action_tags=("LOCAL_EDIT",),
         forbidden_action_tags=("FULL_GENERATION",),
     )
-    contradictory = mutate_action(
-        assurance_tags=("LOCAL_EDIT", "FULL_GENERATION"),
-    )
+    contradictory = mutate_action(assurance_tags=("LOCAL_EDIT", "FULL_GENERATION"))
     _, decision = admit_action(record, contradictory)
     assert decision.allowed is False
     assert decision.code == "FORBIDDEN_ACTION_TAGS:FULL_GENERATION"
@@ -204,10 +206,12 @@ def test_persistence_requires_write_readback_and_verification_evidence():
     assert can_claim(record, CompletionClaim.PERSISTED).allowed is True
 
 
-def test_hao_acceptance_is_distinct_from_technical_verification():
+def test_hao_acceptance_is_distinct_and_cannot_be_forged_by_non_hao_origin():
     record = add_evidence(base_record(), receipt(EvidenceKind.VERIFICATION_PASS))
     assert can_claim(record, CompletionClaim.ACCEPTED).allowed is False
-    record = add_evidence(record, receipt(EvidenceKind.HAO_ACCEPTANCE))
+    with pytest.raises(ValueError, match="HAO_ACCEPTANCE_REQUIRES_HAO_ORIGIN"):
+        add_evidence(record, receipt(EvidenceKind.HAO_ACCEPTANCE))
+    record = record_hao_acceptance(record, evidence_id="HAO-A-1", source_event_id="USER-EVENT-1")
     assert can_claim(record, CompletionClaim.ACCEPTED).allowed is True
 
 
@@ -215,6 +219,47 @@ def test_read_completion_requires_verification_and_acceptance_gate():
     record = add_evidence(base_record(), receipt(EvidenceKind.VERIFICATION_PASS))
     assert can_claim(record, CompletionClaim.COMPLETED).allowed is False
     record = add_evidence(record, receipt(EvidenceKind.ACCEPTANCE_GATE_PASS))
+    assert can_claim(record, CompletionClaim.COMPLETED).allowed is True
+
+
+def test_required_acceptance_gates_are_each_individually_required():
+    action = read_action()
+    record = base_record(
+        action=action,
+        required_acceptance_gate_ids=("PIXEL_QA", "VISUAL_QA"),
+    )
+    record = add_evidence(record, receipt(EvidenceKind.VERIFICATION_PASS, scope=action.action_id))
+    record = add_evidence(
+        record,
+        receipt(EvidenceKind.ACCEPTANCE_GATE_PASS, scope=action.action_id, gate_id="PIXEL_QA"),
+    )
+    decision = can_claim(record, CompletionClaim.COMPLETED)
+    assert decision.allowed is False
+    assert decision.code == "MISSING_ACCEPTANCE_GATES:VISUAL_QA"
+    record = add_evidence(
+        record,
+        receipt(EvidenceKind.ACCEPTANCE_GATE_PASS, scope=action.action_id, gate_id="VISUAL_QA"),
+    )
+    assert can_claim(record, CompletionClaim.COMPLETED).allowed is True
+
+
+def test_generic_gate_cannot_substitute_for_named_required_gate():
+    action = read_action()
+    record = base_record(action=action, required_acceptance_gate_ids=("SOURCE_AUTHORITY",))
+    record = add_evidence(record, receipt(EvidenceKind.VERIFICATION_PASS, scope=action.action_id))
+    record = add_evidence(record, receipt(EvidenceKind.ACCEPTANCE_GATE_PASS, scope=action.action_id))
+    decision = can_claim(record, CompletionClaim.COMPLETED)
+    assert decision.allowed is False
+    assert decision.code == "MISSING_ACCEPTANCE_GATES:SOURCE_AUTHORITY"
+
+
+def test_task_requiring_hao_acceptance_cannot_close_on_technical_gates_alone():
+    action = read_action()
+    record = base_record(action=action, hao_acceptance_required=True)
+    record = add_evidence(record, receipt(EvidenceKind.VERIFICATION_PASS, scope=action.action_id))
+    record = add_evidence(record, receipt(EvidenceKind.ACCEPTANCE_GATE_PASS, scope=action.action_id))
+    assert can_claim(record, CompletionClaim.COMPLETED).code == "MISSING_HAO_ACCEPTANCE"
+    record = record_hao_acceptance(record, evidence_id="HAO-A-2", source_event_id="USER-EVENT-2")
     assert can_claim(record, CompletionClaim.COMPLETED).allowed is True
 
 
@@ -252,15 +297,7 @@ def test_duplicate_evidence_id_is_idempotent_only_when_content_is_identical():
     record = add_evidence(base_record(), first)
     assert add_evidence(record, first) == record
     with pytest.raises(ValueError, match="EVIDENCE_ID_CONFLICT"):
-        add_evidence(
-            record,
-            EvidenceReceipt(
-                "E-1",
-                EvidenceKind.STATE_READBACK,
-                True,
-                "other-source",
-            ),
-        )
+        add_evidence(record, EvidenceReceipt("E-1", EvidenceKind.STATE_READBACK, True, "other-source"))
 
 
 def test_close_run_is_a_completion_firewall():
@@ -301,12 +338,7 @@ def test_unsynced_state_also_blocks_same_mechanism_retry_without_delta():
     observed = base_record(phase=RunPhase.OBSERVED, action=mutate_action())
     unsynced = mark_unsynced(observed, code="READBACK_MISMATCH", mechanism="readback-mismatch")
     assert unsynced.phase == RunPhase.UNSYNCED
-    decision = can_retry(
-        unsynced,
-        mechanism="readback-mismatch",
-        material_delta=False,
-        retry_basis="",
-    )
+    decision = can_retry(unsynced, mechanism="readback-mismatch", material_delta=False, retry_basis="")
     assert decision.allowed is False
     assert decision.code == "NO_DELTA_RETRY_BLOCKED"
 
@@ -318,12 +350,7 @@ def test_retry_is_allowed_only_when_material_delta_has_a_basis():
         code="INTER_ACTION_ID_NOT_FOUND",
         mechanism="id-binding",
     )
-    missing_basis = can_retry(
-        failed,
-        mechanism="id-binding",
-        material_delta=True,
-        retry_basis="",
-    )
+    missing_basis = can_retry(failed, mechanism="id-binding", material_delta=True, retry_basis="")
     assert missing_basis.allowed is False
 
     changed = can_retry(
