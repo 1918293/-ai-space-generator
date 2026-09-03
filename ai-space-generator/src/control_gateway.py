@@ -278,7 +278,13 @@ class PreModelContextGateway:
             return PreModelAdmission(False, "PRE_MODEL_TASK_MISMATCH")
         if resolution.operational_version != state.version:
             return PreModelAdmission(False, "PRE_MODEL_STALE_OPERATIONAL_CONTEXT")
-        if not _normalized_refs(resolution.authority_refs):
+
+        try:
+            authority_refs = _normalized_refs(resolution.authority_refs)
+            _normalized_refs(resolution.regression_refs)
+        except ValueError as exc:
+            return PreModelAdmission(False, str(exc))
+        if not authority_refs:
             return PreModelAdmission(False, "PRE_MODEL_AUTHORITY_REFS_REQUIRED")
         if not resolution.existing_work_lookup_complete:
             return PreModelAdmission(False, "PRE_MODEL_EXISTING_WORK_LOOKUP_REQUIRED")
