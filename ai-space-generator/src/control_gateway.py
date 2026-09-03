@@ -157,11 +157,25 @@ class PreModelContextReceipt:
 
 
 @dataclass(frozen=True)
+class VerifiedModelInput:
+    """Structured first-model input with trusted context separated from Hao text.
+
+    A concrete Agents/Responses adapter must map `receipt` to its trusted model
+    context/instructions channel and `user_text` to the user channel. Keeping
+    these fields separate avoids reducing the boundary back to one spoofable
+    concatenated prompt string.
+    """
+
+    receipt: PreModelContextReceipt
+    user_text: str
+
+
+@dataclass(frozen=True)
 class PreModelAdmission:
     allowed: bool
     code: str
     receipt: PreModelContextReceipt | None = None
-    model_input: str = ""
+    model_input: VerifiedModelInput | None = None
 
 
 @dataclass(frozen=True)
@@ -171,7 +185,7 @@ class PreModelInvocationResult:
 
 
 class ModelBoundary(Protocol):
-    def invoke(self, model_input: str) -> object: ...
+    def invoke(self, model_input: VerifiedModelInput) -> object: ...
 
 
 def explicit_checkpoint_cue(text: str) -> str:
@@ -222,22 +236,11 @@ def _mint_pre_model_receipt(
     )
 
 
-def _hydrate_model_input(receipt: PreModelContextReceipt, user_text: str) -> str:
-    verified_context = {
-        "checkpoint_id": receipt.checkpoint_id,
-        "task": receipt.task,
-        "operational_version": receipt.operational_version,
-        "authority_refs": receipt.authority_refs,
-        "regression_refs": receipt.regression_refs,
-        "reuse_disposition": receipt.reuse_disposition,
-        "context_fingerprint": receipt.context_fingerprint,
-    }
-    return (
-        "HAO_VERIFIED_PRE_MODEL_CONTEXT\n"
-        + json.dumps(verified_context, ensure_ascii=False, sort_keys=True)
-        + "\nHAO_USER_INPUT\n"
-        + user_text.strip()
-    )
+def _hydrate_model_input(
+    receipt: PreModelContextReceipt,
+    user_text: str,
+) -> VerifiedModelInput:
+    return VerifiedModelInput(receipt=receipt, user_text=user_text.strip())
 
 
 class PreModelContextGateway:
@@ -318,4 +321,8 @@ def invoke_after_pre_model_admission(
     admission = gateway.admit(state, request)
     if not admission.allowed:
         return PreModelInvocationResult(admission)
+    if admission.model_input is None:
+        return PreModelInvocationResult(
+            PreModelAdmission(False, "PRE_MODEL_HYDRATION_MISSING")
+        )
     return PreModelInvocationResult(admission, model.invoke(admission.model_input))
