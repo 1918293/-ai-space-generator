@@ -98,6 +98,7 @@ class ControlPlaneGateway:
 
 
 _CHECKPOINT_CUE = re.compile(r"(?<![A-Z0-9_])R(\d+)(?![A-Z0-9_])", re.IGNORECASE)
+_VALID_RESOLVED_CHECKPOINT = re.compile(r"R\d+\Z")
 _ALLOWED_REUSE_DISPOSITIONS = frozenset(
     {
         "REUSE",
@@ -275,6 +276,10 @@ class PreModelContextGateway:
             return PreModelAdmission(False, "PRE_MODEL_CURRENT_UNRESOLVED")
 
         resolved_checkpoint = resolution.checkpoint_id.strip().upper()
+        if not resolved_checkpoint:
+            return PreModelAdmission(False, "PRE_MODEL_CHECKPOINT_REQUIRED")
+        if _VALID_RESOLVED_CHECKPOINT.fullmatch(resolved_checkpoint) is None:
+            return PreModelAdmission(False, "PRE_MODEL_CHECKPOINT_INVALID")
         if checkpoint_cue and resolved_checkpoint != checkpoint_cue:
             return PreModelAdmission(False, "PRE_MODEL_CHECKPOINT_MISMATCH")
         if resolution.task.strip() != state.task:
