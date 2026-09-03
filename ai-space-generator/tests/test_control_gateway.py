@@ -242,6 +242,43 @@ def test_pre_model_unresolved_current_blocks_before_model_or_web_call():
     assert model.web_calls == 0
 
 
+def test_ordinary_continue_blank_resolved_checkpoint_blocks_before_model_or_web_call():
+    resolver = StaticPreModelResolver(valid_r98_resolution(checkpoint_id=""))
+    gateway = PreModelContextGateway(resolver)
+    model = CountingModelBoundary()
+
+    result = invoke_after_pre_model_admission(
+        gateway,
+        pre_model_state(),
+        PreModelContextRequest("Auto > 繼續", CommandActor.USER),
+        model,
+    )
+
+    assert resolver.last_checkpoint_cue == ""
+    assert result.admission.allowed is False
+    assert result.admission.code == "PRE_MODEL_CHECKPOINT_REQUIRED"
+    assert model.model_calls == 0
+    assert model.web_calls == 0
+
+
+def test_ordinary_continue_invalid_resolved_checkpoint_blocks_before_model_or_web_call():
+    resolver = StaticPreModelResolver(valid_r98_resolution(checkpoint_id="CURRENT"))
+    gateway = PreModelContextGateway(resolver)
+    model = CountingModelBoundary()
+
+    result = invoke_after_pre_model_admission(
+        gateway,
+        pre_model_state(),
+        PreModelContextRequest("continue", CommandActor.USER),
+        model,
+    )
+
+    assert result.admission.allowed is False
+    assert result.admission.code == "PRE_MODEL_CHECKPOINT_INVALID"
+    assert model.model_calls == 0
+    assert model.web_calls == 0
+
+
 def test_pre_model_checkpoint_mismatch_blocks_before_model_or_web_call():
     resolver = StaticPreModelResolver(valid_r98_resolution(checkpoint_id="R100"))
     gateway = PreModelContextGateway(resolver)
