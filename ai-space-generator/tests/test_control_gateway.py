@@ -204,6 +204,25 @@ def test_explicit_checkpoint_cue_is_resolved_from_natural_r98_input():
     assert explicit_checkpoint_cue("continue without explicit checkpoint") == ""
 
 
+def test_ambiguous_checkpoint_cues_fail_before_resolver_or_model():
+    resolver = StaticPreModelResolver(valid_r98_resolution())
+    gateway = PreModelContextGateway(resolver)
+    model = CountingModelBoundary()
+
+    result = invoke_after_pre_model_admission(
+        gateway,
+        pre_model_state(),
+        PreModelContextRequest("compare R98 and R99", CommandActor.USER),
+        model,
+    )
+
+    assert result.admission.allowed is False
+    assert result.admission.code == "AMBIGUOUS_CHECKPOINT_CUE"
+    assert resolver.calls == 0
+    assert model.model_calls == 0
+    assert model.web_calls == 0
+
+
 def test_pre_model_unresolved_current_blocks_before_model_or_web_call():
     resolver = StaticPreModelResolver(None)
     gateway = PreModelContextGateway(resolver)
@@ -281,7 +300,27 @@ def test_pre_model_missing_regression_lookup_blocks_before_first_model_call():
     assert model.web_calls == 0
 
 
-def test_pre_model_verified_current_is_hydrated_before_first_model_call():
+def test_duplicate_pre_model_reference_is_typed_block_not_exception():
+    resolver = StaticPreModelResolver(
+        valid_r98_resolution(authority_refs=("HANDOFF:R98", "HANDOFF:R98"))
+    )
+    gateway = PreModelContextGateway(resolver)
+    model = CountingModelBoundary()
+
+    result = invoke_after_pre_model_admission(
+        gateway,
+        pre_model_state(),
+        PreModelContextRequest("Auto Exp > R98", CommandActor.USER),
+        model,
+    )
+
+    assert result.admission.allowed is False
+    assert result.admission.code == "DUPLICATE_PRE_MODEL_REFERENCE"
+    assert model.model_calls == 0
+    assert model.web_calls == 0
+
+
+def test_pre_model_verified_current_is_structurally_hydrated_before_first_model_call():
     resolver = StaticPreModelResolver(valid_r98_resolution())
     gateway = PreModelContextGateway(resolver)
     model = CountingModelBoundary()
@@ -299,15 +338,19 @@ def test_pre_model_verified_current_is_hydrated_before_first_model_call():
     assert result.admission.receipt.checkpoint_id == "R98"
     assert result.admission.receipt.operational_version == 98
     assert result.admission.receipt.context_fingerprint
+    assert result.admission.model_input is not None
     assert model.model_calls == 1
     assert model.web_calls == 1
     first_input = model.inputs[0]
-    assert first_input.startswith("HAO_VERIFIED_PRE_MODEL_CONTEXT\n")
-    assert '"checkpoint_id": "R98"' in first_input
-    assert '"operational_version": 98' in first_input
-    assert "HANDOFF:R98" in first_input
-    assert "RUN-20260904-PREFLIGHT-FIELD-R1" in first_input
-    assert first_input.endswith("HAO_USER_INPUT\nAuto Exp > R98")
+    assert first_input.receipt == result.admission.receipt
+    assert first_input.receipt.authority_refs == (
+        "HANDOFF:R98",
+        "REQUIREMENTS:RV-011",
+    )
+    assert first_input.receipt.regression_refs == (
+        "RUN-20260904-PREFLIGHT-FIELD-R1",
+    )
+    assert first_input.user_text == "Auto Exp > R98"
 
 
 def test_pre_model_non_user_actor_cannot_self_author_context_receipt():
