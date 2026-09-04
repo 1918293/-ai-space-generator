@@ -231,3 +231,41 @@ def test_authoritative_completion_is_idempotent_and_conflict_safe_across_restart
     )
     assert conflict.committed is False
     assert conflict.code == "AUTHORITATIVE_COMPLETION_CONFLICT"
+
+
+def test_mcp_run_ownership_is_shared_durable_and_identity_bound(tmp_path):
+    runtime = bundle(tmp_path)
+    first = runtime.run_registry.register(
+        workflow_id="WORKFLOW-1",
+        owner_subject="hao-subject",
+        operational_version=9,
+    )
+    assert first.workflow_id == "WORKFLOW-1"
+    assert first.operational_version == 9
+
+    restarted = bundle(tmp_path)
+    owned = restarted.run_registry.require_owned(
+        workflow_id="WORKFLOW-1",
+        owner_subject="hao-subject",
+    )
+    assert owned == first
+
+    duplicate = restarted.run_registry.register(
+        workflow_id="WORKFLOW-1",
+        owner_subject="hao-subject",
+        operational_version=9,
+    )
+    assert duplicate == first
+
+    with pytest.raises(PermissionError, match="CONTROLLED_RUN_OWNER_MISMATCH"):
+        restarted.run_registry.require_owned(
+            workflow_id="WORKFLOW-1",
+            owner_subject="other-subject",
+        )
+
+    with pytest.raises(ValueError, match="MCP_RUN_IDENTITY_CONFLICT"):
+        restarted.run_registry.register(
+            workflow_id="WORKFLOW-1",
+            owner_subject="hao-subject",
+            operational_version=10,
+        )
