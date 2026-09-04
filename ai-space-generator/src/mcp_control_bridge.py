@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import sqlite3
-from typing import Protocol
+from typing import Mapping, Protocol
 import uuid
 
 from .action_catalog import ModelActionIntent
 from .control_gateway import ModelIngressRequest
-from .execution_control import ExecutionRecord, RunPhase
+from .execution_control import RunPhase
 from .operational_state import ActiveOperationalState
 from .production_execution import PendingControlledRun, ProductionExecutionService
 
@@ -25,13 +25,7 @@ class MCPPrincipal:
 
 
 class HaoMCPIdentityPolicy:
-    """Application policy on top of OAuth token validation.
-
-    OAuth proves who the user is and what scopes the token carries. This policy
-    narrows that further to the single Hao identity authorized for this private
-    control plane. It is intentionally separate from the OAuth verifier so an
-    established identity provider can be used rather than inventing auth here.
-    """
+    """Application policy on top of OAuth token validation."""
 
     def __init__(self, expected_subject: str) -> None:
         expected_subject = expected_subject.strip()
@@ -75,11 +69,7 @@ class MCPRunRegistry(Protocol):
 
 
 class SQLiteMCPRunRegistry:
-    """Reference durable ownership binding for single-node/test use.
-
-    Production multi-instance deployments must use a transactional shared
-    registry such as Postgres. Workflow IDs alone are never authorization.
-    """
+    """Reference durable ownership binding for single-node/test use."""
 
     def __init__(self, path: str) -> None:
         self._path = path
@@ -170,6 +160,12 @@ class MCPFinalizeView:
     phase: str
 
 
+def _argument_pairs(arguments: Mapping[str, str] | None) -> tuple[tuple[str, str], ...]:
+    if not arguments:
+        return ()
+    return tuple((str(key), str(value)) for key, value in arguments.items())
+
+
 class MCPControlBridge:
     """Stateless authenticated bridge from MCP tools into ProductionExecutionService."""
 
@@ -203,6 +199,7 @@ class MCPControlBridge:
         binding_id: str,
         expected_state_delta: str = "",
         authorization_target: str = "",
+        arguments: Mapping[str, str] | None = None,
     ) -> MCPSubmissionView:
         self._identity_policy.require(principal, SCOPE_EXECUTE)
         state = self._operational_state.get()
@@ -213,6 +210,7 @@ class MCPControlBridge:
             binding_id=binding_id.strip(),
             expected_state_delta=expected_state_delta.strip(),
             authorization_target=authorization_target.strip(),
+            arguments=_argument_pairs(arguments),
         )
         submission = await self._production.submit(
             state,
