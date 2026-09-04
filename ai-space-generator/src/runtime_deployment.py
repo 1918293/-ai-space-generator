@@ -32,6 +32,11 @@ from .reconciliation_persistence import (
     ReconciliationAwareBroker,
 )
 from .runtime_config import RuntimeRole, RuntimeSettings
+from .runtime_observability import configure_runtime_telemetry
+from .runtime_observability_bridge import (
+    ObservableMCPControlBridge,
+    ObservableReconciliationBroker,
+)
 from .runtime_policy import ConfiguredTaskPolicySpec, GoogleAuthorityTaskPolicyProvider
 from .temporal_client import TemporalWorkflowStarter
 from .temporal_control import ExecutionActivities, HaoExecutionControlWorkflow
@@ -196,11 +201,22 @@ def _oauth_settings(settings: RuntimeSettings) -> Any:
     )
 
 
+def _telemetry(settings: RuntimeSettings) -> Any | None:
+    if not settings.otel_endpoint:
+        return None
+    return configure_runtime_telemetry(
+        endpoint=settings.otel_endpoint,
+        role=settings.role.value,
+        region=settings.region,
+    )
+
+
 async def build_api_app(values: dict[str, str]) -> Any:
     settings = RuntimeSettings.from_mapping(values)
     if settings.role != RuntimeRole.API:
         raise ValueError("API_ROLE_REQUIRED")
 
+    telemetry = _telemetry(settings)
     targets = load_sheets_targets(values)
     specs = load_task_policies(values)
     google_client = GoogleWorkspaceSheetsClient()
@@ -220,11 +236,16 @@ async def build_api_app(values: dict[str, str]) -> Any:
         attestor=CompletionAttestor(settings.attestation_secret.encode("utf-8")),
         completion_store=persistence.completion,
     )
-    bridge = MCPControlBridge(
+    base_bridge = MCPControlBridge(
         production=production,
         operational_state=persistence.operational_state,
         run_registry=persistence.run_registry,
         identity_policy=HaoMCPIdentityPolicy(settings.expected_hao_subject),
+    )
+    bridge = (
+        ObservableMCPControlBridge(base_bridge, telemetry)
+        if telemetry is not None
+        else base_bridge
     )
     verifier = JWKSAccessTokenVerifier(
         issuer=settings.oauth_issuer_url,
@@ -279,6 +300,7 @@ async def run_worker(values: dict[str, str]) -> None:
     if settings.role != RuntimeRole.WORKER:
         raise ValueError("WORKER_ROLE_REQUIRED")
 
+    telemetry = _telemetry(settings)
     targets = load_sheets_targets(values)
     google_client = GoogleWorkspaceSheetsClient()
     persistence = build_postgres_persistence(settings.database_url)
@@ -286,7 +308,12 @@ async def run_worker(values: dict[str, str]) -> None:
     resolver = ConfiguredSheetsCommandResolver(targets)
     raw_provider = ControlledGoogleDriveProvider(resolver, google_client)
     idempotent = IdempotentAsyncBroker(raw_provider, persistence.idempotency)
-    broker = ReconciliationAwareBroker(idempotent, reconciliation)
+    reconciliation_broker = ReconciliationAwareBroker(idempotent, reconciliation)
+    broker = (
+        ObservableReconciliationBroker(reconciliation_broker, reconciliation, telemetry)
+        if telemetry is not None
+        else reconciliation_broker
+    )
     verifier = GoogleDriveOutcomeVerifier(resolver, google_client)
     authority_guard = GoogleDriveAuthorityGuard(resolver, google_client)
     activities = ExecutionActivities(
