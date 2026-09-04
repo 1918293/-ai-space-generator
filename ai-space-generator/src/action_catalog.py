@@ -19,8 +19,8 @@ class ActionBinding:
     """Trusted runtime metadata for one provider action.
 
     The model never authors archetype, externality, assurance tags, rollback
-    semantics, or whether an action needs an idempotency key. Those facts belong
-    to the control-plane catalog and are reviewed/tested like code.
+    semantics, or whether an action needs an idempotency key. Model-supplied
+    action arguments are also constrained by runtime-owned allow/required sets.
     """
 
     binding_id: str
@@ -32,14 +32,17 @@ class ActionBinding:
     assurance_tags: tuple[str, ...] = ()
     authorization_scope_prefix: str = ""
     rollback_available: bool = False
+    allowed_argument_keys: tuple[str, ...] = ()
+    required_argument_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class ModelActionIntent:
     """The maximum authority granted to a reasoning model.
 
-    This is a request for a trusted binding, not an executable tool call. Safety
-    classification and authorization are deliberately absent from this schema.
+    This is a request for a trusted binding plus non-authoritative arguments, not
+    an executable tool call. Safety classification, provider target, exact
+    authorization proof, and trusted assurance metadata remain outside the model.
     """
 
     intent_id: str
@@ -47,6 +50,7 @@ class ModelActionIntent:
     binding_id: str
     expected_state_delta: str = ""
     authorization_target: str = ""
+    arguments: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,14 @@ class ActionCatalog:
                 raise ValueError(f"DUPLICATE_BINDING_ID:{key}")
             if not binding.capability.strip() or not binding.provider.strip() or not binding.action_name.strip():
                 raise ValueError(f"INCOMPLETE_BINDING:{key}")
+            allowed = tuple(item.strip() for item in binding.allowed_argument_keys if item.strip())
+            required = tuple(item.strip() for item in binding.required_argument_keys if item.strip())
+            if len(set(allowed)) != len(allowed):
+                raise ValueError(f"DUPLICATE_ALLOWED_ARGUMENT_KEY:{key}")
+            if len(set(required)) != len(required):
+                raise ValueError(f"DUPLICATE_REQUIRED_ARGUMENT_KEY:{key}")
+            if not set(required).issubset(set(allowed)):
+                raise ValueError(f"REQUIRED_ARGUMENT_NOT_ALLOWED:{key}")
             by_id[key] = binding
         self._by_id = by_id
 
@@ -82,6 +94,41 @@ def _authorization_scope(binding: ActionBinding, target: str) -> str:
         return ""
     target = target.strip()
     return f"{prefix}:{target}" if target else prefix
+
+
+def _resolve_arguments(
+    binding: ActionBinding,
+    arguments: tuple[tuple[str, str], ...],
+) -> tuple[tuple[tuple[str, str], ...] | None, ControlDecision | None]:
+    normalized: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_key, raw_value in arguments:
+        key = str(raw_key).strip()
+        if not key:
+            return None, ControlDecision(False, "EMPTY_MODEL_ARGUMENT_KEY", FailureStage.TOOL_INPUT)
+        if key in seen:
+            return None, ControlDecision(False, "DUPLICATE_MODEL_ARGUMENT_KEY:" + key, FailureStage.TOOL_INPUT)
+        seen.add(key)
+        normalized.append((key, str(raw_value)))
+
+    allowed = {item.strip() for item in binding.allowed_argument_keys if item.strip()}
+    required = {item.strip() for item in binding.required_argument_keys if item.strip()}
+    supplied = {key for key, _ in normalized}
+    unknown = sorted(supplied - allowed)
+    if unknown:
+        return None, ControlDecision(
+            False,
+            "MODEL_ARGUMENT_NOT_ALLOWED:" + ",".join(unknown),
+            FailureStage.BINDING,
+        )
+    missing = sorted(required - supplied)
+    if missing:
+        return None, ControlDecision(
+            False,
+            "MODEL_ARGUMENT_REQUIRED:" + ",".join(missing),
+            FailureStage.TOOL_INPUT,
+        )
+    return tuple(normalized), None
 
 
 def resolve_model_intent(
@@ -116,6 +163,11 @@ def resolve_model_intent(
             ControlDecision(False, "CAPABILITY_BINDING_MISMATCH", FailureStage.ROUTING),
         )
 
+    arguments, argument_error = _resolve_arguments(binding, intent.arguments)
+    if argument_error is not None:
+        return ActionResolution(None, argument_error)
+    assert arguments is not None
+
     snapshot = ""
     if record.required_action_authority_refs:
         snapshot = authority_snapshot_fingerprint(
@@ -147,6 +199,7 @@ def resolve_model_intent(
         idempotency_key=idempotency_key,
         rollback_available=binding.rollback_available,
         assurance_tags=binding.assurance_tags,
+        arguments=arguments,
     )
     return ActionResolution(
         proposal,
