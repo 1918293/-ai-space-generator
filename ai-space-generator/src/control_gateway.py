@@ -131,6 +131,8 @@ class PreModelContextResolution:
     task: str
     operational_version: int
     authority_refs: tuple[str, ...]
+    existing_work_refs: tuple[str, ...] = ()
+    prior_attempt_refs: tuple[str, ...] = ()
     regression_refs: tuple[str, ...] = ()
     existing_work_lookup_complete: bool = False
     regression_lookup_complete: bool = False
@@ -153,6 +155,8 @@ class PreModelContextReceipt:
     task: str
     operational_version: int
     authority_refs: tuple[str, ...]
+    existing_work_refs: tuple[str, ...]
+    prior_attempt_refs: tuple[str, ...]
     regression_refs: tuple[str, ...]
     reuse_disposition: str
     context_fingerprint: str
@@ -211,6 +215,8 @@ def _mint_pre_model_receipt(
     mode: Mode,
 ) -> PreModelContextReceipt:
     authority_refs = _normalized_refs(resolution.authority_refs)
+    existing_work_refs = _normalized_refs(resolution.existing_work_refs)
+    prior_attempt_refs = _normalized_refs(resolution.prior_attempt_refs)
     regression_refs = _normalized_refs(resolution.regression_refs)
     payload = {
         "checkpoint_id": resolution.checkpoint_id.strip().upper(),
@@ -218,6 +224,8 @@ def _mint_pre_model_receipt(
         "task": resolution.task.strip(),
         "operational_version": resolution.operational_version,
         "authority_refs": authority_refs,
+        "existing_work_refs": existing_work_refs,
+        "prior_attempt_refs": prior_attempt_refs,
         "regression_refs": regression_refs,
         "reuse_disposition": resolution.reuse_disposition.strip().upper(),
     }
@@ -235,6 +243,8 @@ def _mint_pre_model_receipt(
         task=payload["task"],
         operational_version=payload["operational_version"],
         authority_refs=authority_refs,
+        existing_work_refs=existing_work_refs,
+        prior_attempt_refs=prior_attempt_refs,
         regression_refs=regression_refs,
         reuse_disposition=payload["reuse_disposition"],
         context_fingerprint=fingerprint,
@@ -293,6 +303,8 @@ class PreModelContextGateway:
 
         try:
             authority_refs = _normalized_refs(resolution.authority_refs)
+            _normalized_refs(resolution.existing_work_refs)
+            _normalized_refs(resolution.prior_attempt_refs)
             _normalized_refs(resolution.regression_refs)
         except ValueError as exc:
             return PreModelAdmission(False, str(exc))
