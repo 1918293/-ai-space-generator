@@ -27,6 +27,10 @@ from .mcp_http import build_mcp_http_app
 from .oauth_verifier import JWKSAccessTokenVerifier
 from .postgres_persistence import build_postgres_persistence
 from .production_execution import ProductionExecutionService
+from .reconciliation_persistence import (
+    PostgresReconciliationStore,
+    ReconciliationAwareBroker,
+)
 from .runtime_config import RuntimeRole, RuntimeSettings
 from .runtime_policy import ConfiguredTaskPolicySpec, GoogleAuthorityTaskPolicyProvider
 from .temporal_client import TemporalWorkflowStarter
@@ -278,9 +282,11 @@ async def run_worker(values: dict[str, str]) -> None:
     targets = load_sheets_targets(values)
     google_client = GoogleWorkspaceSheetsClient()
     persistence = build_postgres_persistence(settings.database_url)
+    reconciliation = PostgresReconciliationStore(settings.database_url)
     resolver = ConfiguredSheetsCommandResolver(targets)
     raw_provider = ControlledGoogleDriveProvider(resolver, google_client)
-    broker = IdempotentAsyncBroker(raw_provider, persistence.idempotency)
+    idempotent = IdempotentAsyncBroker(raw_provider, persistence.idempotency)
+    broker = ReconciliationAwareBroker(idempotent, reconciliation)
     verifier = GoogleDriveOutcomeVerifier(resolver, google_client)
     authority_guard = GoogleDriveAuthorityGuard(resolver, google_client)
     activities = ExecutionActivities(
