@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import sqlite3
-from typing import Mapping, Protocol
+from typing import Any, Mapping, Protocol
 import uuid
 
 from .action_catalog import ModelActionIntent
@@ -66,6 +66,20 @@ class MCPRunRegistry(Protocol):
         workflow_id: str,
         owner_subject: str,
     ) -> RegisteredControlledRun: ...
+
+
+class RuntimeTelemetrySink(Protocol):
+    def record_run_event(
+        self,
+        event: str,
+        *,
+        phase: str,
+        provider: str = "",
+        failure_stage: str = "",
+        failure_code: str = "",
+    ) -> None: ...
+
+    def record_authoritative_completion(self) -> None: ...
 
 
 class SQLiteMCPRunRegistry:
@@ -176,11 +190,31 @@ class MCPControlBridge:
         operational_state: OperationalStateReader,
         run_registry: MCPRunRegistry,
         identity_policy: HaoMCPIdentityPolicy,
+        telemetry: RuntimeTelemetrySink | None = None,
     ) -> None:
         self._production = production
         self._operational_state = operational_state
         self._run_registry = run_registry
         self._identity_policy = identity_policy
+        self._telemetry = telemetry
+
+    def _record(
+        self,
+        event: str,
+        *,
+        phase: str,
+        provider: str = "",
+        failure_stage: str = "",
+        failure_code: str = "",
+    ) -> None:
+        if self._telemetry is not None:
+            self._telemetry.record_run_event(
+                event,
+                phase=phase,
+                provider=provider,
+                failure_stage=failure_stage,
+                failure_code=failure_code,
+            )
 
     def operational_context(self, principal: MCPPrincipal) -> dict[str, object]:
         self._identity_policy.require(principal, SCOPE_READ)
@@ -217,6 +251,12 @@ class MCPControlBridge:
             ModelIngressRequest(run_id=run_id, sequence=1, intent=intent),
         )
         if not submission.accepted or submission.pending is None:
+            self._record(
+                "submit_rejected",
+                phase=RunPhase.BLOCKED.value,
+                failure_stage="BINDING_OR_POLICY",
+                failure_code=submission.code,
+            )
             return MCPSubmissionView(
                 workflow_id="",
                 code=submission.code,
@@ -234,11 +274,24 @@ class MCPControlBridge:
         if current is None:
             phase = RunPhase.RESOLVED.value
             authorization_scope = ""
+            provider = ""
+            failure_stage = ""
+            failure_code = ""
         else:
             phase = current.phase.value
             authorization_scope = (
                 current.action.authorization_scope if current.action is not None else ""
             )
+            provider = current.action.provider if current.action is not None else ""
+            failure_stage = current.failure_stage.value if current.failure_stage else ""
+            failure_code = current.failure_code
+        self._record(
+            "submitted",
+            phase=phase,
+            provider=provider,
+            failure_stage=failure_stage,
+            failure_code=failure_code,
+        )
         return MCPSubmissionView(
             workflow_id=submission.pending.handle.workflow_id,
             code=submission.code,
@@ -273,14 +326,24 @@ class MCPControlBridge:
         )
         current = await self._production.current_state(pending)
         if current is None:
+            self._record("status", phase="UNKNOWN")
             return MCPStatusView(workflow_id, "", "", "UNKNOWN")
         action_scope = current.action.authorization_scope if current.action else ""
+        provider = current.action.provider if current.action else ""
+        failure_stage = current.failure_stage.value if current.failure_stage else ""
+        self._record(
+            "status",
+            phase=current.phase.value,
+            provider=provider,
+            failure_stage=failure_stage,
+            failure_code=current.failure_code,
+        )
         return MCPStatusView(
             workflow_id=workflow_id,
             mode=current.mode.value,
             task=current.task,
             phase=current.phase.value,
-            failure_stage=current.failure_stage.value if current.failure_stage else "",
+            failure_stage=failure_stage,
             failure_code=current.failure_code,
             authorization_scope=action_scope,
         )
@@ -314,6 +377,11 @@ class MCPControlBridge:
             approved=approved,
             reason=reason,
         )
+        self._record(
+            "hao_authorization",
+            phase=RunPhase.RESOLVED.value if approved else RunPhase.BLOCKED.value,
+            provider=current.action.provider,
+        )
         return await self.status(principal, workflow_id=workflow_id)
 
     async def finalize(self, principal: MCPPrincipal, *, workflow_id: str) -> MCPFinalizeView:
@@ -324,6 +392,12 @@ class MCPControlBridge:
         )
         current = await self._production.current_state(pending)
         if current is None:
+            self._record(
+                "finalize_rejected",
+                phase="UNKNOWN",
+                failure_stage="COMPLETION",
+                failure_code="CONTROLLED_RUN_STATE_UNKNOWN",
+            )
             return MCPFinalizeView(workflow_id, False, "CONTROLLED_RUN_STATE_UNKNOWN", "UNKNOWN")
         if current.phase not in {
             RunPhase.CLOSED,
@@ -331,10 +405,18 @@ class MCPControlBridge:
             RunPhase.FAILED,
             RunPhase.UNSYNCED,
         }:
+            code = "CONTROLLED_RUN_NOT_TERMINAL:" + current.phase.value
+            self._record(
+                "finalize_rejected",
+                phase=current.phase.value,
+                provider=current.action.provider if current.action else "",
+                failure_stage="COMPLETION",
+                failure_code=code,
+            )
             return MCPFinalizeView(
                 workflow_id,
                 False,
-                "CONTROLLED_RUN_NOT_TERMINAL:" + current.phase.value,
+                code,
                 current.phase.value,
             )
         result = await self._production.finalize(
@@ -342,4 +424,17 @@ class MCPControlBridge:
             issued_at=datetime.now(timezone.utc).isoformat(),
         )
         phase = result.record.phase.value if result.record else "UNKNOWN"
+        self._record(
+            "finalized",
+            phase=phase,
+            provider=(
+                result.record.action.provider
+                if result.record is not None and result.record.action is not None
+                else ""
+            ),
+            failure_code="" if result.authoritative else result.code,
+            failure_stage="" if result.authoritative else "COMPLETION",
+        )
+        if result.authoritative and self._telemetry is not None:
+            self._telemetry.record_authoritative_completion()
         return MCPFinalizeView(workflow_id, result.authoritative, result.code, phase)
