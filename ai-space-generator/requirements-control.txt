@@ -5,3 +5,4 @@ openai==3.8.0
 psycopg[binary]==3.3.4
 google-auth==2.57.1
 google-api-python-client==2.200.0
+uvicorn==0.52.4
