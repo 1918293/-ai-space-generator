@@ -27,28 +27,5 @@ jobs:
           python-version: "3.11"
       - name: Install control-plane test dependencies
         run: python -m pip install --upgrade pytest -r requirements-control.txt
-      - name: Run integrity and execution-control contracts
-        run: >-
-          python -m pytest
-          tests/test_contracts.py
-          tests/test_runtime_validation.py
-          tests/test_execution_control.py
-          tests/test_controlled_runner.py
-          tests/test_temporal_control.py
-          tests/test_temporal_workflow_integration.py
-          tests/test_historical_execution_regressions.py
-          tests/test_projection_control.py
-          tests/test_action_catalog.py
-          tests/test_idempotent_broker.py
-          tests/test_operational_state.py
-          tests/test_control_gateway.py
-          tests/test_authoritative_completion.py
-          tests/test_production_execution.py
-          tests/test_production_temporal_integration.py
-          tests/test_authority_snapshot_semantics.py
-          tests/test_mcp_control_bridge.py
-          tests/test_mcp_control_server.py
-          tests/test_task_runtime.py
-          tests/test_runtime_config.py
-          tests/test_oauth_verifier.py
-          -q
+      - name: Run all integrity and execution-control contracts
+        run: python -m pytest tests -q
