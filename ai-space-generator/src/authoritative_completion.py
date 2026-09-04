@@ -5,6 +5,7 @@ from hashlib import sha256
 import hmac
 import json
 import sqlite3
+from typing import Protocol
 
 from .execution_control import CompletionClaim, ExecutionRecord, RunPhase, can_claim
 
@@ -136,6 +137,19 @@ class CompletionAttestor:
 class CompletionCommitResult:
     committed: bool
     code: str
+
+
+class AuthoritativeCompletionStore(Protocol):
+    """Durable completion sink independent of the backing database."""
+
+    def commit(
+        self,
+        attestation: ExecutionAttestation,
+        record: ExecutionRecord,
+        *,
+        operational_version: int,
+        attestor: CompletionAttestor,
+    ) -> CompletionCommitResult: ...
 
 
 class SQLiteAuthoritativeCompletionStore:
