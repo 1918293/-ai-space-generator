@@ -68,6 +68,7 @@ class FixtureBridge:
         binding_id,
         expected_state_delta="",
         authorization_target="",
+        arguments=None,
     ):
         self.policy.require(principal, SCOPE_EXECUTE)
         self.submit_calls += 1
@@ -156,11 +157,14 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
             assert "externality" not in submit_fields
             assert "authorization_scope" not in submit_fields
             assert "run_id" not in submit_fields
+            assert "spreadsheet_id" not in submit_fields
+            assert "range_a1" not in submit_fields
             assert submit_fields == {
                 "requested_capability",
                 "binding_id",
                 "expected_state_delta",
                 "authorization_target",
+                "action_arguments",
             }
 
             authorize_fields = set(tools["hao_control_authorize"].input_schema["properties"])
