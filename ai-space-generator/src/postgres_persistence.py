@@ -11,6 +11,7 @@ from .authoritative_completion import (
 )
 from .execution_control import ExecutionRecord, Mode
 from .idempotent_broker import IdempotencyRecord, IdempotencyState
+from .mcp_control_bridge import RegisteredControlledRun
 from .operational_state import (
     ActiveOperationalState,
     CommandActor,
@@ -43,13 +44,7 @@ def _default_connect_factory(database_url: str) -> ConnectionFactory:
 
 
 class _PostgresRuntimeDatabase:
-    """One Postgres database/transaction boundary for Runtime v2 durable state.
-
-    Operational state, broker idempotency, and authoritative completion are
-    intentionally initialized through one database owner. This avoids three
-    unrelated production stores drifting away from the single Postgres contract
-    required by RuntimeSettings.
-    """
+    """One Postgres database/transaction boundary for Runtime v2 durable state."""
 
     def __init__(
         self,
@@ -133,6 +128,15 @@ class _PostgresRuntimeDatabase:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mcp_control_runs (
+                    workflow_id TEXT PRIMARY KEY,
+                    owner_subject TEXT NOT NULL,
+                    operational_version INTEGER NOT NULL
+                )
+                """
+            )
 
 
 class PostgresOperationalStateStore:
@@ -193,7 +197,11 @@ class PostgresOperationalStateStore:
                 ).fetchone()
                 if row is None:
                     raise ValueError("OPERATIONAL_STATE_NOT_INITIALIZED")
-                return OperationalUpdate(self._state(row), bool(_value(prior_event, "applied", 1)), "EVENT_ALREADY_APPLIED")
+                return OperationalUpdate(
+                    self._state(row),
+                    bool(_value(prior_event, "applied", 1)),
+                    "EVENT_ALREADY_APPLIED",
+                )
 
             row = conn.execute(
                 "SELECT mode, task, version, last_event_id FROM operational_state WHERE singleton = 1 FOR UPDATE"
@@ -368,11 +376,74 @@ class PostgresAuthoritativeCompletionStore:
         return CompletionCommitResult(True, "AUTHORITATIVE_COMPLETION_COMMITTED")
 
 
+class PostgresMCPRunRegistry:
+    """Shared multi-instance ownership registry for stateless MCP follow-ups."""
+
+    def __init__(self, database: _PostgresRuntimeDatabase) -> None:
+        self._database = database
+
+    def register(
+        self,
+        *,
+        workflow_id: str,
+        owner_subject: str,
+        operational_version: int,
+    ) -> RegisteredControlledRun:
+        workflow_id = workflow_id.strip()
+        owner_subject = owner_subject.strip()
+        if not workflow_id or not owner_subject or operational_version < 1:
+            raise ValueError("INVALID_MCP_RUN_REGISTRATION")
+        with self._database.transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO mcp_control_runs(workflow_id, owner_subject, operational_version)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (workflow_id) DO NOTHING
+                """,
+                (workflow_id, owner_subject, operational_version),
+            )
+            if cursor.rowcount == 1:
+                return RegisteredControlledRun(workflow_id, owner_subject, operational_version)
+            row = conn.execute(
+                "SELECT owner_subject, operational_version FROM mcp_control_runs WHERE workflow_id = %s FOR UPDATE",
+                (workflow_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("MCP_RUN_REGISTRATION_LOST")
+            existing_owner = _value(row, "owner_subject", 0)
+            existing_version = int(_value(row, "operational_version", 1))
+            if existing_owner == owner_subject and existing_version == operational_version:
+                return RegisteredControlledRun(workflow_id, existing_owner, existing_version)
+            raise ValueError("MCP_RUN_IDENTITY_CONFLICT")
+
+    def require_owned(
+        self,
+        *,
+        workflow_id: str,
+        owner_subject: str,
+    ) -> RegisteredControlledRun:
+        workflow_id = workflow_id.strip()
+        owner_subject = owner_subject.strip()
+        with self._database.transaction() as conn:
+            row = conn.execute(
+                "SELECT owner_subject, operational_version FROM mcp_control_runs WHERE workflow_id = %s",
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            raise PermissionError("CONTROLLED_RUN_NOT_FOUND")
+        existing_owner = _value(row, "owner_subject", 0)
+        existing_version = int(_value(row, "operational_version", 1))
+        if existing_owner != owner_subject:
+            raise PermissionError("CONTROLLED_RUN_OWNER_MISMATCH")
+        return RegisteredControlledRun(workflow_id, existing_owner, existing_version)
+
+
 @dataclass(frozen=True)
 class PostgresPersistenceBundle:
     operational_state: PostgresOperationalStateStore
     idempotency: PostgresIdempotencyStore
     completion: PostgresAuthoritativeCompletionStore
+    run_registry: PostgresMCPRunRegistry
 
 
 def build_postgres_persistence(
@@ -390,4 +461,5 @@ def build_postgres_persistence(
         operational_state=PostgresOperationalStateStore(database),
         idempotency=PostgresIdempotencyStore(database),
         completion=PostgresAuthoritativeCompletionStore(database),
+        run_registry=PostgresMCPRunRegistry(database),
     )
