@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .authoritative_completion import (
+    AuthoritativeCompletionStore,
     CompletionAttestor,
     ExecutionAttestation,
-    SQLiteAuthoritativeCompletionStore,
 )
 from .control_gateway import ControlPlaneGateway, ModelIngressRequest
 from .execution_control import ExecutionRecord, RunPhase
@@ -99,7 +99,7 @@ class ProductionExecutionService:
         gateway: ControlPlaneGateway,
         starter: DurableWorkflowStarter,
         attestor: CompletionAttestor,
-        completion_store: SQLiteAuthoritativeCompletionStore,
+        completion_store: AuthoritativeCompletionStore,
     ) -> None:
         self._gateway = gateway
         self._starter = starter
