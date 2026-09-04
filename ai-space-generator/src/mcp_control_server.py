@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Iterable
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,7 @@ from mcp.server.mcpserver import (
     Resolve,
 )
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.request_state import RequestStateSecurity
 from mcp.types import ToolAnnotations
 
 from .mcp_control_bridge import (
@@ -74,6 +75,8 @@ def build_mcp_control_server(
     *,
     token_verifier: Any,
     auth_settings: Any,
+    request_state_keys: Iterable[bytes] = (),
+    request_state_audience: str = "hao-system-control",
 ) -> MCPServer:
     """Build the private authenticated MCP entrypoint for controlled execution."""
     if token_verifier is None or auth_settings is None:
@@ -87,10 +90,19 @@ def build_mcp_control_server(
     if global_scopes != {SCOPE_ACCESS}:
         raise ValueError("MCP_GLOBAL_REQUIRED_SCOPES_MUST_EQUAL_HAO_ACCESS")
 
+    keys = tuple(request_state_keys)
+    state_security = None
+    if keys:
+        audience = request_state_audience.strip()
+        if not audience:
+            raise ValueError("MCP_REQUEST_STATE_AUDIENCE_REQUIRED")
+        state_security = RequestStateSecurity(keys=list(keys), audience=audience)
+
     mcp = MCPServer(
         "hao-system-control",
         token_verifier=token_verifier,
         auth=auth_settings,
+        request_state_security=state_security,
         instructions=(
             "Use these tools for Hao System controlled execution. Never treat a native/direct "
             "tool result as authoritative completion. Model-visible action arguments are "
