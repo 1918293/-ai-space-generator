@@ -36,6 +36,25 @@ class AsyncRawProvider(Protocol):
     async def execute(self, proposal: ActionProposal) -> ToolOutcome: ...
 
 
+class IdempotencyStore(Protocol):
+    """Durable broker claim store independent of the backing database."""
+
+    def get(self, key: str) -> IdempotencyRecord | None: ...
+
+    def reserve(self, key: str, fingerprint: str) -> tuple[bool, IdempotencyRecord]: ...
+
+    def set_state(
+        self,
+        key: str,
+        fingerprint: str,
+        state: IdempotencyState,
+        *,
+        receipt_id: str = "",
+        source: str = "",
+        error_code: str = "",
+    ) -> None: ...
+
+
 def action_fingerprint(proposal: ActionProposal) -> str:
     payload = json.dumps(
         asdict(proposal),
@@ -159,7 +178,7 @@ class IdempotentAsyncBroker:
     - exceptions are treated conservatively as UNKNOWN_EFFECT.
     """
 
-    def __init__(self, provider: AsyncRawProvider, store: SQLiteIdempotencyStore) -> None:
+    def __init__(self, provider: AsyncRawProvider, store: IdempotencyStore) -> None:
         self._provider = provider
         self._store = store
 
