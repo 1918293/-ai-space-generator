@@ -66,7 +66,7 @@ jobs:
               PreModelContextGateway,
               PreModelContextRequest,
               PreModelContextResolution,
-              ResponsesModelBoundary if False else VerifiedModelInput,
+              VerifiedModelInput,
               invoke_after_pre_model_admission,
           )
           from src.execution_control import Mode
@@ -139,6 +139,8 @@ jobs:
           assert response is not None
 
           usage = getattr(response, "usage", None)
+          receipt = admitted.admission.receipt
+          assert receipt is not None
           safe_result = {
               "blocked_model_calls": 0,
               "admitted_provider_calls": 1,
@@ -150,9 +152,9 @@ jobs:
               "store_requested": False,
               "tool_choice": "none",
               "max_output_tokens": 32,
-              "checkpoint": admitted.admission.receipt.checkpoint_id,
-              "mode": admitted.admission.receipt.mode.value,
-              "task": admitted.admission.receipt.task,
+              "checkpoint": receipt.checkpoint_id,
+              "mode": receipt.mode.value,
+              "task": receipt.task,
           }
           print("R111_SAFE_RESULT=" + json.dumps(safe_result, ensure_ascii=False, sort_keys=True))
           PY
