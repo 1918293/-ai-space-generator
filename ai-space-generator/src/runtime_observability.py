@@ -52,33 +52,61 @@ class RuntimeTelemetry:
         event: str,
         *,
         phase: str,
+        run_id: str = "",
         provider: str = "",
         failure_stage: str = "",
         failure_code: str = "",
     ) -> None:
-        attributes: dict[str, str] = {
+        metric_attributes: dict[str, str] = {
             "hao.event": event,
             "hao.run.phase": phase or "UNKNOWN",
         }
         if provider:
-            attributes["hao.provider"] = provider
+            metric_attributes["hao.provider"] = provider
         if failure_stage:
-            attributes["hao.failure.stage"] = failure_stage
-        self.run_events.add(1, attributes)
+            metric_attributes["hao.failure.stage"] = failure_stage
+        self.run_events.add(1, metric_attributes)
+
         if failure_stage or failure_code:
-            failure_attributes = dict(attributes)
+            failure_attributes = dict(metric_attributes)
             if failure_code:
                 failure_attributes["hao.failure.code"] = failure_code
             self.failures.add(1, failure_attributes)
 
+        trace_attributes = dict(metric_attributes)
+        if run_id:
+            trace_attributes["hao.run.id"] = run_id
+        if failure_code:
+            trace_attributes["hao.failure.code"] = failure_code
+        with self.tracer.start_as_current_span(
+            f"hao.runtime.{event}",
+            attributes=trace_attributes,
+        ):
+            pass
+
     def record_authoritative_completion(self) -> None:
         self.authoritative_completions.add(1)
 
-    def record_reconciliation(self, *, kind: str, error_code: str = "") -> None:
-        attributes = {"hao.reconciliation.kind": kind}
+    def record_reconciliation(
+        self,
+        *,
+        kind: str,
+        run_id: str = "",
+        error_code: str = "",
+    ) -> None:
+        metric_attributes = {"hao.reconciliation.kind": kind}
         if error_code:
-            attributes["hao.failure.code"] = error_code
-        self.reconciliation_cases.add(1, attributes)
+            metric_attributes["hao.failure.code"] = error_code
+        self.reconciliation_cases.add(1, metric_attributes)
+
+        trace_attributes = dict(metric_attributes)
+        if run_id:
+            trace_attributes["hao.run.id"] = run_id
+        with self.tracer.start_as_current_span(
+            "hao.runtime.reconciliation_opened",
+            attributes=trace_attributes,
+        ):
+            pass
 
 
 def configure_runtime_telemetry(
