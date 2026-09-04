@@ -136,6 +136,7 @@ class PreModelContextResolution:
     regression_refs: tuple[str, ...] = ()
     existing_work_lookup_complete: bool = False
     regression_lookup_complete: bool = False
+    prior_attempt_lookup_complete: bool = True
     reuse_disposition: str = ""
 
 
@@ -262,9 +263,9 @@ class PreModelContextGateway:
     """Fail-closed context admission before the first model invocation.
 
     The resolver is trusted application/runtime code responsible for reading the
-    canonical Current/checkpoint and completing bounded existing-work and
-    regression lookup. The model cannot author the receipt because admission
-    accepts only raw Hao input plus runtime-owned operational state.
+    canonical Current/checkpoint and completing bounded existing-work, prior-
+    attempt, and regression lookup. The model cannot author the receipt because
+    admission accepts only raw Hao input plus runtime-owned operational state.
     """
 
     def __init__(self, resolver: PreModelContextResolver) -> None:
@@ -312,6 +313,8 @@ class PreModelContextGateway:
             return PreModelAdmission(False, "PRE_MODEL_AUTHORITY_REFS_REQUIRED")
         if not resolution.existing_work_lookup_complete:
             return PreModelAdmission(False, "PRE_MODEL_EXISTING_WORK_LOOKUP_REQUIRED")
+        if not resolution.prior_attempt_lookup_complete:
+            return PreModelAdmission(False, "PRE_MODEL_PRIOR_ATTEMPT_LOOKUP_REQUIRED")
         if not resolution.regression_lookup_complete:
             return PreModelAdmission(False, "PRE_MODEL_REGRESSION_LOOKUP_REQUIRED")
 
