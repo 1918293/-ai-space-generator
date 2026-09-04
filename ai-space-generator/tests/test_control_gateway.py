@@ -279,6 +279,47 @@ def test_ordinary_continue_invalid_resolved_checkpoint_blocks_before_model_or_we
     assert model.web_calls == 0
 
 
+def test_ordinary_continue_verified_receipt_binds_runtime_mode_and_fingerprint():
+    exp_resolver = StaticPreModelResolver(valid_r98_resolution())
+    exp_model = CountingModelBoundary()
+    exp_result = invoke_after_pre_model_admission(
+        PreModelContextGateway(exp_resolver),
+        pre_model_state(),
+        PreModelContextRequest("Auto > 繼續", CommandActor.USER),
+        exp_model,
+    )
+
+    fam_state = ActiveOperationalState(
+        Mode.FAM,
+        "Knowledge-to-Execution preflight prospective field validation",
+        98,
+        "HAO-R98-FIELD",
+    )
+    fam_resolver = StaticPreModelResolver(valid_r98_resolution())
+    fam_model = CountingModelBoundary()
+    fam_result = invoke_after_pre_model_admission(
+        PreModelContextGateway(fam_resolver),
+        fam_state,
+        PreModelContextRequest("Auto > 繼續", CommandActor.USER),
+        fam_model,
+    )
+
+    assert exp_resolver.last_checkpoint_cue == ""
+    assert fam_resolver.last_checkpoint_cue == ""
+    assert exp_result.admission.allowed is True
+    assert fam_result.admission.allowed is True
+    assert exp_result.admission.receipt is not None
+    assert fam_result.admission.receipt is not None
+    assert exp_result.admission.receipt.mode == Mode.EXP
+    assert fam_result.admission.receipt.mode == Mode.FAM
+    assert (
+        exp_result.admission.receipt.context_fingerprint
+        != fam_result.admission.receipt.context_fingerprint
+    )
+    assert exp_model.inputs[0].receipt.mode == Mode.EXP
+    assert fam_model.inputs[0].receipt.mode == Mode.FAM
+
+
 def test_pre_model_checkpoint_mismatch_blocks_before_model_or_web_call():
     resolver = StaticPreModelResolver(valid_r98_resolution(checkpoint_id="R100"))
     gateway = PreModelContextGateway(resolver)
@@ -373,6 +414,7 @@ def test_pre_model_verified_current_is_structurally_hydrated_before_first_model_
     assert result.admission.code == "PRE_MODEL_CONTEXT_ADMITTED"
     assert result.admission.receipt is not None
     assert result.admission.receipt.checkpoint_id == "R98"
+    assert result.admission.receipt.mode == Mode.EXP
     assert result.admission.receipt.operational_version == 98
     assert result.admission.receipt.context_fingerprint
     assert result.admission.model_input is not None
@@ -380,6 +422,7 @@ def test_pre_model_verified_current_is_structurally_hydrated_before_first_model_
     assert model.web_calls == 1
     first_input = model.inputs[0]
     assert first_input.receipt == result.admission.receipt
+    assert first_input.receipt.mode == Mode.EXP
     assert first_input.receipt.authority_refs == (
         "HANDOFF:R98",
         "REQUIREMENTS:RV-011",
