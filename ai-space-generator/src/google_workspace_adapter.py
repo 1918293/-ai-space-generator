@@ -22,8 +22,25 @@ _GOOGLE_SCOPES = (
 )
 
 
+def _normalized_sheet_values(values: object) -> object:
+    if not isinstance(values, list):
+        return values
+    rows: list[list[Any]] = []
+    for raw_row in values:
+        if not isinstance(raw_row, list):
+            return values
+        row = list(raw_row)
+        while row and row[-1] in (None, ""):
+            row.pop()
+        rows.append(row)
+    while rows and not rows[-1]:
+        rows.pop()
+    return rows
+
+
 def canonical_values_digest(values: object) -> str:
-    payload = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    normalized = _normalized_sheet_values(values)
+    payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -32,15 +49,10 @@ def _argument_map(proposal: ActionProposal) -> dict[str, str]:
 
 
 def _binding_id(proposal: ActionProposal) -> str:
-    prefix = proposal.run_id if hasattr(proposal, "run_id") else ""
-    del prefix
-    marker = ":A"
-    if marker not in proposal.action_id:
+    parts = proposal.action_id.split(":", 2)
+    if len(parts) != 3 or not parts[1].startswith("A"):
         return ""
-    tail = proposal.action_id.split(":", 2)
-    if len(tail) < 3:
-        return ""
-    return tail[2]
+    return parts[2]
 
 
 def _validated_values_json(raw: str) -> tuple[list[list[Any]] | None, str]:
@@ -80,12 +92,7 @@ class SheetsMutationTarget:
 
 
 class ConfiguredSheetsCommandResolver(DriveCommandResolver):
-    """Bind one trusted ActionBinding to one exact configured Sheets target.
-
-    Spreadsheet IDs/ranges and Authority source file IDs come from deployment
-    configuration, never model-visible arguments. The model may only supply the
-    allowlisted `values_json` argument already checked by ActionCatalog.
-    """
+    """Bind one trusted ActionBinding to one exact configured Sheets target."""
 
     def __init__(self, targets: Iterable[SheetsMutationTarget]) -> None:
         by_binding: dict[str, SheetsMutationTarget] = {}
@@ -134,7 +141,7 @@ class ConfiguredSheetsCommandResolver(DriveCommandResolver):
             expected_state_delta=proposal.expected_state_delta,
             expected_state_digest=expected_digest,
             authorization_scope=proposal.authorization_scope,
-            authorization_ref=f"runtime-approved-scope:{proposal.authorization_scope}",
+            authorization_ref=f"runtime-bound-scope:{proposal.authorization_scope}",
             authority_snapshot_fingerprint=proposal.authority_snapshot_fingerprint,
             payload=tuple(sorted(trusted_payload.items())),
         )
@@ -145,13 +152,7 @@ def _payload(command: DriveMutationCommand) -> dict[str, str]:
 
 
 class GoogleWorkspaceSheetsClient:
-    """ADC-backed real Google Drive/Sheets provider for Runtime v2.
-
-    Google API clients are synchronous. Calls are moved to worker threads so the
-    Temporal worker event loop remains responsive. Only provider responses known
-    to be pre-effect failures are marked `no_effect_confirmed`; transport/5xx and
-    other ambiguous failures are allowed to become UNKNOWN_EFFECT upstream.
-    """
+    """ADC-backed real Google Drive/Sheets provider for Runtime v2."""
 
     def __init__(self, *, credentials: Any | None = None) -> None:
         if credentials is None:
@@ -183,11 +184,11 @@ class GoogleWorkspaceSheetsClient:
             result.append(AuthorityFileSource(ref, file_id))
         return tuple(result)
 
-    def _read_authority_stamps_sync(
-        self, sources: tuple[AuthorityFileSource, ...]
+    def current_authority_stamps_sync(
+        self, sources: Iterable[AuthorityFileSource]
     ) -> tuple[AuthorityStamp, ...]:
         stamps: list[AuthorityStamp] = []
-        for source in sources:
+        for source in tuple(sources):
             metadata = (
                 self._drive.files()
                 .get(fileId=source.file_id, fields="id,version,modifiedTime")
@@ -202,7 +203,7 @@ class GoogleWorkspaceSheetsClient:
     async def current_authority_stamps(
         self, sources: Iterable[AuthorityFileSource]
     ) -> tuple[AuthorityStamp, ...]:
-        return await asyncio.to_thread(self._read_authority_stamps_sync, tuple(sources))
+        return await asyncio.to_thread(self.current_authority_stamps_sync, tuple(sources))
 
     async def preflight_authority(self, command: DriveMutationCommand) -> DriveAuthorityReadback:
         try:
