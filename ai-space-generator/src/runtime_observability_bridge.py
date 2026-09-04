@@ -6,12 +6,7 @@ from .runtime_observability import RuntimeTelemetry
 
 
 class ObservableMCPControlBridge:
-    """Telemetry decorator around MCPControlBridge.
-
-    It observes already-decided runtime state. It cannot alter admission,
-    authorization, workflow ownership, provider effects, or completion outcome.
-    Model arguments and provider payloads are deliberately never recorded.
-    """
+    """Telemetry decorator around MCPControlBridge without changing control semantics."""
 
     def __init__(self, bridge: Any, telemetry: RuntimeTelemetry) -> None:
         self._bridge = bridge
@@ -69,3 +64,37 @@ class ObservableMCPControlBridge:
         if result.authoritative:
             self._telemetry.record_authoritative_completion()
         return result
+
+
+class ObservableReconciliationBroker:
+    """Observe a newly opened durable reconciliation case exactly once per action."""
+
+    def __init__(
+        self,
+        broker: Any,
+        reconciliation_store: Any,
+        telemetry: RuntimeTelemetry,
+    ) -> None:
+        self._broker = broker
+        self._store = reconciliation_store
+        self._telemetry = telemetry
+
+    async def execute(self, proposal: Any) -> Any:
+        prior = self._store.get_by_action(proposal.action_id)
+        outcome = await self._broker.execute(proposal)
+        current = self._store.get_by_action(proposal.action_id)
+        if prior is None and current is not None:
+            self._telemetry.record_reconciliation(
+                kind=current.kind.value,
+                run_id=current.run_id,
+                error_code=outcome.error_code,
+            )
+        self._telemetry.record_run_event(
+            "provider_outcome",
+            run_id=current.run_id if current is not None else "",
+            phase="UNSYNCED" if current is not None else ("OBSERVED" if outcome.success else "FAILED"),
+            provider=proposal.provider,
+            failure_stage=(outcome.failure_stage.value if outcome.failure_stage else ""),
+            failure_code=outcome.error_code,
+        )
+        return outcome
