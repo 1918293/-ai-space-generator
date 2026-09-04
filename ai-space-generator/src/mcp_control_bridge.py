@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import sqlite3
+from typing import Protocol
 import uuid
 
 from .action_catalog import ModelActionIntent
 from .control_gateway import ModelIngressRequest
 from .execution_control import ExecutionRecord, RunPhase
-from .operational_state import SQLiteOperationalStateStore
+from .operational_state import ActiveOperationalState
 from .production_execution import PendingControlledRun, ProductionExecutionService
 
 
@@ -52,11 +53,32 @@ class RegisteredControlledRun:
     operational_version: int
 
 
-class SQLiteMCPRunRegistry:
-    """Durable ownership binding for stateless MCP requests.
+class OperationalStateReader(Protocol):
+    def get(self) -> ActiveOperationalState: ...
 
-    Workflow IDs alone are not authorization. Every follow-up request must
-    resolve the workflow through this registry using the authenticated subject.
+
+class MCPRunRegistry(Protocol):
+    def register(
+        self,
+        *,
+        workflow_id: str,
+        owner_subject: str,
+        operational_version: int,
+    ) -> RegisteredControlledRun: ...
+
+    def require_owned(
+        self,
+        *,
+        workflow_id: str,
+        owner_subject: str,
+    ) -> RegisteredControlledRun: ...
+
+
+class SQLiteMCPRunRegistry:
+    """Reference durable ownership binding for single-node/test use.
+
+    Production multi-instance deployments must use a transactional shared
+    registry such as Postgres. Workflow IDs alone are never authorization.
     """
 
     def __init__(self, path: str) -> None:
@@ -155,8 +177,8 @@ class MCPControlBridge:
         self,
         *,
         production: ProductionExecutionService,
-        operational_state: SQLiteOperationalStateStore,
-        run_registry: SQLiteMCPRunRegistry,
+        operational_state: OperationalStateReader,
+        run_registry: MCPRunRegistry,
         identity_policy: HaoMCPIdentityPolicy,
     ) -> None:
         self._production = production
