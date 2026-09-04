@@ -7,7 +7,7 @@ import re
 from typing import Protocol
 
 from .action_catalog import ActionCatalog, ActionResolution, ModelActionIntent, resolve_model_intent
-from .execution_control import AuthorityStamp, ExecutionRecord
+from .execution_control import AuthorityStamp, ExecutionRecord, Mode
 from .operational_state import (
     ActiveOperationalState,
     CommandActor,
@@ -149,6 +149,7 @@ class PreModelContextResolver(Protocol):
 @dataclass(frozen=True)
 class PreModelContextReceipt:
     checkpoint_id: str
+    mode: Mode
     task: str
     operational_version: int
     authority_refs: tuple[str, ...]
@@ -207,11 +208,13 @@ def _normalized_refs(values: tuple[str, ...]) -> tuple[str, ...]:
 
 def _mint_pre_model_receipt(
     resolution: PreModelContextResolution,
+    mode: Mode,
 ) -> PreModelContextReceipt:
     authority_refs = _normalized_refs(resolution.authority_refs)
     regression_refs = _normalized_refs(resolution.regression_refs)
     payload = {
         "checkpoint_id": resolution.checkpoint_id.strip().upper(),
+        "mode": mode.value,
         "task": resolution.task.strip(),
         "operational_version": resolution.operational_version,
         "authority_refs": authority_refs,
@@ -228,6 +231,7 @@ def _mint_pre_model_receipt(
     ).hexdigest()
     return PreModelContextReceipt(
         checkpoint_id=payload["checkpoint_id"],
+        mode=mode,
         task=payload["task"],
         operational_version=payload["operational_version"],
         authority_refs=authority_refs,
@@ -304,7 +308,7 @@ class PreModelContextGateway:
             return PreModelAdmission(False, "PRE_MODEL_REUSE_DISPOSITION_INVALID")
 
         try:
-            receipt = _mint_pre_model_receipt(resolution)
+            receipt = _mint_pre_model_receipt(resolution, state.mode)
         except ValueError as exc:
             return PreModelAdmission(False, str(exc))
         return PreModelAdmission(
