@@ -123,6 +123,7 @@ class ActionProposal:
     idempotency_key: str = ""
     rollback_available: bool = False
     assurance_tags: tuple[str, ...] = ()
+    arguments: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,6 +266,12 @@ def validate_action_contract(proposal: ActionProposal) -> ControlDecision:
         return ControlDecision(False, "MISSING_ACTION_ID", FailureStage.PLAN)
     if not proposal.capability.strip() or not proposal.provider.strip() or not proposal.action_name.strip():
         return ControlDecision(False, "INCOMPLETE_TOOL_BINDING", FailureStage.BINDING)
+
+    argument_keys = [key.strip() for key, _ in proposal.arguments]
+    if any(not key for key in argument_keys):
+        return ControlDecision(False, "EMPTY_ACTION_ARGUMENT_KEY", FailureStage.TOOL_INPUT)
+    if len(set(argument_keys)) != len(argument_keys):
+        return ControlDecision(False, "DUPLICATE_ACTION_ARGUMENT_KEY", FailureStage.TOOL_INPUT)
 
     if proposal.archetype in _PERSISTENCE_ACTIONS:
         if not proposal.expected_state_delta.strip():
