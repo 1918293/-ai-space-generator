@@ -24,9 +24,6 @@ from .mcp_control_bridge import (
 )
 
 
-# `AuthSettings.required_scopes` applies globally to every HTTP request. Keep
-# that middleware requirement to a neutral access scope and enforce the
-# capability-specific read/execute/approve scopes inside each tool policy.
 SCOPE_ACCESS = "hao:access"
 
 
@@ -54,12 +51,6 @@ async def _confirm_authorization(
     approved: bool,
     reason: str = "",
 ) -> ApprovalConfirmation | Elicit[ApprovalConfirmation]:
-    """Human-only resolver for one exact authorization decision.
-
-    This lives at module scope deliberately: MCP evaluates postponed annotations
-    against module globals when registering a tool. The Resolve marker keeps the
-    resulting confirmation parameter out of the model-visible input schema.
-    """
     decision = "APPROVE" if approved else "REJECT"
     return Elicit(
         (
@@ -71,9 +62,6 @@ async def _confirm_authorization(
 
 
 def _oauth_meta(tool_scope: str) -> dict[str, Any]:
-    # The base scope is required by HTTP middleware; the tool scope is enforced
-    # again server-side by MCPControlBridge/HaoMCPIdentityPolicy. Metadata is a
-    # client hint, never the authorization authority.
     return {
         "securitySchemes": [
             {"type": "oauth2", "scopes": [SCOPE_ACCESS, tool_scope]}
@@ -87,20 +75,10 @@ def build_mcp_control_server(
     token_verifier: Any,
     auth_settings: Any,
 ) -> MCPServer:
-    """Build the private ChatGPT/Codex MCP entrypoint for controlled execution.
-
-    Authentication is mandatory. The caller supplies an established OAuth token
-    verifier and MCP AuthSettings; this module deliberately does not invent an
-    identity provider. Per-action Hao approval is separately enforced through
-    MCP elicitation and exact runtime scope matching.
-    """
+    """Build the private authenticated MCP entrypoint for controlled execution."""
     if token_verifier is None or auth_settings is None:
         raise ValueError("MCP_OAUTH_CONFIGURATION_REQUIRED")
 
-    # MCP SDK v2 defines `required_scopes` as a global all-requests requirement.
-    # Requiring read+execute+approve here would silently grant every caller the
-    # approval scope. Fail closed unless deployment uses the neutral base scope;
-    # precise capabilities remain per-tool server policy.
     global_scopes = {
         str(scope).strip()
         for scope in (getattr(auth_settings, "required_scopes", None) or [])
@@ -115,9 +93,9 @@ def build_mcp_control_server(
         auth=auth_settings,
         instructions=(
             "Use these tools for Hao System controlled execution. Never treat a native/direct "
-            "tool result as authoritative completion. Submit actions through hao_control_submit; "
-            "query durable state with hao_control_status; consequential approval must use "
-            "hao_control_authorize and its human elicitation; finalize only terminal runs."
+            "tool result as authoritative completion. Model-visible action arguments are "
+            "non-authoritative and accepted only when the runtime ActionBinding allowlists them. "
+            "Consequential approval must use hao_control_authorize and human elicitation."
         ),
     )
 
@@ -161,7 +139,8 @@ def build_mcp_control_server(
         title="Submit controlled Hao action",
         description=(
             "Submit one action intent to the Hao Execution Runtime. The server owns run IDs, "
-            "Mode/TASK, policy, safety classification, action metadata, and workflow state."
+            "Mode/TASK, policy, safety classification, provider binding, Authority and workflow "
+            "state. action_arguments may contain only keys allowlisted by the selected binding."
         ),
         annotations=ToolAnnotations(
             read_only_hint=False,
@@ -176,6 +155,7 @@ def build_mcp_control_server(
         binding_id: str,
         expected_state_delta: str = "",
         authorization_target: str = "",
+        action_arguments: dict[str, str] | None = None,
     ) -> ToolResult:
         try:
             view = await bridge.submit(
@@ -184,6 +164,7 @@ def build_mcp_control_server(
                 binding_id=binding_id,
                 expected_state_delta=expected_state_delta,
                 authorization_target=authorization_target,
+                arguments=action_arguments,
             )
             return ToolResult(
                 ok=bool(view.workflow_id),
