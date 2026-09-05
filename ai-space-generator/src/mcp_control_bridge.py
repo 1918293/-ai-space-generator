@@ -174,6 +174,26 @@ class MCPFinalizeView:
     phase: str
 
 
+@dataclass(frozen=True)
+class MCPParentTaskView:
+    task_run_id: str
+    phase: str
+    failure_code: str = ""
+    child_slots: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MCPParentChildSubmissionView:
+    task_run_id: str
+    slot_id: str
+    workflow_id: str
+    action_id: str
+    accepted: bool
+    code: str
+    phase: str
+    authorization_scope: str = ""
+
+
 def _argument_pairs(arguments: Mapping[str, str] | None) -> tuple[tuple[str, str], ...]:
     if not arguments:
         return ()
@@ -181,7 +201,7 @@ def _argument_pairs(arguments: Mapping[str, str] | None) -> tuple[tuple[str, str
 
 
 class MCPControlBridge:
-    """Stateless authenticated bridge from MCP tools into ProductionExecutionService."""
+    """Stateless authenticated bridge from MCP tools into the Runtime v2 control plane."""
 
     def __init__(
         self,
@@ -191,12 +211,14 @@ class MCPControlBridge:
         run_registry: MCPRunRegistry,
         identity_policy: HaoMCPIdentityPolicy,
         telemetry: RuntimeTelemetrySink | None = None,
+        parent_tasks: Any | None = None,
     ) -> None:
         self._production = production
         self._operational_state = operational_state
         self._run_registry = run_registry
         self._identity_policy = identity_policy
         self._telemetry = telemetry
+        self._parent_tasks = parent_tasks
 
     def _record(
         self,
@@ -215,6 +237,11 @@ class MCPControlBridge:
                 failure_stage=failure_stage,
                 failure_code=failure_code,
             )
+
+    def _require_parent_tasks(self) -> Any:
+        if self._parent_tasks is None:
+            raise ValueError("PARENT_TASK_RUNTIME_NOT_CONFIGURED")
+        return self._parent_tasks
 
     def operational_context(self, principal: MCPPrincipal) -> dict[str, object]:
         self._identity_policy.require(principal, SCOPE_READ)
@@ -438,3 +465,115 @@ class MCPControlBridge:
         if result.authoritative and self._telemetry is not None:
             self._telemetry.record_authoritative_completion()
         return MCPFinalizeView(workflow_id, result.authoritative, result.code, phase)
+
+    def parent_start(self, principal: MCPPrincipal, *, plan_id: str) -> MCPParentTaskView:
+        self._identity_policy.require(principal, SCOPE_EXECUTE)
+        parent_tasks = self._require_parent_tasks()
+        state = self._operational_state.get()
+        opened = parent_tasks.start(state, plan_id=plan_id)
+        return MCPParentTaskView(
+            task_run_id=opened.task_run_id,
+            phase=opened.phase.value,
+            child_slots=tuple(child.slot_id for child in opened.child_slots),
+        )
+
+    async def parent_submit_child(
+        self,
+        principal: MCPPrincipal,
+        *,
+        task_run_id: str,
+        slot_id: str,
+        expected_state_delta: str = "",
+        arguments: Mapping[str, str] | None = None,
+    ) -> MCPParentChildSubmissionView:
+        self._identity_policy.require(principal, SCOPE_EXECUTE)
+        parent_tasks = self._require_parent_tasks()
+        state = self._operational_state.get()
+        submission = await parent_tasks.submit_child(
+            state,
+            task_run_id=task_run_id,
+            slot_id=slot_id,
+            expected_state_delta=expected_state_delta,
+            arguments=arguments,
+        )
+        if not submission.accepted or not submission.workflow_id:
+            return MCPParentChildSubmissionView(
+                task_run_id=submission.task_run_id,
+                slot_id=submission.slot_id,
+                workflow_id="",
+                action_id=submission.action_id,
+                accepted=False,
+                code=submission.code,
+                phase=RunPhase.BLOCKED.value,
+            )
+
+        registration = self._run_registry.register(
+            workflow_id=submission.workflow_id,
+            owner_subject=principal.subject,
+            operational_version=state.version,
+        )
+        pending = await self._production.resume(
+            registration.workflow_id,
+            operational_version=registration.operational_version,
+        )
+        current = await self._production.current_state(pending)
+        phase = RunPhase.RESOLVED.value if current is None else current.phase.value
+        authorization_scope = (
+            current.action.authorization_scope
+            if current is not None and current.action is not None
+            else ""
+        )
+        return MCPParentChildSubmissionView(
+            task_run_id=submission.task_run_id,
+            slot_id=submission.slot_id,
+            workflow_id=submission.workflow_id,
+            action_id=submission.action_id,
+            accepted=True,
+            code=submission.code,
+            phase=phase,
+            authorization_scope=authorization_scope,
+        )
+
+    async def parent_refresh(
+        self,
+        principal: MCPPrincipal,
+        *,
+        task_run_id: str,
+    ) -> MCPParentTaskView:
+        self._identity_policy.require(principal, SCOPE_EXECUTE)
+        parent_tasks = self._require_parent_tasks()
+        state = self._operational_state.get()
+        record = await parent_tasks.refresh(state, task_run_id=task_run_id)
+        return MCPParentTaskView(
+            task_run_id=record.task_run_id,
+            phase=record.phase.value,
+            failure_code=record.failure_code,
+        )
+
+    async def parent_accept_after_human_confirmation(
+        self,
+        principal: MCPPrincipal,
+        *,
+        task_run_id: str,
+        accepted: bool,
+        human_confirmed: bool,
+    ) -> MCPParentTaskView:
+        if not human_confirmed:
+            raise PermissionError("HUMAN_CONFIRMATION_REQUIRED")
+        self._identity_policy.require(principal, SCOPE_APPROVE)
+        parent_tasks = self._require_parent_tasks()
+        state = self._operational_state.get()
+        record = await parent_tasks.refresh(state, task_run_id=task_run_id)
+        if record.phase.value != "AWAITING_HAO" or len(record.child_outcomes) < len(
+            record.required_action_ids
+        ):
+            raise ValueError("PARENT_TASK_NOT_AWAITING_HAO_ACCEPTANCE")
+        accepted_record = parent_tasks.record_hao_acceptance(
+            task_run_id=task_run_id,
+            accepted=accepted,
+        )
+        return MCPParentTaskView(
+            task_run_id=accepted_record.task_run_id,
+            phase=accepted_record.phase.value,
+            failure_code=accepted_record.failure_code,
+        )
