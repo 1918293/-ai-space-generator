@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
 import json
 import os
 from typing import Any
@@ -39,6 +41,7 @@ from .reconciliation_persistence import (
     ReconciliationAwareBroker,
 )
 from .runtime_config import RuntimeRole, RuntimeSettings
+from .runtime_migrations import LATEST_RUNTIME_SCHEMA_VERSION, apply_runtime_migrations
 from .runtime_observability import configure_runtime_telemetry
 from .runtime_observability_bridge import (
     ObservableMCPControlBridge,
@@ -58,6 +61,7 @@ FORMAL_SHEETS_ASSURANCE_TAGS = (
     "EXACT_CONFIGURED_TARGET",
     "DIRECT_STATE_READBACK",
 )
+CLOUD_RUN_GRACEFUL_SHUTDOWN_SECONDS = 8
 
 
 def _json_env(values: dict[str, str], key: str) -> object:
@@ -269,11 +273,17 @@ def _telemetry(settings: RuntimeSettings) -> Any | None:
     )
 
 
+def _shutdown_telemetry(telemetry: Any | None) -> None:
+    if telemetry is not None and hasattr(telemetry, "shutdown"):
+        telemetry.shutdown()
+
+
 async def build_api_app(values: dict[str, str]) -> Any:
     settings = RuntimeSettings.from_mapping(values)
     if settings.role != RuntimeRole.API:
         raise ValueError("API_ROLE_REQUIRED")
 
+    apply_runtime_migrations(settings.database_url)
     telemetry = _telemetry(settings)
     targets = load_sheets_targets(values)
     specs = load_task_policies(values)
@@ -339,7 +349,11 @@ async def build_api_app(values: dict[str, str]) -> Any:
     from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
 
-    async def healthz(request: Any) -> JSONResponse:
+    async def livez(request: Any) -> JSONResponse:
+        del request
+        return JSONResponse({"status": "alive", "role": settings.role.value})
+
+    async def readyz(request: Any) -> JSONResponse:
         del request
         try:
             state = persistence.operational_state.get()
@@ -349,6 +363,7 @@ async def build_api_app(values: dict[str, str]) -> Any:
                     "role": settings.role.value,
                     "mode": state.mode.value,
                     "operational_version": state.version,
+                    "schema_version": LATEST_RUNTIME_SCHEMA_VERSION,
                 }
             )
         except Exception as exc:
@@ -357,11 +372,26 @@ async def build_api_app(values: dict[str, str]) -> Any:
                 status_code=503,
             )
 
+    @asynccontextmanager
+    async def lifespan(app: Any):
+        del app
+        try:
+            # MCP v2 Streamable HTTP session manager lifespan must be entered by
+            # the host application when mounted; Starlette does not propagate a
+            # mounted sub-application's lifespan automatically.
+            async with mcp.session_manager.run():
+                yield
+        finally:
+            _shutdown_telemetry(telemetry)
+
     return Starlette(
+        lifespan=lifespan,
         routes=[
-            Route("/healthz", healthz, methods=["GET"]),
+            Route("/livez", livez, methods=["GET"]),
+            Route("/readyz", readyz, methods=["GET"]),
+            Route("/healthz", readyz, methods=["GET"]),
             Mount("/", app=mcp_app),
-        ]
+        ],
     )
 
 
@@ -370,6 +400,7 @@ async def run_worker(values: dict[str, str]) -> None:
     if settings.role != RuntimeRole.WORKER:
         raise ValueError("WORKER_ROLE_REQUIRED")
 
+    apply_runtime_migrations(settings.database_url)
     telemetry = _telemetry(settings)
     targets = load_sheets_targets(values)
     google_client = GoogleWorkspaceSheetsClient()
@@ -404,8 +435,16 @@ async def run_worker(values: dict[str, str]) -> None:
             activities.execute_tool,
             activities.verify_outcome,
         ],
+        graceful_shutdown_timeout=timedelta(
+            seconds=CLOUD_RUN_GRACEFUL_SHUTDOWN_SECONDS
+        ),
     )
-    await worker.run()
+    try:
+        # Worker.run owns SIGINT/SIGTERM handling. The explicit graceful timeout
+        # stays inside Cloud Run's shutdown budget and lets activities drain.
+        await worker.run()
+    finally:
+        _shutdown_telemetry(telemetry)
 
 
 async def _main_async(values: dict[str, str]) -> None:
