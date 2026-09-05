@@ -98,6 +98,7 @@ class ParentChildPlan:
     requested_capability: str
     binding_id: str
     authorization_target: str = ""
+    depends_on_slots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,40 @@ class ParentTaskPlan:
     children: tuple[ParentChildPlan, ...]
     required_gate_ids: tuple[str, ...] = ()
     hao_acceptance_required: bool = False
+
+
+def _validate_dependency_graph(children: tuple[ParentChildPlan, ...]) -> tuple[ParentChildPlan, ...]:
+    slot_ids = {child.slot_id for child in children}
+    graph: dict[str, tuple[str, ...]] = {}
+    normalized: list[ParentChildPlan] = []
+    for child in children:
+        deps = tuple(value.strip() for value in child.depends_on_slots if value.strip())
+        if len(set(deps)) != len(deps):
+            raise ValueError("DUPLICATE_PARENT_CHILD_DEPENDENCY")
+        if child.slot_id in deps:
+            raise ValueError("PARENT_CHILD_SELF_DEPENDENCY")
+        if any(dep not in slot_ids for dep in deps):
+            raise ValueError("PARENT_CHILD_DEPENDENCY_NOT_FOUND")
+        graph[child.slot_id] = deps
+        normalized.append(replace(child, depends_on_slots=deps))
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(slot: str) -> None:
+        if slot in visited:
+            return
+        if slot in visiting:
+            raise ValueError("PARENT_CHILD_DEPENDENCY_CYCLE")
+        visiting.add(slot)
+        for dep in graph[slot]:
+            visit(dep)
+        visiting.remove(slot)
+        visited.add(slot)
+
+    for slot in graph:
+        visit(slot)
+    return tuple(normalized)
 
 
 class ParentTaskPlanCatalog:
@@ -119,6 +154,7 @@ class ParentTaskPlanCatalog:
             if not plan.task.strip() or not plan.children:
                 raise ValueError("PARENT_PLAN_TASK_AND_CHILDREN_REQUIRED")
             slot_ids: set[str] = set()
+            normalized_children: list[ParentChildPlan] = []
             for child in plan.children:
                 slot = child.slot_id.strip()
                 if not slot or slot in slot_ids:
@@ -126,10 +162,20 @@ class ParentTaskPlanCatalog:
                 if not child.requested_capability.strip() or not child.binding_id.strip():
                     raise ValueError("PARENT_CHILD_BINDING_REQUIRED")
                 slot_ids.add(slot)
+                normalized_children.append(
+                    replace(
+                        child,
+                        slot_id=slot,
+                        requested_capability=child.requested_capability.strip(),
+                        binding_id=child.binding_id.strip(),
+                        authorization_target=child.authorization_target.strip(),
+                    )
+                )
+            children = _validate_dependency_graph(tuple(normalized_children))
             by_id[plan_id] = ParentTaskPlan(
                 plan_id=plan_id,
                 task=plan.task.strip(),
-                children=tuple(plan.children),
+                children=children,
                 required_gate_ids=tuple(value.strip() for value in plan.required_gate_ids if value.strip()),
                 hao_acceptance_required=plan.hao_acceptance_required,
             )
@@ -149,6 +195,7 @@ class ParentChildRuntime:
     workflow_id: str = ""
     operational_version: int = 0
     finalized: bool = False
+    depends_on_slots: tuple[str, ...] = ()
 
 
 class PostgresParentTaskStore:
@@ -201,7 +248,8 @@ class PostgresParentTaskStore:
                     passed_gate_ids_json TEXT NOT NULL DEFAULT '[]',
                     hao_accepted INTEGER NOT NULL DEFAULT 0,
                     phase TEXT NOT NULL,
-                    failure_code TEXT NOT NULL DEFAULT ''
+                    failure_code TEXT NOT NULL DEFAULT '',
+                    row_revision INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -216,6 +264,7 @@ class PostgresParentTaskStore:
                     workflow_id TEXT NOT NULL DEFAULT '',
                     operational_version INTEGER NOT NULL DEFAULT 0,
                     finalized INTEGER NOT NULL DEFAULT 0,
+                    depends_on_slots_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY(task_run_id, slot_index)
                 )
                 """
@@ -238,6 +287,7 @@ class PostgresParentTaskStore:
                 hao_accepted=bool(_value(row, "hao_accepted", 11)),
                 phase=ParentTaskPhase(str(_value(row, "phase", 12))),
                 failure_code=str(_value(row, "failure_code", 13) or ""),
+                store_revision=int(_value(row, "row_revision", 14) or 0),
             )
         )
 
@@ -252,6 +302,7 @@ class PostgresParentTaskStore:
             workflow_id=str(_value(row, "workflow_id", 5) or ""),
             operational_version=int(_value(row, "operational_version", 6) or 0),
             finalized=bool(_value(row, "finalized", 7)),
+            depends_on_slots=_parse_str_tuple(str(_value(row, "depends_on_slots_json", 8) or "[]")),
         )
 
     def create(
@@ -269,8 +320,9 @@ class PostgresParentTaskStore:
                     task_run_id, plan_id, task, mode, admitted_operational_version,
                     required_action_ids_json, required_gate_ids_json,
                     hao_acceptance_required, authority_snapshot_fingerprint,
-                    child_outcomes_json, passed_gate_ids_json, hao_accepted, phase, failure_code
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    child_outcomes_json, passed_gate_ids_json, hao_accepted, phase, failure_code,
+                    row_revision
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     record.task_run_id,
@@ -287,6 +339,7 @@ class PostgresParentTaskStore:
                     int(record.hao_accepted),
                     record.phase.value,
                     record.failure_code,
+                    record.store_revision,
                 ),
             )
             for child in children:
@@ -294,8 +347,8 @@ class PostgresParentTaskStore:
                     """
                     INSERT INTO parent_task_children(
                         task_run_id, slot_index, slot_id, binding_id, action_id,
-                        workflow_id, operational_version, finalized
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        workflow_id, operational_version, finalized, depends_on_slots_json
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         child.task_run_id,
@@ -306,6 +359,7 @@ class PostgresParentTaskStore:
                         child.workflow_id,
                         child.operational_version,
                         int(child.finalized),
+                        _json_tuple(child.depends_on_slots),
                     ),
                 )
         return record
@@ -317,7 +371,8 @@ class PostgresParentTaskStore:
                 SELECT task_run_id, plan_id, task, mode, admitted_operational_version,
                        required_action_ids_json, required_gate_ids_json,
                        hao_acceptance_required, authority_snapshot_fingerprint,
-                       child_outcomes_json, passed_gate_ids_json, hao_accepted, phase, failure_code
+                       child_outcomes_json, passed_gate_ids_json, hao_accepted, phase, failure_code,
+                       row_revision
                 FROM parent_tasks WHERE task_run_id = %s
                 """,
                 (task_run_id.strip(),),
@@ -339,7 +394,7 @@ class PostgresParentTaskStore:
             rows = conn.execute(
                 """
                 SELECT task_run_id, slot_index, slot_id, binding_id, action_id,
-                       workflow_id, operational_version, finalized
+                       workflow_id, operational_version, finalized, depends_on_slots_json
                 FROM parent_task_children
                 WHERE task_run_id = %s ORDER BY slot_index
                 """,
@@ -403,9 +458,11 @@ class PostgresParentTaskStore:
                     passed_gate_ids_json = %s,
                     hao_accepted = %s,
                     phase = %s,
-                    failure_code = %s
+                    failure_code = %s,
+                    row_revision = row_revision + 1
                 WHERE task_run_id = %s
                   AND admitted_operational_version = %s
+                  AND row_revision = %s
                 """,
                 (
                     _outcomes_json(record.child_outcomes),
@@ -415,6 +472,7 @@ class PostgresParentTaskStore:
                     record.failure_code,
                     record.task_run_id,
                     record.admitted_operational_version,
+                    record.store_revision,
                 ),
             )
             if cursor.rowcount != 1:
@@ -485,6 +543,7 @@ class ProductionParentTaskService:
                 slot_id=child.slot_id,
                 binding_id=child.binding_id,
                 action_id=self._action_id(task_run_id, index, child.binding_id),
+                depends_on_slots=child.depends_on_slots,
             )
             for index, child in enumerate(plan.children)
         )
@@ -533,6 +592,29 @@ class ProductionParentTaskService:
                 True,
                 "PARENT_CHILD_ALREADY_SUBMITTED",
             )
+        outcomes = {item.action_id: item for item in record.child_outcomes}
+        children_by_slot = {item.slot_id: item for item in children}
+        for dependency_slot in runtime_child.depends_on_slots:
+            dependency = children_by_slot[dependency_slot]
+            outcome = outcomes.get(dependency.action_id)
+            if not dependency.finalized or outcome is None:
+                return ParentTaskChildSubmission(
+                    task_run_id,
+                    runtime_child.slot_id,
+                    "",
+                    runtime_child.action_id,
+                    False,
+                    "PARENT_CHILD_DEPENDENCY_PENDING",
+                )
+            if outcome.phase != RunPhase.CLOSED or not outcome.authoritative:
+                return ParentTaskChildSubmission(
+                    task_run_id,
+                    runtime_child.slot_id,
+                    "",
+                    runtime_child.action_id,
+                    False,
+                    "PARENT_CHILD_DEPENDENCY_NOT_SATISFIED",
+                )
         planned = plan.children[runtime_child.slot_index]
         intent = ModelActionIntent(
             intent_id="INTENT-PARENT-" + uuid.uuid4().hex,
@@ -588,6 +670,7 @@ class ProductionParentTaskService:
             raise ValueError("PARENT_TASK_NOT_FOUND")
         children = self._store.children(task_run_id)
         transient_phases: list[RunPhase] = []
+        child_state_unknown = False
         for child in children:
             if child.finalized or not child.workflow_id:
                 continue
@@ -597,6 +680,7 @@ class ProductionParentTaskService:
             )
             current = await self._production.current_state(pending)
             if current is None:
+                child_state_unknown = True
                 continue
             if current.phase != RunPhase.CLOSED:
                 transient_phases.append(current.phase)
@@ -624,6 +708,12 @@ class ProductionParentTaskService:
                 record,
                 phase=ParentTaskPhase.RECONCILIATION_REQUIRED,
                 failure_code="STALE_OPERATIONAL_CONTEXT",
+            )
+        elif child_state_unknown:
+            record = replace(
+                record,
+                phase=ParentTaskPhase.RECONCILIATION_REQUIRED,
+                failure_code="CHILD_STATE_UNKNOWN",
             )
         elif RunPhase.UNSYNCED in transient_phases:
             record = replace(
