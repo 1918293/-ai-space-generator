@@ -171,9 +171,15 @@ class SpreadsheetsAPI:
     def __init__(self, values_api):
         self.values_api = values_api
         self.batch_update_calls = []
+        self.get_calls = []
+        self.sheets = [{"properties": {"sheetId": 123, "title": "01_Intake"}}]
 
     def values(self):
         return self.values_api
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        return Request({"sheets": self.sheets})
 
     def batchUpdate(self, **kwargs):
         self.batch_update_calls.append(kwargs)
@@ -335,24 +341,15 @@ def test_logical_append_blocks_blank_duplicate_and_multiple_rows_before_mutation
     assert client._sheets.spreadsheets_api.batch_update_calls == []
 
 
-def test_logical_append_readback_requires_one_key_and_exact_canonical_row():
+def test_logical_append_readback_requires_one_key_and_exact_canonical_row_from_one_snapshot():
     command = logical_append_command()
     client = client_with_fakes()
-    responses = iter(
-        [
-            [["record_id", "value"], ["REC-2", "new"]],
-            [["REC-2", "new"]],
-        ]
-    )
+    client._sheets.values_api.values = [["record_id", "value"], ["REC-2", "new"]]
 
-    def get(**kwargs):
-        client._sheets.values_api.get_calls.append(kwargs)
-        return Request({"range": kwargs["range"], "values": next(responses)})
-
-    client._sheets.values_api.get = get
     readback = asyncio.run(client.readback(command))
     assert readback.matched is True
-    assert client._sheets.values_api.get_calls[1]["range"] == "01_Intake!A2:B2"
+    assert len(client._sheets.values_api.get_calls) == 1
+    assert client._sheets.values_api.get_calls[0]["range"] == "01_Intake!A:B"
 
     client = client_with_fakes()
     client._sheets.values_api.values = [["REC-2", "new"], ["REC-2", "new"]]
@@ -361,10 +358,7 @@ def test_logical_append_readback_requires_one_key_and_exact_canonical_row():
     assert duplicate.error_code == "GOOGLE_SHEETS_APPEND_KEY_NOT_EXACTLY_ONCE"
 
     client = client_with_fakes()
-    responses = iter([[["REC-2", "wrong"]], [["REC-2", "wrong"]]])
-    client._sheets.values_api.get = lambda **kwargs: Request(
-        {"range": kwargs["range"], "values": next(responses)}
-    )
+    client._sheets.values_api.values = [["REC-2", "wrong"]]
     mismatch = asyncio.run(client.readback(command))
     assert mismatch.matched is False
     assert mismatch.error_code == "GOOGLE_SHEETS_READBACK_MISMATCH"
@@ -444,3 +438,69 @@ def test_fixed_range_has_no_secondary_uniqueness_key():
         )
     )
     assert resolver.logical_append_uniqueness_key(proposal()) == ""
+
+
+
+def test_logical_append_rejects_sheet_id_title_mismatch_before_mutation():
+    command = logical_append_command()
+    client = client_with_fakes()
+    client._sheets.spreadsheets_api.sheets = [
+        {"properties": {"sheetId": 123, "title": "Wrong_Tab"}},
+        {"properties": {"sheetId": 999, "title": "01_Intake"}},
+    ]
+    client._sheets.values_api.values = [["record_id", "value"]]
+
+    mutation = asyncio.run(client.mutate(command))
+
+    assert mutation.success is False
+    assert mutation.error_code == "SHEETS_LOGICAL_APPEND_SHEET_ID_MISMATCH"
+    assert mutation.no_effect_confirmed is True
+    assert len(client._sheets.spreadsheets_api.get_calls) == 1
+    assert client._sheets.values_api.get_calls == []
+    assert client._sheets.spreadsheets_api.batch_update_calls == []
+
+
+def test_logical_append_numeric_keys_share_one_canonical_uniqueness_identity():
+    resolver = ConfiguredSheetsCommandResolver(
+        (
+            SheetsMutationTarget(
+                binding_id="drive.formal_cells.update",
+                spreadsheet_id="trusted-sheet",
+                range_a1="01_Intake!A:B",
+                mutation_mode="logical_append",
+                sheet_id=123,
+                unique_key_column="A",
+            ),
+        )
+    )
+    base = proposal()
+
+    def for_run(run_id, values_json):
+        return type(base)(
+            **{
+                **base.__dict__,
+                "action_id": f"{run_id}:A0001:drive.formal_cells.update",
+                "idempotency_key": f"{run_id}:A0001:drive.formal_cells.update",
+                "arguments": (("values_json", values_json),),
+            }
+        )
+
+    integer_key = resolver.logical_append_uniqueness_key(for_run("RUN-I", '[[1,"one"]]'))
+    float_key = resolver.logical_append_uniqueness_key(for_run("RUN-F", '[[1.0,"two"]]'))
+    bool_key = resolver.logical_append_uniqueness_key(for_run("RUN-B", '[[true,"three"]]'))
+
+    assert integer_key == float_key
+    assert bool_key != integer_key
+
+
+def test_logical_append_numeric_duplicate_preflight_uses_canonical_key_semantics():
+    command = logical_append_command('[[1,"new"]]')
+    client = client_with_fakes()
+    client._sheets.values_api.values = [["record_id", "value"], [1.0, "old"]]
+
+    duplicate = asyncio.run(client.mutate(command))
+
+    assert duplicate.success is False
+    assert duplicate.error_code == "SHEETS_LOGICAL_APPEND_KEY_DUPLICATE"
+    assert duplicate.no_effect_confirmed is True
+    assert client._sheets.spreadsheets_api.batch_update_calls == []

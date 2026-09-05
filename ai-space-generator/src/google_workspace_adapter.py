@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -43,6 +44,22 @@ def canonical_values_digest(values: object) -> str:
     normalized = _normalized_sheet_values(values)
     payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _canonical_logical_key(value: Any) -> str:
+    if isinstance(value, bool):
+        payload: object = ["bool", value]
+    elif isinstance(value, (int, float)):
+        number = Decimal(str(value))
+        if not number.is_finite():
+            raise ValueError("SHEETS_LOGICAL_APPEND_NUMERIC_KEY_INVALID")
+        canonical_number = "0" if number == 0 else format(number.normalize(), "f")
+        payload = ["number", canonical_number]
+    elif isinstance(value, str):
+        payload = ["string", value]
+    else:
+        raise ValueError("SHEETS_LOGICAL_APPEND_KEY_TYPE_INVALID")
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _argument_map(proposal: ActionProposal) -> dict[str, str]:
@@ -121,6 +138,12 @@ def _logical_append_columns(range_a1: str, unique_key_column: str) -> tuple[str,
     return match.group("sheet"), start, end, key - start
 
 
+def _sheet_title_from_a1(sheet: str) -> str:
+    if len(sheet) >= 2 and sheet.startswith("'") and sheet.endswith("'"):
+        return sheet[1:-1].replace("''", "'")
+    return sheet
+
+
 class ConfiguredSheetsCommandResolver(DriveCommandResolver):
     """Bind one trusted ActionBinding to one exact configured Sheets target."""
 
@@ -170,7 +193,7 @@ class ConfiguredSheetsCommandResolver(DriveCommandResolver):
                 "sheet_id": target.sheet_id,
                 "range_a1": target.range_a1.strip(),
                 "unique_key_column": target.unique_key_column.strip(),
-                "key": key,
+                "key": _canonical_logical_key(key),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -370,6 +393,36 @@ class GoogleWorkspaceSheetsClient:
             raise ValueError("GOOGLE_SHEETS_VALUES_INVALID")
         return values
 
+    def _logical_append_sheet_identity_matches(
+        self,
+        spreadsheet_id: str,
+        *,
+        sheet_id: int,
+        sheet_a1: str,
+    ) -> bool:
+        result = (
+            self._sheets.spreadsheets()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets(properties(sheetId,title))",
+            )
+            .execute()
+        )
+        sheets = result.get("sheets", [])
+        if not isinstance(sheets, list):
+            raise ValueError("GOOGLE_SHEETS_METADATA_INVALID")
+        expected_title = _sheet_title_from_a1(sheet_a1)
+        matches = []
+        for item in sheets:
+            if not isinstance(item, Mapping):
+                continue
+            properties = item.get("properties")
+            if not isinstance(properties, Mapping):
+                continue
+            if properties.get("sheetId") == sheet_id:
+                matches.append(str(properties.get("title", "")))
+        return matches == [expected_title]
+
     def _mutate_sync(self, command: DriveMutationCommand) -> DriveMutationReceipt:
         logical_append = self._logical_append_input(command)
         if logical_append is not None:
@@ -418,13 +471,27 @@ class GoogleWorkspaceSheetsClient:
         command: DriveMutationCommand,
         mutation: tuple[str, str, int, str, int, int, int, list[Any]],
     ) -> DriveMutationReceipt:
-        spreadsheet_id, range_a1, sheet_id, _, start_column, _, key_offset, row = mutation
+        spreadsheet_id, range_a1, sheet_id, sheet, start_column, _, key_offset, row = mutation
         key = row[key_offset] if key_offset < len(row) else None
         if key is None or (isinstance(key, str) and not key.strip()):
             return DriveMutationReceipt(
                 False, error_code="SHEETS_LOGICAL_APPEND_KEY_REQUIRED", no_effect_confirmed=True
             )
         try:
+            key_token = _canonical_logical_key(key)
+        except ValueError as exc:
+            return DriveMutationReceipt(
+                False, error_code=str(exc), no_effect_confirmed=True
+            )
+        try:
+            if not self._logical_append_sheet_identity_matches(
+                spreadsheet_id, sheet_id=sheet_id, sheet_a1=sheet
+            ):
+                return DriveMutationReceipt(
+                    False,
+                    error_code="SHEETS_LOGICAL_APPEND_SHEET_ID_MISMATCH",
+                    no_effect_confirmed=True,
+                )
             current_values = self._sheet_values(spreadsheet_id, range_a1)
         except Exception as exc:
             return DriveMutationReceipt(
@@ -432,12 +499,12 @@ class GoogleWorkspaceSheetsClient:
                 error_code=f"GOOGLE_SHEETS_APPEND_PREFLIGHT_FAILED:{type(exc).__name__}",
                 no_effect_confirmed=True,
             )
-        existing_keys = [
-            existing[key_offset]
+        existing_key_tokens = [
+            _canonical_logical_key(existing[key_offset])
             for existing in current_values
             if key_offset < len(existing)
         ]
-        if key in existing_keys:
+        if key_token in existing_key_tokens:
             return DriveMutationReceipt(
                 False, error_code="SHEETS_LOGICAL_APPEND_KEY_DUPLICATE", no_effect_confirmed=True
             )
@@ -515,13 +582,23 @@ class GoogleWorkspaceSheetsClient:
         command: DriveMutationCommand,
         mutation: tuple[str, str, int, str, int, int, int, list[Any]],
     ) -> DriveStateReadback:
-        spreadsheet_id, range_a1, _, sheet, start_column, end_column, key_offset, expected_row = mutation
+        spreadsheet_id, range_a1, _, _, _, _, key_offset, expected_row = mutation
         key = expected_row[key_offset] if key_offset < len(expected_row) else None
+        try:
+            key_token = _canonical_logical_key(key)
+        except ValueError:
+            return DriveStateReadback(
+                "",
+                "google-sheets:spreadsheets.values.get",
+                False,
+                "SHEETS_LOGICAL_APPEND_KEY_INVALID",
+            )
         values = self._sheet_values(spreadsheet_id, range_a1)
         matching_rows = [
-            index
-            for index, row in enumerate(values)
-            if key_offset < len(row) and row[key_offset] == key
+            row
+            for row in values
+            if key_offset < len(row)
+            and _canonical_logical_key(row[key_offset]) == key_token
         ]
         if len(matching_rows) != 1:
             return DriveStateReadback(
@@ -530,12 +607,7 @@ class GoogleWorkspaceSheetsClient:
                 False,
                 "GOOGLE_SHEETS_APPEND_KEY_NOT_EXACTLY_ONCE",
             )
-        row_number = matching_rows[0] + 1
-        start_name = _payload(command)["range_a1"].split("!", 1)[1].split(":", 1)[0]
-        end_name = _payload(command)["range_a1"].rsplit(":", 1)[1]
-        exact_range = f"{sheet}!{start_name}{row_number}:{end_name}{row_number}"
-        exact_values = self._sheet_values(spreadsheet_id, exact_range)
-        digest = canonical_values_digest(exact_values)
+        digest = canonical_values_digest([matching_rows[0]])
         return DriveStateReadback(
             digest,
             "google-sheets:spreadsheets.values.get",
