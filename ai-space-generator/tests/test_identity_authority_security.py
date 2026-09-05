@@ -6,6 +6,7 @@ from src.identity_authority_security import (
     AuthoritySnapshot,
     ConfiguredTaskPolicyProvider,
     DeploymentAuthorityContracts,
+    HaoSemanticAuthorityAdapter,
     HaoSemanticSecurityPolicy,
     Permission,
     SQLiteIdentitySecurityStore,
@@ -88,6 +89,30 @@ def test_semantic_authority_snapshot_excludes_projection_and_rejects_stale():
     stale = AuthoritySnapshot("EXP", "Task A", 7, ("drive:current",), ("v13",), projection_ref="same")
     with pytest.raises(PermissionError, match="STALE_AUTHORITY_SNAPSHOT"):
         base.require_fresh(stale)
+
+
+def test_direct_semantic_authority_adapter_readback_rejects_projection_and_stale_changes():
+    class Reader:
+        def __init__(self):
+            self.version = "v12"
+
+        def read_snapshot(self, task):
+            return AuthoritySnapshot("EXP", task, 7, ("drive:current",), (self.version,), projection_ref="chat:projection")
+
+        def read_task_policy(self, task):
+            return __import__("src.identity_authority_security", fromlist=["TaskPolicy"]).TaskPolicy(
+                task, ("drive:current",), ("readback matches",), ("verification",), True
+            )
+
+    reader = Reader()
+    adapter = HaoSemanticAuthorityAdapter(reader)
+    admitted = adapter.snapshot("Task A")
+    assert admitted.projection_ref == "chat:projection"
+    assert adapter.get("Task A").task == "Task A"
+    adapter.readback(admitted)
+    reader.version = "v13"
+    with pytest.raises(PermissionError, match="STALE_AUTHORITY_SNAPSHOT"):
+        adapter.readback(admitted)
 
 
 def test_mode_task_mutation_remains_human_authoritative():
