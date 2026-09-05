@@ -1,0 +1,110 @@
+name: Runtime v2 Logical Append Double Canonicalization
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-logical-append-double-canonicalization
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Guard exact parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "240e9a628f9fe8b2b8e3e8412006a18bbcfa87f5"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/runtime-v2-logical-append-double-canonicalization.yml"
+
+      - name: Materialize bounded double-semantics fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"SOURCE_GUARD_FAILED:{path}:{count}")
+              file.write_text(text.replace(old, new, 1))
+
+          adapter = "ai-space-generator/src/google_workspace_adapter.py"
+
+          replace_once(
+              adapter,
+              "from dataclasses import dataclass\nfrom decimal import Decimal\nfrom hashlib import sha256\nimport json\nimport re",
+              "from dataclasses import dataclass\nfrom hashlib import sha256\nimport json\nimport math\nimport re",
+          )
+
+          replace_once(
+              adapter,
+              '''def _canonical_logical_key(value: Any) -> str:\n    if isinstance(value, bool):\n        payload: object = ["bool", value]\n    elif isinstance(value, (int, float)):\n        number = Decimal(str(value))\n        if not number.is_finite():\n            raise ValueError("SHEETS_LOGICAL_APPEND_NUMERIC_KEY_INVALID")\n        canonical_number = "0" if number == 0 else format(number.normalize(), "f")\n        payload = ["number", canonical_number]\n    elif isinstance(value, str):\n        payload = ["string", value]\n    else:\n        raise ValueError("SHEETS_LOGICAL_APPEND_KEY_TYPE_INVALID")\n    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))\n''',
+              '''def _canonical_sheet_double(value: int | float) -> str:\n    try:\n        number = float(value)\n    except (OverflowError, TypeError, ValueError) as exc:\n        raise ValueError("SHEETS_LOGICAL_APPEND_NUMERIC_VALUE_INVALID") from exc\n    if not math.isfinite(number):\n        raise ValueError("SHEETS_LOGICAL_APPEND_NUMERIC_VALUE_INVALID")\n    # Sheets numberValue is IEEE-754 double. Collapse signed zero because provider\n    # readback may not preserve the sign bit for a displayed zero.\n    if number == 0.0:\n        number = 0.0\n    return number.hex()\n\n\ndef _canonical_logical_key(value: Any) -> str:\n    if isinstance(value, bool):\n        payload: object = ["bool", value]\n    elif isinstance(value, (int, float)):\n        payload = ["number", _canonical_sheet_double(value)]\n    elif isinstance(value, str):\n        payload = ["string", value]\n    else:\n        raise ValueError("SHEETS_LOGICAL_APPEND_KEY_TYPE_INVALID")\n    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))\n\n\ndef _logical_append_values_digest(values: object) -> str:\n    normalized = _normalized_sheet_values(values)\n    if not isinstance(normalized, list):\n        raise ValueError("SHEETS_LOGICAL_APPEND_VALUES_INVALID")\n    canonical_rows: list[list[Any]] = []\n    for raw_row in normalized:\n        if not isinstance(raw_row, list):\n            raise ValueError("SHEETS_LOGICAL_APPEND_VALUES_INVALID")\n        row: list[Any] = []\n        for item in raw_row:\n            if isinstance(item, bool):\n                row.append(item)\n            elif isinstance(item, (int, float)):\n                row.append(["__sheets_number__", _canonical_sheet_double(item)])\n            else:\n                row.append(item)\n        canonical_rows.append(row)\n    payload = json.dumps(\n        canonical_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")\n    )\n    return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()\n''',
+          )
+
+          replace_once(
+              adapter,
+              '''        expected_digest = canonical_values_digest(values)\n        trusted_payload = {''',
+              '''        try:\n            expected_digest = (\n                _logical_append_values_digest(values)\n                if target.mutation_mode == "logical_append"\n                else canonical_values_digest(values)\n            )\n        except ValueError:\n            return None\n        trusted_payload = {''',
+          )
+
+          replace_once(
+              adapter,
+              '''        digest = canonical_values_digest([matching_rows[0]])\n        return DriveStateReadback(''',
+              '''        try:\n            digest = _logical_append_values_digest([matching_rows[0]])\n        except ValueError:\n            return DriveStateReadback(\n                "",\n                "google-sheets:spreadsheets.values.get",\n                False,\n                "GOOGLE_SHEETS_APPEND_NUMERIC_READBACK_INVALID",\n            )\n        return DriveStateReadback(''',
+          )
+
+          tests = Path("ai-space-generator/tests/test_google_workspace_adapter.py")
+          text = tests.read_text()
+          marker = "test_logical_append_keys_use_provider_double_precision"
+          if marker in text:
+              raise SystemExit("TEST_ALREADY_PRESENT")
+          tests.write_text(
+              text
+              + '''\n\n\ndef test_logical_append_keys_use_provider_double_precision():\n    resolver = ConfiguredSheetsCommandResolver(\n        (\n            SheetsMutationTarget(\n                binding_id="drive.formal_cells.update",\n                spreadsheet_id="trusted-sheet",\n                range_a1="01_Intake!A:B",\n                mutation_mode="logical_append",\n                sheet_id=123,\n                unique_key_column="A",\n            ),\n        )\n    )\n    base = proposal()\n\n    def for_run(run_id, values_json):\n        return type(base)(\n            **{\n                **base.__dict__,\n                "action_id": f"{run_id}:A0001:drive.formal_cells.update",\n                "idempotency_key": f"{run_id}:A0001:drive.formal_cells.update",\n                "arguments": (("values_json", values_json),),\n            }\n        )\n\n    lower = resolver.logical_append_uniqueness_key(\n        for_run("RUN-LOW", '[[9007199254740992,"one"]]')\n    )\n    rounded_same = resolver.logical_append_uniqueness_key(\n        for_run("RUN-HIGH", '[[9007199254740993,"two"]]')\n    )\n    next_double = resolver.logical_append_uniqueness_key(\n        for_run("RUN-NEXT", '[[9007199254740994,"three"]]')\n    )\n\n    assert lower == rounded_same\n    assert next_double != lower\n\n\ndef test_logical_append_duplicate_preflight_uses_provider_double_precision():\n    command = logical_append_command('[[9007199254740993,"new"]]')\n    client = client_with_fakes()\n    client._sheets.values_api.values = [\n        ["record_id", "value"],\n        [9007199254740992, "old"],\n    ]\n\n    duplicate = asyncio.run(client.mutate(command))\n\n    assert duplicate.success is False\n    assert duplicate.error_code == "SHEETS_LOGICAL_APPEND_KEY_DUPLICATE"\n    assert duplicate.no_effect_confirmed is True\n    assert client._sheets.spreadsheets_api.batch_update_calls == []\n\n\ndef test_logical_append_readback_digest_normalizes_sheets_numbers():\n    command = logical_append_command('[["REC-N",1.0]]')\n    client = client_with_fakes()\n    client._sheets.values_api.values = [["REC-N", 1]]\n\n    readback = asyncio.run(client.readback(command))\n\n    assert readback.matched is True\n    assert readback.state_digest == command.expected_state_digest\n\n\ndef test_fixed_range_digest_semantics_remain_unchanged():\n    assert canonical_values_digest([[1]]) != canonical_values_digest([[1.0]])\n'''
+          )
+          PY
+
+      - name: Install Runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q -r ai-space-generator/requirements-control.txt
+
+      - name: Run focused and related tests
+        working-directory: ai-space-generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          pytest -q \
+            tests/test_google_workspace_adapter.py \
+            tests/test_idempotent_broker.py \
+            tests/test_postgres_persistence.py \
+            tests/test_runtime_deployment.py \
+            tests/test_provider_reconciliation.py \
+            tests/test_reconciliation.py
+          python -m compileall -q src tests
+          git diff --check
+
+      - name: Commit tested candidate and self-remove workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/runtime-v2-logical-append-double-canonicalization.yml
+          git config user.name "hao-runtime-v2-bot"
+          git config user.email "hao-runtime-v2-bot@users.noreply.github.com"
+          git add ai-space-generator/src/google_workspace_adapter.py \
+                  ai-space-generator/tests/test_google_workspace_adapter.py \
+                  .github/workflows/runtime-v2-logical-append-double-canonicalization.yml
+          git commit -m "EXP: align logical append with Sheets number semantics"
+          git push origin HEAD:exp/runtime-v2-logical-append-double-canonicalization
