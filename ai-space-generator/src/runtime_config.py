@@ -150,6 +150,44 @@ def _secret_bindings(values: dict[str, str], *, production: bool) -> tuple[tuple
     return tuple(sorted(normalized))
 
 
+def _attestation_previous_keys(
+    values: dict[str, str],
+    *,
+    current_key_id: str,
+    current_secret: str,
+    production: bool,
+    bound_secret_keys: set[str],
+) -> tuple[tuple[str, str], ...]:
+    raw = str(values.get("HAO_ATTESTATION_PREVIOUS_KEYS_JSON", "")).strip()
+    if not raw:
+        return ()
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("INVALID_JSON_CONFIG:HAO_ATTESTATION_PREVIOUS_KEYS_JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("ATTESTATION_PREVIOUS_KEYS_OBJECT_REQUIRED")
+    if production and decoded and "HAO_ATTESTATION_PREVIOUS_KEYS_JSON" not in bound_secret_keys:
+        raise ValueError("ATTESTATION_PREVIOUS_KEYS_SECRET_BINDING_REQUIRED")
+
+    normalized: list[tuple[str, str]] = []
+    seen_secrets = {current_secret}
+    for key_id, secret in decoded.items():
+        key_id = str(key_id).strip()
+        secret = str(secret)
+        if not key_id:
+            raise ValueError("ATTESTATION_PREVIOUS_KEY_ID_REQUIRED")
+        if key_id == current_key_id:
+            raise ValueError("ATTESTATION_PREVIOUS_KEY_ID_CONFLICT")
+        if len(secret.encode("utf-8")) < 32:
+            raise ValueError("ATTESTATION_PREVIOUS_SECRET_MIN_32_BYTES")
+        if secret in seen_secrets:
+            raise ValueError("ATTESTATION_SECRET_REUSE_NOT_ALLOWED")
+        seen_secrets.add(secret)
+        normalized.append((key_id, secret))
+    return tuple(sorted(normalized))
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     environment: RuntimeEnvironment
@@ -180,6 +218,7 @@ class RuntimeSettings:
     expected_hao_subject: str
     attestation_key_id: str
     attestation_secret: str
+    attestation_previous_keys: tuple[tuple[str, str], ...]
     secret_bindings: tuple[tuple[str, str], ...]
     otel_endpoint: str
 
@@ -190,6 +229,10 @@ class RuntimeSettings:
     @property
     def secret_binding_map(self) -> dict[str, str]:
         return dict(self.secret_bindings)
+
+    @property
+    def attestation_previous_key_map(self) -> dict[str, str]:
+        return dict(self.attestation_previous_keys)
 
     @property
     def deployment_identity(self) -> tuple[tuple[str, str], ...]:
@@ -354,6 +397,20 @@ class RuntimeSettings:
             raise ValueError("ATTESTATION_SECRET_MIN_32_BYTES")
 
         secret_bindings = _secret_bindings(values, production=production)
+        bound_secret_keys = {key for key, _ in secret_bindings}
+        if (
+            production
+            and urlparse(database_url).password is not None
+            and "HAO_DATABASE_URL" not in bound_secret_keys
+        ):
+            raise ValueError("DATABASE_URL_PASSWORD_SECRET_BINDING_REQUIRED")
+        attestation_previous_keys = _attestation_previous_keys(
+            values,
+            current_key_id=attestation_key_id,
+            current_secret=attestation_secret,
+            production=production,
+            bound_secret_keys=bound_secret_keys,
+        )
 
         return cls(
             environment=environment,
@@ -384,6 +441,7 @@ class RuntimeSettings:
             expected_hao_subject=expected_hao_subject,
             attestation_key_id=attestation_key_id,
             attestation_secret=attestation_secret,
+            attestation_previous_keys=attestation_previous_keys,
             secret_bindings=secret_bindings,
             otel_endpoint=otel_endpoint,
         )
