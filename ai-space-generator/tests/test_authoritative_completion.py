@@ -1,4 +1,5 @@
 from dataclasses import replace
+import sqlite3
 
 import pytest
 
@@ -21,6 +22,8 @@ from src.execution_control import (
 
 
 SECRET = b"hao-control-plane-test-secret-32bytes-minimum"
+OLD_SECRET = b"hao-control-plane-old-signing-secret-32bytes-min"
+NEW_SECRET = b"hao-control-plane-new-signing-secret-32bytes-min"
 
 
 def closed_record():
@@ -147,6 +150,73 @@ def test_attestation_is_bound_to_operational_version_task_action_and_evidence():
     assert attestor.verify(attestation, changed_evidence, operational_version=7) is False
 
 
+def test_attestation_binds_key_id_and_rejects_key_id_substitution():
+    record = closed_record()
+    old = CompletionAttestor(OLD_SECRET, key_id="completion-v1")
+    receipt = old.issue(
+        record,
+        operational_version=7,
+        issued_at="2026-09-05T15:40:00+08:00",
+    )
+    assert receipt.key_id == "completion-v1"
+    assert old.verify(receipt, record, operational_version=7) is True
+
+    rotated = CompletionAttestor(
+        NEW_SECRET,
+        key_id="completion-v2",
+        verification_keys={"completion-v1": OLD_SECRET},
+    )
+    assert rotated.verify(receipt, record, operational_version=7) is True
+    assert rotated.verify(
+        replace(receipt, key_id="completion-v2"),
+        record,
+        operational_version=7,
+    ) is False
+
+
+def test_rotation_retains_explicit_previous_key_and_revocation_fails_closed():
+    record = closed_record()
+    old = CompletionAttestor(OLD_SECRET, key_id="completion-v1")
+    old_receipt = old.issue(
+        record,
+        operational_version=7,
+        issued_at="2026-09-05T15:41:00+08:00",
+    )
+
+    rotated = CompletionAttestor(
+        NEW_SECRET,
+        key_id="completion-v2",
+        verification_keys={"completion-v1": OLD_SECRET},
+    )
+    assert rotated.verify(old_receipt, record, operational_version=7) is True
+    new_receipt = rotated.issue(
+        record,
+        operational_version=7,
+        issued_at="2026-09-05T15:42:00+08:00",
+    )
+    assert new_receipt.key_id == "completion-v2"
+    assert rotated.verify(new_receipt, record, operational_version=7) is True
+    assert old.verify(new_receipt, record, operational_version=7) is False
+
+    revoked = CompletionAttestor(NEW_SECRET, key_id="completion-v2")
+    assert revoked.verify(old_receipt, record, operational_version=7) is False
+
+
+def test_attestor_rejects_conflicting_or_weak_rotation_keys():
+    with pytest.raises(ValueError, match="ATTESTATION_KEY_ID_CONFLICT"):
+        CompletionAttestor(
+            NEW_SECRET,
+            key_id="completion-v2",
+            verification_keys={"completion-v2": OLD_SECRET},
+        )
+    with pytest.raises(ValueError, match="ATTESTATION_VERIFICATION_SECRET_MIN_32_BYTES"):
+        CompletionAttestor(
+            NEW_SECRET,
+            key_id="completion-v2",
+            verification_keys={"completion-v1": b"short"},
+        )
+
+
 def test_authoritative_store_rejects_unsigned_bypass_and_accepts_runtime_receipt(tmp_path):
     record = closed_record()
     attestor = CompletionAttestor(SECRET)
@@ -181,6 +251,41 @@ def test_authoritative_store_rejects_unsigned_bypass_and_accepts_runtime_receipt
     second = store.commit(valid, record, operational_version=7, attestor=attestor)
     assert first.code == "AUTHORITATIVE_COMPLETION_COMMITTED"
     assert second.code == "ATTESTATION_ALREADY_COMMITTED"
+
+
+def test_authoritative_store_persists_key_id_and_replays_across_rotation(tmp_path):
+    record = closed_record()
+    path = tmp_path / "completion-keyed.sqlite"
+    old = CompletionAttestor(OLD_SECRET, key_id="completion-v1")
+    receipt = old.issue(
+        record,
+        operational_version=7,
+        issued_at="2026-09-05T15:43:00+08:00",
+    )
+    store = SQLiteAuthoritativeCompletionStore(str(path))
+    assert store.commit(receipt, record, operational_version=7, attestor=old).committed is True
+
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT key_id, signature FROM authoritative_completions WHERE run_id = ?",
+            (record.run_id,),
+        ).fetchone()
+    assert row == ("completion-v1", receipt.signature)
+
+    rotated = CompletionAttestor(
+        NEW_SECRET,
+        key_id="completion-v2",
+        verification_keys={"completion-v1": OLD_SECRET},
+    )
+    restarted = SQLiteAuthoritativeCompletionStore(str(path))
+    replay = restarted.commit(receipt, record, operational_version=7, attestor=rotated)
+    assert replay.committed is True
+    assert replay.code == "ATTESTATION_ALREADY_COMMITTED"
+
+    revoked = CompletionAttestor(NEW_SECRET, key_id="completion-v2")
+    rejected = restarted.commit(receipt, record, operational_version=7, attestor=revoked)
+    assert rejected.committed is False
+    assert rejected.code == "INVALID_CONTROL_PLANE_ATTESTATION"
 
 
 def test_same_run_cannot_be_rewritten_with_different_valid_completion_attestation(tmp_path):
