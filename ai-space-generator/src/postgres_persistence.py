@@ -304,6 +304,18 @@ class PostgresIdempotencyStore:
                 raise RuntimeError("IDEMPOTENCY_RESERVATION_LOST")
             return False, self._record(row)
 
+    def release(self, key: str, fingerprint: str) -> None:
+        with self._database.transaction() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM idempotency_records
+                WHERE key = %s AND action_fingerprint = %s AND state = %s
+                """,
+                (key, fingerprint, IdempotencyState.RESERVED.value),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("IDEMPOTENCY_RESERVATION_CHANGED_OR_MISSING")
+
     def set_state(
         self,
         key: str,

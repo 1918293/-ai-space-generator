@@ -395,3 +395,52 @@ def test_logical_append_target_coordinates_are_deployment_owned():
         assert str(exc) == "SHEETS_UNIQUE_KEY_COLUMN_OUTSIDE_RANGE"
     else:
         raise AssertionError("key coordinates outside the trusted range must be rejected")
+
+
+
+def test_logical_append_uniqueness_key_is_stable_across_runs_and_payload_conflicts():
+    resolver = ConfiguredSheetsCommandResolver(
+        (
+            SheetsMutationTarget(
+                binding_id="drive.formal_cells.update",
+                spreadsheet_id="trusted-sheet",
+                range_a1="01_Intake!A:B",
+                mutation_mode="logical_append",
+                sheet_id=123,
+                unique_key_column="A",
+            ),
+        )
+    )
+    base = proposal()
+
+    def for_run(run_id, values_json):
+        return type(base)(
+            **{
+                **base.__dict__,
+                "action_id": f"{run_id}:A0001:drive.formal_cells.update",
+                "idempotency_key": f"{run_id}:A0001:drive.formal_cells.update",
+                "arguments": (("values_json", values_json),),
+            }
+        )
+
+    first = for_run("RUN-A", '[["REC-X","one"]]')
+    same_key_different_payload = for_run("RUN-B", '[["REC-X","two"]]')
+    different_key = for_run("RUN-C", '[["REC-Y","one"]]')
+
+    first_key = resolver.logical_append_uniqueness_key(first)
+    assert first_key.startswith("GSHEET-UNIQUE:")
+    assert resolver.logical_append_uniqueness_key(same_key_different_payload) == first_key
+    assert resolver.logical_append_uniqueness_key(different_key) != first_key
+
+
+def test_fixed_range_has_no_secondary_uniqueness_key():
+    resolver = ConfiguredSheetsCommandResolver(
+        (
+            SheetsMutationTarget(
+                binding_id="drive.formal_cells.update",
+                spreadsheet_id="trusted-sheet",
+                range_a1="01_Intake!A10:B11",
+            ),
+        )
+    )
+    assert resolver.logical_append_uniqueness_key(proposal()) == ""

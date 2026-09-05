@@ -145,6 +145,39 @@ class ConfiguredSheetsCommandResolver(DriveCommandResolver):
             by_binding[key] = target
         self._by_binding = by_binding
 
+    def logical_append_uniqueness_key(self, proposal: ActionProposal) -> str:
+        binding_id = _binding_id(proposal)
+        target = self._by_binding.get(binding_id)
+        if target is None or target.mutation_mode != "logical_append":
+            return ""
+        arguments = _argument_map(proposal)
+        values, error = _validated_values_json(arguments.get("values_json", ""))
+        if error or values is None or len(values) != 1:
+            return ""
+        _, _, _, key_offset = _logical_append_columns(
+            target.range_a1.strip(), target.unique_key_column.strip()
+        )
+        row = values[0]
+        if key_offset >= len(row):
+            return ""
+        key = row[key_offset]
+        if key is None or (isinstance(key, str) and not key.strip()):
+            return ""
+        material = json.dumps(
+            {
+                "kind": "google-sheets-logical-append-unique-key",
+                "spreadsheet_id": target.spreadsheet_id.strip(),
+                "sheet_id": target.sheet_id,
+                "range_a1": target.range_a1.strip(),
+                "unique_key_column": target.unique_key_column.strip(),
+                "key": key,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "GSHEET-UNIQUE:" + sha256(material.encode("utf-8")).hexdigest()
+
     def resolve(self, proposal: ActionProposal) -> DriveMutationCommand | None:
         binding_id = _binding_id(proposal)
         target = self._by_binding.get(binding_id)

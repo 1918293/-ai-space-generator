@@ -5,7 +5,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 import sqlite3
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .controlled_runner import ToolOutcome
 from .execution_control import (
@@ -42,6 +42,8 @@ class IdempotencyStore(Protocol):
     def get(self, key: str) -> IdempotencyRecord | None: ...
 
     def reserve(self, key: str, fingerprint: str) -> tuple[bool, IdempotencyRecord]: ...
+
+    def release(self, key: str, fingerprint: str) -> None: ...
 
     def set_state(
         self,
@@ -146,6 +148,16 @@ class SQLiteIdempotencyStore:
         finally:
             conn.close()
 
+    def release(self, key: str, fingerprint: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM idempotency_records "
+                "WHERE key = ? AND action_fingerprint = ? AND state = ?",
+                (key, fingerprint, IdempotencyState.RESERVED.value),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("IDEMPOTENCY_RESERVATION_CHANGED_OR_MISSING")
+
     def set_state(
         self,
         key: str,
@@ -178,9 +190,16 @@ class IdempotentAsyncBroker:
     - exceptions are treated conservatively as UNKNOWN_EFFECT.
     """
 
-    def __init__(self, provider: AsyncRawProvider, store: IdempotencyStore) -> None:
+    def __init__(
+        self,
+        provider: AsyncRawProvider,
+        store: IdempotencyStore,
+        *,
+        uniqueness_key_resolver: Callable[[ActionProposal], str] | None = None,
+    ) -> None:
         self._provider = provider
         self._store = store
+        self._uniqueness_key_resolver = uniqueness_key_resolver
 
     async def execute(self, proposal: ActionProposal) -> ToolOutcome:
         if proposal.archetype not in {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}:
@@ -217,9 +236,43 @@ class IdempotentAsyncBroker:
                 failure_stage=FailureStage.TOOL_EXECUTION,
             )
 
+        uniqueness_key = ""
+        uniqueness_reserved = False
+        if self._uniqueness_key_resolver is not None:
+            try:
+                uniqueness_key = str(self._uniqueness_key_resolver(proposal) or "").strip()
+            except Exception as exc:
+                code = f"IDEMPOTENCY_UNIQUENESS_KEY_RESOLUTION_FAILED:{type(exc).__name__}"
+                self._store.set_state(
+                    key,
+                    fingerprint,
+                    IdempotencyState.FAILED_NO_EFFECT,
+                    error_code=code,
+                )
+                return ToolOutcome(False, error_code=code, failure_stage=FailureStage.BINDING)
+
+        if uniqueness_key and uniqueness_key != key:
+            uniqueness_reserved, _ = self._store.reserve(uniqueness_key, fingerprint)
+            if not uniqueness_reserved:
+                code = "IDEMPOTENCY_UNIQUENESS_CONFLICT"
+                self._store.set_state(
+                    key,
+                    fingerprint,
+                    IdempotencyState.FAILED_NO_EFFECT,
+                    error_code=code,
+                )
+                return ToolOutcome(False, error_code=code, failure_stage=FailureStage.POLICY)
+
         try:
             outcome = await self._provider.execute(proposal)
         except Exception:
+            if uniqueness_reserved:
+                self._store.set_state(
+                    uniqueness_key,
+                    fingerprint,
+                    IdempotencyState.UNKNOWN_EFFECT,
+                    error_code="PROVIDER_EXCEPTION_EFFECT_UNKNOWN",
+                )
             self._store.set_state(
                 key,
                 fingerprint,
@@ -234,6 +287,13 @@ class IdempotentAsyncBroker:
 
         if outcome.success:
             if not outcome.receipt_id.strip() or not outcome.source.strip():
+                if uniqueness_reserved:
+                    self._store.set_state(
+                        uniqueness_key,
+                        fingerprint,
+                        IdempotencyState.UNKNOWN_EFFECT,
+                        error_code="PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",
+                    )
                 self._store.set_state(
                     key,
                     fingerprint,
@@ -245,6 +305,14 @@ class IdempotentAsyncBroker:
                     error_code="PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",
                     failure_stage=FailureStage.PERSISTENCE,
                 )
+            if uniqueness_reserved:
+                self._store.set_state(
+                    uniqueness_key,
+                    fingerprint,
+                    IdempotencyState.SUCCEEDED,
+                    receipt_id=outcome.receipt_id,
+                    source=outcome.source,
+                )
             self._store.set_state(
                 key,
                 fingerprint,
@@ -254,6 +322,18 @@ class IdempotentAsyncBroker:
             )
             return outcome
 
+        if uniqueness_reserved:
+            try:
+                self._store.release(uniqueness_key, fingerprint)
+            except Exception:
+                code = "IDEMPOTENCY_UNIQUENESS_RELEASE_FAILED"
+                self._store.set_state(
+                    key,
+                    fingerprint,
+                    IdempotencyState.FAILED_NO_EFFECT,
+                    error_code=code,
+                )
+                return ToolOutcome(False, error_code=code, failure_stage=FailureStage.PERSISTENCE)
         self._store.set_state(
             key,
             fingerprint,

@@ -139,3 +139,129 @@ def test_concurrent_duplicate_calls_reserve_once_and_never_double_execute(tmp_pa
     blocked = [result for result in results if not result.success]
     assert len(blocked) == 1
     assert blocked[0].error_code == "IDEMPOTENCY_EFFECT_UNKNOWN"
+
+
+
+def test_different_action_ids_with_same_uniqueness_key_serialize_provider(tmp_path):
+    provider = Provider(delay=0.05)
+    broker = IdempotentAsyncBroker(
+        provider,
+        store(tmp_path),
+        uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",
+    )
+    first = mutation(
+        action_id="RUN-A:A0001:drive.update",
+        idempotency_key="RUN-A:A0001:drive.update",
+    )
+    second = mutation(
+        action_id="RUN-B:A0001:drive.update",
+        idempotency_key="RUN-B:A0001:drive.update",
+    )
+
+    async def run_both():
+        return await asyncio.gather(broker.execute(first), broker.execute(second))
+
+    results = asyncio.run(run_both())
+    assert provider.calls == 1
+    assert sum(result.success for result in results) == 1
+    blocked = [result for result in results if not result.success]
+    assert len(blocked) == 1
+    assert blocked[0].error_code == "IDEMPOTENCY_UNIQUENESS_CONFLICT"
+    assert blocked[0].failure_stage == FailureStage.POLICY
+
+
+def test_uniqueness_reservation_is_released_after_confirmed_no_effect(tmp_path):
+    durable_store = store(tmp_path)
+    first_provider = Provider(
+        ToolOutcome(
+            False,
+            error_code="QUOTA_BLOCKED",
+            failure_stage=FailureStage.TOOL_EXECUTION,
+        )
+    )
+    first = mutation(
+        action_id="RUN-A:A0001:drive.update",
+        idempotency_key="RUN-A:A0001:drive.update",
+    )
+    first_outcome = asyncio.run(
+        IdempotentAsyncBroker(
+            first_provider,
+            durable_store,
+            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",
+        ).execute(first)
+    )
+    assert first_outcome.error_code == "QUOTA_BLOCKED"
+    assert durable_store.get("GSHEET-UNIQUE:REC-X") is None
+
+    second_provider = Provider()
+    second = mutation(
+        action_id="RUN-B:A0001:drive.update",
+        idempotency_key="RUN-B:A0001:drive.update",
+    )
+    second_outcome = asyncio.run(
+        IdempotentAsyncBroker(
+            second_provider,
+            durable_store,
+            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",
+        ).execute(second)
+    )
+    assert second_outcome.success is True
+    assert second_provider.calls == 1
+
+
+def test_unknown_effect_keeps_uniqueness_reservation_and_blocks_new_run(tmp_path):
+    durable_store = store(tmp_path)
+    first_provider = Provider(exc=RuntimeError("connection dropped"))
+    first = mutation(
+        action_id="RUN-A:A0001:drive.update",
+        idempotency_key="RUN-A:A0001:drive.update",
+    )
+    first_outcome = asyncio.run(
+        IdempotentAsyncBroker(
+            first_provider,
+            durable_store,
+            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",
+        ).execute(first)
+    )
+    assert first_outcome.error_code == "PROVIDER_EXCEPTION_EFFECT_UNKNOWN"
+    assert durable_store.get("GSHEET-UNIQUE:REC-X").state == IdempotencyState.UNKNOWN_EFFECT
+
+    second_provider = Provider()
+    second = mutation(
+        action_id="RUN-B:A0001:drive.update",
+        idempotency_key="RUN-B:A0001:drive.update",
+    )
+    blocked = asyncio.run(
+        IdempotentAsyncBroker(
+            second_provider,
+            durable_store,
+            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",
+        ).execute(second)
+    )
+    assert blocked.success is False
+    assert blocked.error_code == "IDEMPOTENCY_UNIQUENESS_CONFLICT"
+    assert second_provider.calls == 0
+
+
+def test_different_uniqueness_keys_do_not_serialize_each_other(tmp_path):
+    provider = Provider(delay=0.01)
+    broker = IdempotentAsyncBroker(
+        provider,
+        store(tmp_path),
+        uniqueness_key_resolver=lambda proposal: "UNIQUE:" + proposal.action_id.split(":", 1)[0],
+    )
+    first = mutation(
+        action_id="RUN-A:A0001:drive.update",
+        idempotency_key="RUN-A:A0001:drive.update",
+    )
+    second = mutation(
+        action_id="RUN-B:A0001:drive.update",
+        idempotency_key="RUN-B:A0001:drive.update",
+    )
+
+    async def run_both():
+        return await asyncio.gather(broker.execute(first), broker.execute(second))
+
+    results = asyncio.run(run_both())
+    assert provider.calls == 2
+    assert all(result.success for result in results)

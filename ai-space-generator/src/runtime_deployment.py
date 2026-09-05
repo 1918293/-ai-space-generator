@@ -512,7 +512,11 @@ async def run_worker(values: dict[str, str]) -> None:
     )
     resolver = ConfiguredSheetsCommandResolver(targets)
     raw_provider = ControlledGoogleDriveProvider(resolver, google_client)
-    idempotent = IdempotentAsyncBroker(raw_provider, persistence.idempotency)
+    idempotent = IdempotentAsyncBroker(
+        raw_provider,
+        persistence.idempotency,
+        uniqueness_key_resolver=resolver.logical_append_uniqueness_key,
+    )
     reconciliation_broker = ReconciliationAwareBroker(idempotent, reconciliation)
     broker = (
         ObservableReconciliationBroker(reconciliation_broker, reconciliation, telemetry)
