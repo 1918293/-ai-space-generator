@@ -124,7 +124,8 @@ class _PostgresRuntimeDatabase:
                     authority_snapshot_fingerprint TEXT NOT NULL,
                     evidence_digest TEXT NOT NULL,
                     issued_at TEXT NOT NULL,
-                    signature TEXT NOT NULL
+                    signature TEXT NOT NULL,
+                    key_id TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -343,14 +344,18 @@ class PostgresAuthoritativeCompletionStore:
 
         with self._database.transaction() as conn:
             existing = conn.execute(
-                "SELECT signature FROM authoritative_completions WHERE run_id = %s FOR UPDATE",
+                "SELECT key_id, signature FROM authoritative_completions WHERE run_id = %s FOR UPDATE",
                 (attestation.run_id,),
             ).fetchone()
             if existing is not None:
                 import hmac
 
-                existing_signature = _value(existing, "signature", 0)
-                if hmac.compare_digest(existing_signature, attestation.signature):
+                existing_key_id = _value(existing, "key_id", 0)
+                existing_signature = _value(existing, "signature", 1)
+                if (
+                    existing_key_id == attestation.key_id
+                    and hmac.compare_digest(existing_signature, attestation.signature)
+                ):
                     return CompletionCommitResult(True, "ATTESTATION_ALREADY_COMMITTED")
                 return CompletionCommitResult(False, "AUTHORITATIVE_COMPLETION_CONFLICT")
 
@@ -358,8 +363,9 @@ class PostgresAuthoritativeCompletionStore:
                 """
                 INSERT INTO authoritative_completions(
                     run_id, action_id, task, mode, operational_version,
-                    authority_snapshot_fingerprint, evidence_digest, issued_at, signature
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    authority_snapshot_fingerprint, evidence_digest, issued_at,
+                    key_id, signature
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     attestation.run_id,
@@ -370,6 +376,7 @@ class PostgresAuthoritativeCompletionStore:
                     attestation.authority_snapshot_fingerprint,
                     attestation.evidence_digest,
                     attestation.issued_at,
+                    attestation.key_id,
                     attestation.signature,
                 ),
             )
