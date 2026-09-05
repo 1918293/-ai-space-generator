@@ -5,6 +5,7 @@ on:
     branches:
       - exp/runtime-v2-infrastructure-terraform-candidate
       - exp/runtime-v2-cloud-sql-edition-preflight
+      - exp/runtime-v2-deployment-execution-profile
       - exp/execution-control-plane-v1
   workflow_dispatch:
 
@@ -30,4 +31,24 @@ jobs:
       - name: Terraform validate
         run: terraform validate -no-color
       - name: Terraform mocked tests
+        run: terraform test -no-color
+
+  terraform-bootstrap-gate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-space-generator/deploy/terraform/runtime-v2/bootstrap
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+      - name: Terraform bootstrap format
+        run: terraform fmt -check -diff -recursive
+      - name: Terraform bootstrap init without backend
+        run: terraform init -backend=false -input=false
+      - name: Terraform bootstrap validate
+        run: terraform validate -no-color
+      - name: Terraform bootstrap mocked tests
         run: terraform test -no-color
