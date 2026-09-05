@@ -44,6 +44,11 @@ class ToolResult(BaseModel):
     authorization_scope: str = ""
     authoritative: bool = False
     operational_version: int | None = None
+    task_run_id: str = ""
+    slot_id: str = ""
+    action_id: str = ""
+    child_slots: list[str] = Field(default_factory=list)
+    failure_code: str = ""
 
 
 async def _confirm_authorization(
@@ -57,6 +62,20 @@ async def _confirm_authorization(
         (
             f"Confirm Hao System decision: {decision} workflow {workflow_id} for exact scope "
             f"'{scope}'. This may unblock a real side effect."
+        ),
+        ApprovalConfirmation,
+    )
+
+
+async def _confirm_parent_acceptance(
+    task_run_id: str,
+    accepted: bool,
+) -> ApprovalConfirmation | Elicit[ApprovalConfirmation]:
+    decision = "ACCEPT" if accepted else "REJECT"
+    return Elicit(
+        (
+            f"Confirm Hao System parent-task decision: {decision} task {task_run_id}. "
+            "This records Hao's explicit task-level acceptance after required child outcomes."
         ),
         ApprovalConfirmation,
     )
@@ -107,7 +126,9 @@ def build_mcp_control_server(
             "Use these tools for Hao System controlled execution. Never treat a native/direct "
             "tool result as authoritative completion. Model-visible action arguments are "
             "non-authoritative and accepted only when the runtime ActionBinding allowlists them. "
-            "Consequential approval must use hao_control_authorize and human elicitation."
+            "Consequential approval must use hao_control_authorize and human elicitation. "
+            "Multi-action work must use deployment-owned parent plans rather than inventing "
+            "bindings or bypassing child control workflows."
         ),
     )
 
@@ -215,6 +236,7 @@ def build_mcp_control_server(
                 task=view.task,
                 phase=view.phase,
                 authorization_scope=view.authorization_scope,
+                failure_code=view.failure_code,
             )
         except (PermissionError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
@@ -295,6 +317,149 @@ def build_mcp_control_server(
                 workflow_id=view.workflow_id,
                 phase=view.phase,
                 authoritative=view.authoritative,
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        title="Start Hao parent task",
+        description=(
+            "Start one deployment-owned multi-action parent plan for the current runtime TASK. "
+            "The runtime, not the model, owns plan task, child capabilities and provider bindings."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        meta=_oauth_meta(SCOPE_EXECUTE),
+    )
+    def hao_parent_start(plan_id: str) -> ToolResult:
+        try:
+            view = bridge.parent_start(principal(), plan_id=plan_id)
+            return ToolResult(
+                ok=True,
+                code="PARENT_TASK_STARTED",
+                task_run_id=view.task_run_id,
+                phase=view.phase,
+                child_slots=list(view.child_slots),
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        title="Submit Hao parent child",
+        description=(
+            "Submit one configured child slot from a parent task. The plan owns capability, binding "
+            "and authorization target. Returned workflow_id can be inspected or authorized through "
+            "the existing hao_control_status and hao_control_authorize tools."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        meta=_oauth_meta(SCOPE_EXECUTE),
+    )
+    async def hao_parent_submit_child(
+        task_run_id: str,
+        slot_id: str,
+        expected_state_delta: str = "",
+        action_arguments: dict[str, str] | None = None,
+    ) -> ToolResult:
+        try:
+            view = await bridge.parent_submit_child(
+                principal(),
+                task_run_id=task_run_id,
+                slot_id=slot_id,
+                expected_state_delta=expected_state_delta,
+                arguments=action_arguments,
+            )
+            return ToolResult(
+                ok=view.accepted,
+                code=view.code,
+                task_run_id=view.task_run_id,
+                slot_id=view.slot_id,
+                workflow_id=view.workflow_id,
+                action_id=view.action_id,
+                phase=view.phase,
+                authorization_scope=view.authorization_scope,
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        title="Refresh Hao parent task",
+        description=(
+            "Reconcile a durable parent task against its child workflow states and finalize only "
+            "CLOSED children through the same authoritative production path. UNSYNCED children are "
+            "surfaced as reconciliation-required and are never blindly replayed."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        meta=_oauth_meta(SCOPE_EXECUTE),
+    )
+    async def hao_parent_refresh(task_run_id: str) -> ToolResult:
+        try:
+            view = await bridge.parent_refresh(principal(), task_run_id=task_run_id)
+            return ToolResult(
+                ok=view.phase == "CLOSED",
+                code=view.failure_code or "PARENT_TASK_REFRESHED",
+                task_run_id=view.task_run_id,
+                phase=view.phase,
+                failure_code=view.failure_code,
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        title="Accept Hao parent task",
+        description=(
+            "Record Hao's explicit task-level acceptance only after the parent has all required "
+            "child outcomes and is actually waiting for Hao acceptance. Human elicitation is required."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        meta=_oauth_meta(SCOPE_APPROVE),
+    )
+    async def hao_parent_accept(
+        task_run_id: str,
+        accepted: bool,
+        confirmation: Annotated[
+            ElicitationResult[ApprovalConfirmation],
+            Resolve(_confirm_parent_acceptance),
+        ],
+    ) -> ToolResult:
+        if not isinstance(confirmation, AcceptedElicitation) or not confirmation.data.confirm:
+            return ToolResult(
+                ok=False,
+                code="HUMAN_CONFIRMATION_DECLINED",
+                task_run_id=task_run_id,
+                phase="AWAITING_HAO",
+            )
+        try:
+            view = await bridge.parent_accept_after_human_confirmation(
+                principal(),
+                task_run_id=task_run_id,
+                accepted=accepted,
+                human_confirmed=True,
+            )
+            return ToolResult(
+                ok=accepted,
+                code="HAO_PARENT_ACCEPTANCE_RECORDED",
+                task_run_id=view.task_run_id,
+                phase=view.phase,
+                failure_code=view.failure_code,
             )
         except (PermissionError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
