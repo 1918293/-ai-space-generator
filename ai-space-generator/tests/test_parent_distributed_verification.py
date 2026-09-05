@@ -31,7 +31,7 @@ from src.parent_task_production import (
     ProductionParentTaskService,
 )
 from src.production_execution import ProductionExecutionService
-from src.task_runtime import ParentTaskPhase
+from src.task_runtime import ChildActionOutcome, ParentTaskPhase, record_child_outcome
 from src.temporal_client import TemporalWorkflowStarter
 from src.temporal_control import ExecutionActivities, HaoExecutionControlWorkflow
 
@@ -183,12 +183,8 @@ def test_duplicate_hao_authorization_signal_does_not_duplicate_effect(tmp_path):
                 submission = await service.submit(state(), external_request(run_id))
                 assert submission.accepted is True
                 scope = "SEND_EXTERNAL:recipient-1"
-                await submission.pending.handle.authorize(
-                    scope, True, "Hao approved exact scope"
-                )
-                await submission.pending.handle.authorize(
-                    scope, True, "duplicate delivery"
-                )
+                await submission.pending.handle.authorize(scope, True, "Hao approved exact scope")
+                await submission.pending.handle.authorize(scope, True, "duplicate delivery")
                 result = await service.finalize(
                     submission.pending,
                     issued_at="2026-09-05T14:00:00+08:00",
@@ -210,9 +206,7 @@ def test_out_of_order_unrelated_signal_cannot_unlock_effect(tmp_path):
             async with worker(env, queue, activities):
                 run_id = "RUN-OOO-SIGNAL-" + str(uuid.uuid4())
                 submission = await service.submit(state(), external_request(run_id))
-                await submission.pending.handle.authorize(
-                    "UNRELATED_SCOPE", True, "out of order"
-                )
+                await submission.pending.handle.authorize("UNRELATED_SCOPE", True, "out of order")
                 await asyncio.sleep(0)
                 assert broker.calls == 0
                 await service.authorize(
@@ -377,10 +371,6 @@ class NullCurrentProduction:
         return None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Known Lane E seam: missing child workflow state is silently treated as RUNNING instead of UNKNOWN/reconciliation",
-)
 def test_missing_child_state_must_be_loud_reconciliation_not_silent_running(tmp_path):
     store = parent_store(tmp_path)
     service = ProductionParentTaskService(
@@ -402,10 +392,6 @@ def test_missing_child_state_must_be_loud_reconciliation_not_silent_running(tmp_
     assert refreshed.failure_code == "CHILD_STATE_UNKNOWN"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Known Lane E seam: parent store has no row revision/CAS so a stale multi-instance save can erase Hao acceptance or gate state",
-)
 def test_stale_parent_writer_cannot_erase_newer_hao_acceptance(tmp_path):
     store = parent_store(tmp_path)
     service = ProductionParentTaskService(
@@ -419,7 +405,73 @@ def test_stale_parent_writer_cannot_erase_newer_hao_acceptance(tmp_path):
 
     accepted = service.record_hao_acceptance(task_run_id="TASK-CAS", accepted=True)
     assert accepted.hao_accepted is True
+    assert accepted.store_revision == stale.store_revision + 1
 
     with pytest.raises(ValueError, match="PARENT_TASK_CHANGED_OR_MISSING"):
         store.save(replace(stale, phase=ParentTaskPhase.RUNNING))
     assert store.get("TASK-CAS").hao_accepted is True
+
+
+def test_parent_dependency_graph_rejects_missing_and_cycles():
+    with pytest.raises(ValueError, match="PARENT_CHILD_DEPENDENCY_NOT_FOUND"):
+        ParentTaskPlanCatalog(
+            [ParentTaskPlan("p", "t", (ParentChildPlan("a", "c", "b", depends_on_slots=("missing",)),))]
+        )
+    with pytest.raises(ValueError, match="PARENT_CHILD_DEPENDENCY_CYCLE"):
+        ParentTaskPlanCatalog(
+            [
+                ParentTaskPlan(
+                    "p",
+                    "t",
+                    (
+                        ParentChildPlan("a", "c", "b", depends_on_slots=("b",)),
+                        ParentChildPlan("b", "c", "b", depends_on_slots=("a",)),
+                    ),
+                )
+            ]
+        )
+
+
+def test_parent_dependency_must_be_authoritatively_closed_before_submit(tmp_path):
+    store = parent_store(tmp_path)
+    plans = ParentTaskPlanCatalog(
+        [
+            ParentTaskPlan(
+                plan_id="lane-e.parent",
+                task="Lane E distributed verification",
+                children=(
+                    ParentChildPlan("first", "research_read", "research.read"),
+                    ParentChildPlan(
+                        "second",
+                        "research_read",
+                        "research.read",
+                        depends_on_slots=("first",),
+                    ),
+                ),
+            )
+        ]
+    )
+    service = ProductionParentTaskService(
+        production=NullCurrentProduction(),
+        store=store,
+        plans=plans,
+    )
+    service.start(state(), plan_id="lane-e.parent", task_run_id="TASK-DEPS")
+
+    blocked = asyncio.run(service.submit_child(state(), task_run_id="TASK-DEPS", slot_id="second"))
+    assert blocked.accepted is False
+    assert blocked.code == "PARENT_CHILD_DEPENDENCY_PENDING"
+
+    record = store.get("TASK-DEPS")
+    first = store.children("TASK-DEPS")[0]
+    record = record_child_outcome(
+        record,
+        ChildActionOutcome(first.action_id, RunPhase.CLOSED, True),
+    )
+    store.save(record)
+    store.mark_finalized(task_run_id="TASK-DEPS", slot_index=0)
+
+    # The dependency gate is now satisfied. NullCurrentProduction does not implement submit,
+    # so reaching that call proves dependency ordering admitted the second child.
+    with pytest.raises(AttributeError):
+        asyncio.run(service.submit_child(state(), task_run_id="TASK-DEPS", slot_id="second"))
