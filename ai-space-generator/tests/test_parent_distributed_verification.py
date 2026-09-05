@@ -33,7 +33,7 @@ from src.parent_task_production import (
 from src.production_execution import ProductionExecutionService
 from src.task_runtime import ParentTaskPhase
 from src.temporal_client import TemporalWorkflowStarter
-from src.temporal_control import ApprovalSignal, ExecutionActivities, HaoExecutionControlWorkflow
+from src.temporal_control import ExecutionActivities, HaoExecutionControlWorkflow
 
 
 SECRET = b"lane-e-parent-distributed-secret-minimum-32-bytes"
@@ -183,13 +183,11 @@ def test_duplicate_hao_authorization_signal_does_not_duplicate_effect(tmp_path):
                 submission = await service.submit(state(), external_request(run_id))
                 assert submission.accepted is True
                 scope = "SEND_EXTERNAL:recipient-1"
-                await submission.pending.handle.signal(
-                    HaoExecutionControlWorkflow.authorization,
-                    ApprovalSignal(scope, True, "Hao approved exact scope"),
+                await submission.pending.handle.authorize(
+                    scope, True, "Hao approved exact scope"
                 )
-                await submission.pending.handle.signal(
-                    HaoExecutionControlWorkflow.authorization,
-                    ApprovalSignal(scope, True, "duplicate delivery"),
+                await submission.pending.handle.authorize(
+                    scope, True, "duplicate delivery"
                 )
                 result = await service.finalize(
                     submission.pending,
@@ -212,9 +210,8 @@ def test_out_of_order_unrelated_signal_cannot_unlock_effect(tmp_path):
             async with worker(env, queue, activities):
                 run_id = "RUN-OOO-SIGNAL-" + str(uuid.uuid4())
                 submission = await service.submit(state(), external_request(run_id))
-                await submission.pending.handle.signal(
-                    HaoExecutionControlWorkflow.authorization,
-                    ApprovalSignal("UNRELATED_SCOPE", True, "out of order"),
+                await submission.pending.handle.authorize(
+                    "UNRELATED_SCOPE", True, "out of order"
                 )
                 await asyncio.sleep(0)
                 assert broker.calls == 0
@@ -242,14 +239,12 @@ def test_worker_restart_preserves_workflow_identity_and_executes_once(tmp_path):
         async with await WorkflowEnvironment.start_time_skipping() as env:
             activities, service = await make_service(env, tmp_path, broker, queue)
             run_id = "RUN-WORKER-RESTART-" + str(uuid.uuid4())
-            first_worker = worker(env, queue, activities)
-            async with first_worker:
+            async with worker(env, queue, activities):
                 submission = await service.submit(state(), external_request(run_id))
                 assert submission.pending.handle.workflow_id == run_id
             assert broker.calls == 0
 
-            second_worker = worker(env, queue, activities)
-            async with second_worker:
+            async with worker(env, queue, activities):
                 resumed = await service.resume(run_id, operational_version=state().version)
                 assert resumed.handle.workflow_id == run_id
                 await service.authorize(
@@ -270,55 +265,69 @@ def test_worker_restart_preserves_workflow_identity_and_executes_once(tmp_path):
     assert calls == 1
 
 
-def test_two_workers_same_queue_do_not_duplicate_one_child_effect(tmp_path):
+def test_api_restart_duplicate_finalize_is_idempotent_and_does_not_reexecute(tmp_path):
     async def scenario():
         broker = Broker()
-        queue = "lane-e-two-workers-" + str(uuid.uuid4())
+        queue = "lane-e-api-replay-" + str(uuid.uuid4())
         async with await WorkflowEnvironment.start_time_skipping() as env:
-            activities, service = await make_service(env, tmp_path, broker, queue)
-            worker_a = worker(env, queue, activities)
-            worker_b = worker(env, queue, activities)
-            async with worker_a, worker_b:
-                run_id = "RUN-TWO-WORKERS-" + str(uuid.uuid4())
-                result = await service.execute(
+            activities, service_a = await make_service(env, tmp_path, broker, queue)
+            run_id = "RUN-API-REPLAY-" + str(uuid.uuid4())
+            async with worker(env, queue, activities):
+                first = await service_a.execute(
                     state(),
                     read_request(run_id),
                     issued_at="2026-09-05T14:03:00+08:00",
                 )
-                return result, broker.calls
+            _, service_b = await make_service(env, tmp_path, broker, queue)
+            resumed = await service_b.resume(run_id, operational_version=state().version)
+            replay = await service_b.finalize(
+                resumed,
+                issued_at="2026-09-05T14:03:00+08:00",
+            )
+            return first, replay, broker.calls
 
-    result, calls = asyncio.run(scenario())
-    assert result.authoritative is True
-    assert result.record.phase == RunPhase.CLOSED
+    first, replay, calls = asyncio.run(scenario())
+    assert first.authoritative is True
+    assert replay.authoritative is True
+    assert replay.code == "ATTESTATION_ALREADY_COMMITTED"
     assert calls == 1
 
 
-def test_consequential_activity_failure_is_not_automatically_retried_across_workers(tmp_path):
+def test_failed_consequential_activity_is_not_retried_after_worker_replacement(tmp_path):
     async def scenario():
         broker = Broker(fail=True)
         queue = "lane-e-no-retry-" + str(uuid.uuid4())
         async with await WorkflowEnvironment.start_time_skipping() as env:
-            activities, service = await make_service(env, tmp_path, broker, queue)
-            worker_a = worker(env, queue, activities)
-            worker_b = worker(env, queue, activities)
-            async with worker_a, worker_b:
-                run_id = "RUN-NO-RETRY-" + str(uuid.uuid4())
-                submission = await service.submit(state(), external_request(run_id))
-                await service.authorize(
+            activities, service_a = await make_service(env, tmp_path, broker, queue)
+            run_id = "RUN-NO-RETRY-" + str(uuid.uuid4())
+            async with worker(env, queue, activities):
+                submission = await service_a.submit(state(), external_request(run_id))
+                await service_a.authorize(
                     submission.pending,
                     scope="SEND_EXTERNAL:recipient-1",
                     approved=True,
                     reason="Hao approved exact scope",
                 )
-                result = await service.finalize(
+                first = await service_a.finalize(
                     submission.pending,
                     issued_at="2026-09-05T14:04:00+08:00",
                 )
-                return result, broker.calls
+            assert first.authoritative is False
+            assert first.record.phase == RunPhase.FAILED
+            assert broker.calls == 1
 
-    result, calls = asyncio.run(scenario())
-    assert result.authoritative is False
-    assert result.record.phase == RunPhase.FAILED
+            _, service_b = await make_service(env, tmp_path, broker, queue)
+            async with worker(env, queue, activities):
+                resumed = await service_b.resume(run_id, operational_version=state().version)
+                replay = await service_b.finalize(
+                    resumed,
+                    issued_at="2026-09-05T14:05:00+08:00",
+                )
+            return replay, broker.calls
+
+    replay, calls = asyncio.run(scenario())
+    assert replay.authoritative is False
+    assert replay.record.phase == RunPhase.FAILED
     assert calls == 1
 
 
