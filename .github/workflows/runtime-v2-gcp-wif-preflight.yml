@@ -13,7 +13,6 @@ concurrency:
 
 jobs:
   auth-backend-preflight:
-    if: github.ref == 'refs/heads/exp/execution-control-plane-v1'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -26,6 +25,15 @@ jobs:
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
     steps:
+      - name: Fail closed on trusted shared ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/exp/execution-control-plane-v1" ]]; then
+            echo "WIF preflight is authorized only from refs/heads/exp/execution-control-plane-v1" >&2
+            exit 1
+          fi
+
       - name: Checkout exact workflow ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
