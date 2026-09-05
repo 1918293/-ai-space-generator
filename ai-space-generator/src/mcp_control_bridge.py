@@ -10,7 +10,7 @@ from .action_catalog import ModelActionIntent
 from .control_gateway import ModelIngressRequest
 from .execution_control import RunPhase
 from .operational_state import ActiveOperationalState
-from .production_execution import PendingControlledRun, ProductionExecutionService
+from .production_execution import PendingControlledRun
 
 
 SCOPE_READ = "hao:read"
@@ -206,7 +206,7 @@ class MCPControlBridge:
     def __init__(
         self,
         *,
-        production: ProductionExecutionService,
+        production: Any,
         operational_state: OperationalStateReader,
         run_registry: MCPRunRegistry,
         identity_policy: HaoMCPIdentityPolicy,
@@ -345,12 +345,11 @@ class MCPControlBridge:
             operational_version=registration.operational_version,
         )
 
-    async def status(self, principal: MCPPrincipal, *, workflow_id: str) -> MCPStatusView:
-        pending = await self._pending_for(
-            principal,
-            workflow_id,
-            required_scope=SCOPE_READ,
-        )
+    async def _status_from_pending(
+        self,
+        workflow_id: str,
+        pending: PendingControlledRun,
+    ) -> MCPStatusView:
         current = await self._production.current_state(pending)
         if current is None:
             self._record("status", phase="UNKNOWN")
@@ -374,6 +373,14 @@ class MCPControlBridge:
             failure_code=current.failure_code,
             authorization_scope=action_scope,
         )
+
+    async def status(self, principal: MCPPrincipal, *, workflow_id: str) -> MCPStatusView:
+        pending = await self._pending_for(
+            principal,
+            workflow_id,
+            required_scope=SCOPE_READ,
+        )
+        return await self._status_from_pending(workflow_id, pending)
 
     async def authorize_after_human_confirmation(
         self,
@@ -409,7 +416,9 @@ class MCPControlBridge:
             phase=RunPhase.RESOLVED.value if approved else RunPhase.BLOCKED.value,
             provider=current.action.provider,
         )
-        return await self.status(principal, workflow_id=workflow_id)
+        # Approval is its own OAuth capability. Do not require an additional
+        # hao:read scope after the signal has already changed durable state.
+        return await self._status_from_pending(workflow_id, pending)
 
     async def finalize(self, principal: MCPPrincipal, *, workflow_id: str) -> MCPFinalizeView:
         pending = await self._pending_for(
