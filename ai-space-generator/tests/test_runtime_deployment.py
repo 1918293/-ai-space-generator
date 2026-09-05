@@ -1,11 +1,20 @@
+import asyncio
+import sqlite3
+from types import SimpleNamespace
+
 import pytest
 
 from src.execution_control import ActionArchetype, ActionExternality
+from src.production_execution import ProductionExecutionResult
 from src.runtime_deployment import (
     FORMAL_SHEETS_ASSURANCE_TAGS,
     action_catalog_for_targets,
     load_sheets_targets,
     load_task_policies,
+)
+from src.stable_finalization import (
+    PostgresFinalizationIssueStore,
+    StableFinalizationProductionService,
 )
 
 
@@ -93,3 +102,81 @@ def test_authority_source_is_required_for_every_deployment_target():
     ]"""
     with pytest.raises(ValueError, match="AUTHORITY_SOURCES_REQUIRED"):
         load_sheets_targets(values)
+
+
+class SqlitePostgresCompatConnection:
+    def __init__(self, path):
+        self._conn = sqlite3.connect(path, timeout=30, isolation_level=None)
+        self._conn.row_factory = sqlite3.Row
+
+    def execute(self, sql, params=()):
+        normalized = sql.strip()
+        if normalized == "BEGIN ISOLATION LEVEL SERIALIZABLE":
+            return self._conn.execute("BEGIN IMMEDIATE")
+        normalized = normalized.replace(" FOR UPDATE", "").replace("%s", "?")
+        return self._conn.execute(normalized, params)
+
+    def close(self):
+        self._conn.close()
+
+
+class CrashWindowProduction:
+    def __init__(self, observed_issued_at, *, lose_response):
+        self._observed_issued_at = observed_issued_at
+        self._lose_response = lose_response
+
+    async def finalize(self, pending, *, issued_at):
+        del pending
+        self._observed_issued_at.append(issued_at)
+        if self._lose_response:
+            raise ConnectionError("RESPONSE_LOST_AFTER_AUTHORITATIVE_COMMIT")
+        return ProductionExecutionResult(
+            None,
+            True,
+            "AUTHORITATIVE_COMPLETION_ALREADY_COMMITTED",
+        )
+
+
+def test_stable_finalization_reuses_issuance_after_response_loss_and_restart(tmp_path):
+    database_path = tmp_path / "stable-finalization.sqlite3"
+    factory = lambda: SqlitePostgresCompatConnection(database_path)
+    pending = SimpleNamespace(handle=SimpleNamespace(workflow_id="RUN-STABLE-1"))
+    observed_issued_at = []
+
+    first_store = PostgresFinalizationIssueStore(
+        "postgresql://runtime-v2/test",
+        connect_factory=factory,
+    )
+    first_process = StableFinalizationProductionService(
+        CrashWindowProduction(observed_issued_at, lose_response=True),
+        first_store,
+    )
+
+    with pytest.raises(ConnectionError, match="RESPONSE_LOST_AFTER_AUTHORITATIVE_COMMIT"):
+        asyncio.run(
+            first_process.finalize(
+                pending,
+                issued_at="2026-09-05T09:00:00+08:00",
+            )
+        )
+
+    restarted_store = PostgresFinalizationIssueStore(
+        "postgresql://runtime-v2/test",
+        connect_factory=factory,
+    )
+    restarted_process = StableFinalizationProductionService(
+        CrashWindowProduction(observed_issued_at, lose_response=False),
+        restarted_store,
+    )
+    result = asyncio.run(
+        restarted_process.finalize(
+            pending,
+            issued_at="2026-09-05T09:05:00+08:00",
+        )
+    )
+
+    assert result.authoritative is True
+    assert observed_issued_at == [
+        "2026-09-05T09:00:00+08:00",
+        "2026-09-05T09:00:00+08:00",
+    ]
