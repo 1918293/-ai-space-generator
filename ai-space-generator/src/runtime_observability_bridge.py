@@ -126,6 +126,25 @@ class ObservableMCPControlBridge:
         )
         return result
 
+    async def reconciliation_inspect_with_trusted_readback(
+        self,
+        principal: Any,
+        *,
+        case_id: str,
+    ) -> Any:
+        result = await self._bridge.reconciliation_inspect_with_trusted_readback(
+            principal,
+            case_id=case_id,
+        )
+        self._telemetry.record_run_event(
+            "reconciliation_inspect",
+            run_id=result.run_id,
+            phase=result.phase,
+            failure_stage="RECONCILIATION",
+            failure_code=result.resolution_code,
+        )
+        return result
+
     def reconciliation_resolve_after_human_confirmation(
         self,
         principal: Any,
@@ -152,7 +171,9 @@ class ObservableMCPControlBridge:
             principal, **kwargs
         )
         self._telemetry.record_run_event(
-            "reconciliation_retry_submitted" if result.workflow_id else "reconciliation_retry_rejected",
+            "reconciliation_retry_submitted"
+            if result.workflow_id
+            else "reconciliation_retry_rejected",
             run_id=result.workflow_id,
             phase=result.phase,
             failure_stage="" if result.workflow_id else "RECONCILIATION",
@@ -187,7 +208,9 @@ class ObservableReconciliationBroker:
         self._telemetry.record_run_event(
             "provider_outcome",
             run_id=current.run_id if current is not None else "",
-            phase="UNSYNCED" if current is not None else ("OBSERVED" if outcome.success else "FAILED"),
+            phase="UNSYNCED"
+            if current is not None
+            else ("OBSERVED" if outcome.success else "FAILED"),
             provider=proposal.provider,
             failure_stage=(outcome.failure_stage.value if outcome.failure_stage else ""),
             failure_code=outcome.error_code,
