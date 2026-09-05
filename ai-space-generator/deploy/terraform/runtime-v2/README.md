@@ -1,12 +1,24 @@
 # Runtime v2 Terraform infrastructure candidate
 
-Status: **EXP / non-provisioning candidate / `terraform apply` is not authorized.**
+Status: **EXP / deployment-execution candidate / external bootstrap identifiers unresolved.**
+
+Hao explicitly authorized completion of the deployment-execution-profile task on 2026-09-05. That authorization permits the bounded first-stage GCP bootstrap once the exact existing target project and required deployment identifiers are known. It does not permit inventing those identifiers or claiming resources exist without direct readback.
 
 ## Decision
 
 Runtime v2 uses **Terraform HCL as the declarative infrastructure definition format**.
 
-This directory intentionally does **not** configure a Terraform backend and does **not** select Infrastructure Manager, HCP Terraform, Cloud Storage state, or any other remote-state/executor as authority. State ownership is a separate operational/cost/IAM decision.
+The selected deployment execution profile is now:
+
+- GitHub Actions as the Terraform execution surface;
+- GitHub OIDC -> Google Workload Identity Federation (WIF), with no long-lived Google service-account key;
+- one dedicated Terraform deployment service account;
+- Google Cloud Storage as the Terraform remote-state backend;
+- Infrastructure Manager remains unselected as an additional executor/state Authority.
+
+`backend.tf` is intentionally a **partial** `gcs` backend declaration. The real bucket and state prefix must be supplied explicitly at deployment time; no project ID, bucket name, WIF provider or deployment service-account identifier is fabricated or committed.
+
+The one-time bootstrap that creates the protected state bucket, WIF provider and deployment identity lives in `bootstrap/`. See `bootstrap/README.md` for the exact bootstrap/state-migration sequence and external stop conditions.
 
 The candidate pins:
 
@@ -14,7 +26,7 @@ The candidate pins:
 - `hashicorp/google = 8.0.0`
 - `hashicorp/google-beta = 8.0.0`
 
-`google-beta` is used only for the Cloud Run v2 Worker Pool surface while the rest of the stack uses the stable provider.
+`google-beta` is used only for the Cloud Run v2 Worker Pool surface while the rest of the Runtime stack uses the stable provider.
 
 ## What this candidate defines
 
@@ -31,6 +43,25 @@ The candidate pins:
 - separate API/Worker Secret Manager access matching the role-scoped Runtime contract
 - optional public Cloud Run invoker binding, disabled by default
 - Runtime/OTel sidecar environment wiring
+
+## Deployment bootstrap contract
+
+The `bootstrap/` configuration defines only the execution/state bootstrap:
+
+- one caller-supplied globally unique GCS state bucket;
+- Object Versioning, Public Access Prevention, Uniform Bucket-Level Access, `force_destroy=false`, and Terraform `prevent_destroy`;
+- one Terraform deployment service account;
+- bounded project roles matching the currently managed resource families;
+- bucket-scoped `roles/storage.objectAdmin` for Terraform state objects;
+- one GitHub Workload Identity Pool/provider;
+- WIF trust restricted to immutable GitHub repository ID `1304812158`, owner ID `133175353`, and `refs/heads/exp/execution-control-plane-v1`;
+- `roles/iam.workloadIdentityUser` only for that trusted GitHub identity.
+
+Primitive project roles `roles/owner` and `roles/editor` are not granted.
+
+The first bootstrap necessarily requires an already authenticated Google principal because WIF does not exist yet. No service-account key should be created. After the first apply, bootstrap state must immediately be migrated from temporary local state into the protected GCS bucket under an isolated bootstrap prefix.
+
+The manual GitHub workflow `.github/workflows/runtime-v2-gcp-wif-preflight.yml` is deliberately non-applying. After bootstrap identifiers have been installed as GitHub Actions variables, it verifies the exact shared EXP ref, obtains short-lived Google credentials through WIF, initializes the protected GCS backend, and validates the Runtime Terraform configuration. It does not run `terraform apply`.
 
 ## Deliberately not stored in Terraform
 
@@ -75,9 +106,9 @@ Cloud SQL IAM DB authentication / connector / proxy is **not** silently assumed.
 
 The collector receives the non-secret upstream endpoint as `OTEL_EXPORTER_OTLP_ENDPOINT`; backend authentication remains an external deployment decision.
 
-## Static and mocked verification only
+## Static, mocked, and deployment-preflight verification
 
-Allowed in the isolated candidate:
+Allowed before exact external identifiers exist:
 
 ```bash
 terraform fmt -check -recursive
@@ -88,16 +119,17 @@ terraform test
 
 `terraform test` uses mock providers for this configuration and must not require real Google Cloud credentials.
 
-Not allowed without explicit Hao authorization:
+After the one-time state/WIF bootstrap exists, the manual WIF preflight may authenticate and initialize the GCS backend. A real-project `terraform plan` still requires every explicit deployment input; missing production values must not be replaced with fabricated placeholders merely to make the plan succeed.
 
-```bash
-terraform plan   # against a real project/credentials
-terraform apply
-terraform destroy
-gcloud ...       # any real mutation
-```
+No real `terraform apply`, `terraform destroy`, or mutating `gcloud` command is evidence-free or implicit.
 
 No `*.tfvars` containing real project IDs, credentials, provider targets, or secret values should be committed.
+
+## Current external blocker
+
+The exact Runtime v2 Google Cloud project ID/project number, globally unique state bucket name, bootstrap principal and resulting WIF/service-account resource identifiers are not present in the repository or current Hao System deployment records.
+
+Hao's authorization removes the previous **permission** gate for the bounded first-stage bootstrap, but it does not remove this **target identity/evidence** gate. Real GCP mutation therefore remains blocked until those identifiers can be resolved from an authoritative source or supplied directly.
 
 ## Deployment boundary
 
