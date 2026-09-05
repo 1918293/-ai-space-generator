@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - exp/runtime-v2-infrastructure-terraform-candidate
+      - exp/execution-control-plane-v1
   workflow_dispatch:
 
 permissions:
