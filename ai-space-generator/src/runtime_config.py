@@ -22,9 +22,13 @@ class RuntimeEnvironment(StrEnum):
 _SECRET_VERSION_RE = re.compile(
     r"^projects/[^/]+/secrets/[^/]+/versions/(?P<version>[1-9][0-9]*)$"
 )
-_REQUIRED_PRODUCTION_SECRET_ENV_KEYS = frozenset(
+_COMMON_REQUIRED_PRODUCTION_SECRET_ENV_KEYS = frozenset(
     {
         "HAO_TEMPORAL_API_KEY",
+    }
+)
+_API_REQUIRED_PRODUCTION_SECRET_ENV_KEYS = frozenset(
+    {
         "HAO_ATTESTATION_SECRET",
         "HAO_MCP_REQUEST_STATE_KEYS",
     }
@@ -121,7 +125,12 @@ def _request_state_keys(values: dict[str, str]) -> tuple[str, ...]:
     return keys
 
 
-def _secret_bindings(values: dict[str, str], *, production: bool) -> tuple[tuple[str, str], ...]:
+def _secret_bindings(
+    values: dict[str, str],
+    *,
+    production: bool,
+    role: RuntimeRole,
+) -> tuple[tuple[str, str], ...]:
     raw = str(values.get("HAO_SECRET_BINDINGS_JSON", "")).strip()
     if not raw:
         if production:
@@ -143,8 +152,11 @@ def _secret_bindings(values: dict[str, str], *, production: bool) -> tuple[tuple
         if production and match is None:
             raise ValueError(f"SECRET_BINDING_EXPLICIT_VERSION_REQUIRED:{env_key}")
         normalized.append((env_key, resource))
+    required = set(_COMMON_REQUIRED_PRODUCTION_SECRET_ENV_KEYS)
+    if role == RuntimeRole.API:
+        required.update(_API_REQUIRED_PRODUCTION_SECRET_ENV_KEYS)
     bound_keys = {key for key, _ in normalized}
-    missing = sorted(_REQUIRED_PRODUCTION_SECRET_ENV_KEYS - bound_keys)
+    missing = sorted(required - bound_keys)
     if production and missing:
         raise ValueError("MISSING_SECRET_BINDINGS:" + ",".join(missing))
     return tuple(sorted(normalized))
@@ -361,7 +373,9 @@ class RuntimeSettings:
                 normalize_trailing_slash=True,
             )
 
-        request_state_keys = _request_state_keys(values)
+        request_state_keys = (
+            _request_state_keys(values) if role == RuntimeRole.API else ()
+        )
         request_state_audience = _required(values, "HAO_MCP_REQUEST_STATE_AUDIENCE")
 
         oauth_issuer_url = _validate_url(
@@ -392,11 +406,12 @@ class RuntimeSettings:
 
         expected_hao_subject = _required(values, "HAO_EXPECTED_SUBJECT")
         attestation_key_id = _required(values, "HAO_ATTESTATION_KEY_ID")
-        attestation_secret = _required(values, "HAO_ATTESTATION_SECRET")
-        if len(attestation_secret.encode("utf-8")) < 32:
-            raise ValueError("ATTESTATION_SECRET_MIN_32_BYTES")
 
-        secret_bindings = _secret_bindings(values, production=production)
+        secret_bindings = _secret_bindings(
+            values,
+            production=production,
+            role=role,
+        )
         bound_secret_keys = {key for key, _ in secret_bindings}
         if (
             production
@@ -404,13 +419,21 @@ class RuntimeSettings:
             and "HAO_DATABASE_URL" not in bound_secret_keys
         ):
             raise ValueError("DATABASE_URL_PASSWORD_SECRET_BINDING_REQUIRED")
-        attestation_previous_keys = _attestation_previous_keys(
-            values,
-            current_key_id=attestation_key_id,
-            current_secret=attestation_secret,
-            production=production,
-            bound_secret_keys=bound_secret_keys,
-        )
+
+        if role == RuntimeRole.API:
+            attestation_secret = _required(values, "HAO_ATTESTATION_SECRET")
+            if len(attestation_secret.encode("utf-8")) < 32:
+                raise ValueError("ATTESTATION_SECRET_MIN_32_BYTES")
+            attestation_previous_keys = _attestation_previous_keys(
+                values,
+                current_key_id=attestation_key_id,
+                current_secret=attestation_secret,
+                production=production,
+                bound_secret_keys=bound_secret_keys,
+            )
+        else:
+            attestation_secret = ""
+            attestation_previous_keys = ()
 
         return cls(
             environment=environment,
