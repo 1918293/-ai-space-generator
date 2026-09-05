@@ -300,7 +300,19 @@ class ProviderReconciliationRuntime:
                     code = "PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN"
                     self._store.update_effect(intent, fingerprint, EffectState.UNKNOWN_EFFECT, code=code)
                     return self._unknown_execution(intent, binding, code, attempts=attempts)
-                readback = await self._provider.readback(binding, intent)
+                try:
+                    readback = await self._provider.readback(binding, intent)
+                except Exception as exc:
+                    code = f"DIRECT_READBACK_EXCEPTION_EFFECT_UNKNOWN:{type(exc).__name__}"
+                    self._store.update_effect(
+                        intent,
+                        fingerprint,
+                        EffectState.UNKNOWN_EFFECT,
+                        receipt_id=receipt.receipt_id,
+                        source=receipt.source,
+                        code=code,
+                    )
+                    return self._unknown_execution(intent, binding, code, attempts=attempts)
                 if not readback.matched:
                     code = readback.error_code or "DIRECT_READBACK_MISMATCH"
                     self._store.update_effect(intent, fingerprint, EffectState.UNKNOWN_EFFECT, receipt_id=receipt.receipt_id, source=readback.source, code=code)
@@ -339,7 +351,12 @@ class ProviderReconciliationRuntime:
         if case.run_id != intent.run_id or case.binding_id != intent.binding_id or case.idempotency_key != intent.idempotency_key:
             raise PermissionError("RECONCILIATION_INTENT_IDENTITY_MISMATCH")
         binding = self._catalog.resolve(case.binding_id)
-        readback = await self._provider.readback(binding, intent)
+        try:
+            readback = await self._provider.readback(binding, intent)
+        except Exception as exc:
+            raise RuntimeError(
+                f"DIRECT_PROVIDER_READBACK_FAILED:{type(exc).__name__}"
+            ) from exc
         evidence_material = json.dumps({"source": readback.source, "digest": readback.observed_digest, "matched": readback.matched}, sort_keys=True).encode()
         evidence_digest = "sha256:" + sha256(evidence_material).hexdigest()
         if readback.matched:
