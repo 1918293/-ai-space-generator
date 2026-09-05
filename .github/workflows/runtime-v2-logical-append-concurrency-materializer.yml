@@ -1,0 +1,134 @@
+name: Runtime v2 Logical Append Concurrency Materializer
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-logical-append-concurrency-fix
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Guard source parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "5b2ed95cc7a442e33faceaff935866066455eb09"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/runtime-v2-logical-append-concurrency-materializer.yml"
+
+      - name: Materialize bounded concurrency fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"SOURCE_GUARD_FAILED:{path}:{count}")
+              file.write_text(text.replace(old, new, 1))
+
+          broker = "ai-space-generator/src/idempotent_broker.py"
+          replace_once(broker, "from typing import Protocol", "from typing import Callable, Protocol")
+          replace_once(
+              broker,
+              '''    def reserve(self, key: str, fingerprint: str) -> tuple[bool, IdempotencyRecord]: ...\n\n    def set_state(''',
+              '''    def reserve(self, key: str, fingerprint: str) -> tuple[bool, IdempotencyRecord]: ...\n\n    def release(self, key: str, fingerprint: str) -> None: ...\n\n    def set_state(''',
+          )
+          replace_once(
+              broker,
+              '''    def set_state(\n        self,\n        key: str,\n        fingerprint: str,\n        state: IdempotencyState,\n        *,\n        receipt_id: str = "",\n        source: str = "",\n        error_code: str = "",\n    ) -> None:\n        with self._connect() as conn:\n            cursor = conn.execute(\n                """\n                UPDATE idempotency_records\n                SET state = ?, receipt_id = ?, source = ?, error_code = ?\n                WHERE key = ? AND action_fingerprint = ?\n                """,\n                (state.value, receipt_id, source, error_code, key, fingerprint),\n            )\n            if cursor.rowcount != 1:\n                raise ValueError("IDEMPOTENCY_RECORD_CHANGED_OR_MISSING")\n\n\nclass IdempotentAsyncBroker:''',
+              '''    def release(self, key: str, fingerprint: str) -> None:\n        with self._connect() as conn:\n            cursor = conn.execute(\n                "DELETE FROM idempotency_records "\n                "WHERE key = ? AND action_fingerprint = ? AND state = ?",\n                (key, fingerprint, IdempotencyState.RESERVED.value),\n            )\n            if cursor.rowcount != 1:\n                raise ValueError("IDEMPOTENCY_RESERVATION_CHANGED_OR_MISSING")\n\n    def set_state(\n        self,\n        key: str,\n        fingerprint: str,\n        state: IdempotencyState,\n        *,\n        receipt_id: str = "",\n        source: str = "",\n        error_code: str = "",\n    ) -> None:\n        with self._connect() as conn:\n            cursor = conn.execute(\n                """\n                UPDATE idempotency_records\n                SET state = ?, receipt_id = ?, source = ?, error_code = ?\n                WHERE key = ? AND action_fingerprint = ?\n                """,\n                (state.value, receipt_id, source, error_code, key, fingerprint),\n            )\n            if cursor.rowcount != 1:\n                raise ValueError("IDEMPOTENCY_RECORD_CHANGED_OR_MISSING")\n\n\nclass IdempotentAsyncBroker:''',
+          )
+          old_tail = '''    def __init__(self, provider: AsyncRawProvider, store: IdempotencyStore) -> None:\n        self._provider = provider\n        self._store = store\n\n    async def execute(self, proposal: ActionProposal) -> ToolOutcome:\n        if proposal.archetype not in {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}:\n            return await self._provider.execute(proposal)\n\n        key = proposal.idempotency_key.strip()\n        if not key:\n            return ToolOutcome(\n                False,\n                error_code="BROKER_REQUIRES_IDEMPOTENCY_KEY",\n                failure_stage=FailureStage.POLICY,\n            )\n\n        fingerprint = action_fingerprint(proposal)\n        reserved, existing = self._store.reserve(key, fingerprint)\n        if not reserved:\n            if existing.action_fingerprint != fingerprint:\n                return ToolOutcome(\n                    False,\n                    error_code="IDEMPOTENCY_KEY_CONFLICT",\n                    failure_stage=FailureStage.POLICY,\n                )\n            if existing.state == IdempotencyState.SUCCEEDED:\n                return ToolOutcome(True, existing.receipt_id, existing.source)\n            if existing.state in {IdempotencyState.RESERVED, IdempotencyState.UNKNOWN_EFFECT}:\n                return ToolOutcome(\n                    False,\n                    error_code="IDEMPOTENCY_EFFECT_UNKNOWN",\n                    failure_stage=FailureStage.PERSISTENCE,\n                )\n            return ToolOutcome(\n                False,\n                error_code=existing.error_code or "PREVIOUS_KNOWN_FAILURE_REQUIRES_NEW_CONTROL_DECISION",\n                failure_stage=FailureStage.TOOL_EXECUTION,\n            )\n\n        try:\n            outcome = await self._provider.execute(proposal)\n        except Exception:\n            self._store.set_state(\n                key,\n                fingerprint,\n                IdempotencyState.UNKNOWN_EFFECT,\n                error_code="PROVIDER_EXCEPTION_EFFECT_UNKNOWN",\n            )\n            return ToolOutcome(\n                False,\n                error_code="PROVIDER_EXCEPTION_EFFECT_UNKNOWN",\n                failure_stage=FailureStage.PERSISTENCE,\n            )\n\n        if outcome.success:\n            if not outcome.receipt_id.strip() or not outcome.source.strip():\n                self._store.set_state(\n                    key,\n                    fingerprint,\n                    IdempotencyState.UNKNOWN_EFFECT,\n                    error_code="PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",\n                )\n                return ToolOutcome(\n                    False,\n                    error_code="PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",\n                    failure_stage=FailureStage.PERSISTENCE,\n                )\n            self._store.set_state(\n                key,\n                fingerprint,\n                IdempotencyState.SUCCEEDED,\n                receipt_id=outcome.receipt_id,\n                source=outcome.source,\n            )\n            return outcome\n\n        self._store.set_state(\n            key,\n            fingerprint,\n            IdempotencyState.FAILED_NO_EFFECT,\n            error_code=outcome.error_code or "PROVIDER_FAILED_NO_EFFECT",\n        )\n        return outcome'''
+          new_tail = '''    def __init__(\n        self,\n        provider: AsyncRawProvider,\n        store: IdempotencyStore,\n        *,\n        uniqueness_key_resolver: Callable[[ActionProposal], str] | None = None,\n    ) -> None:\n        self._provider = provider\n        self._store = store\n        self._uniqueness_key_resolver = uniqueness_key_resolver\n\n    async def execute(self, proposal: ActionProposal) -> ToolOutcome:\n        if proposal.archetype not in {ActionArchetype.MUTATE, ActionArchetype.PUBLISH}:\n            return await self._provider.execute(proposal)\n\n        key = proposal.idempotency_key.strip()\n        if not key:\n            return ToolOutcome(\n                False,\n                error_code="BROKER_REQUIRES_IDEMPOTENCY_KEY",\n                failure_stage=FailureStage.POLICY,\n            )\n\n        fingerprint = action_fingerprint(proposal)\n        reserved, existing = self._store.reserve(key, fingerprint)\n        if not reserved:\n            if existing.action_fingerprint != fingerprint:\n                return ToolOutcome(\n                    False,\n                    error_code="IDEMPOTENCY_KEY_CONFLICT",\n                    failure_stage=FailureStage.POLICY,\n                )\n            if existing.state == IdempotencyState.SUCCEEDED:\n                return ToolOutcome(True, existing.receipt_id, existing.source)\n            if existing.state in {IdempotencyState.RESERVED, IdempotencyState.UNKNOWN_EFFECT}:\n                return ToolOutcome(\n                    False,\n                    error_code="IDEMPOTENCY_EFFECT_UNKNOWN",\n                    failure_stage=FailureStage.PERSISTENCE,\n                )\n            return ToolOutcome(\n                False,\n                error_code=existing.error_code or "PREVIOUS_KNOWN_FAILURE_REQUIRES_NEW_CONTROL_DECISION",\n                failure_stage=FailureStage.TOOL_EXECUTION,\n            )\n\n        uniqueness_key = ""\n        uniqueness_reserved = False\n        if self._uniqueness_key_resolver is not None:\n            try:\n                uniqueness_key = str(self._uniqueness_key_resolver(proposal) or "").strip()\n            except Exception as exc:\n                code = f"IDEMPOTENCY_UNIQUENESS_KEY_RESOLUTION_FAILED:{type(exc).__name__}"\n                self._store.set_state(\n                    key,\n                    fingerprint,\n                    IdempotencyState.FAILED_NO_EFFECT,\n                    error_code=code,\n                )\n                return ToolOutcome(False, error_code=code, failure_stage=FailureStage.BINDING)\n\n        if uniqueness_key and uniqueness_key != key:\n            uniqueness_reserved, _ = self._store.reserve(uniqueness_key, fingerprint)\n            if not uniqueness_reserved:\n                code = "IDEMPOTENCY_UNIQUENESS_CONFLICT"\n                self._store.set_state(\n                    key,\n                    fingerprint,\n                    IdempotencyState.FAILED_NO_EFFECT,\n                    error_code=code,\n                )\n                return ToolOutcome(False, error_code=code, failure_stage=FailureStage.POLICY)\n\n        try:\n            outcome = await self._provider.execute(proposal)\n        except Exception:\n            if uniqueness_reserved:\n                self._store.set_state(\n                    uniqueness_key,\n                    fingerprint,\n                    IdempotencyState.UNKNOWN_EFFECT,\n                    error_code="PROVIDER_EXCEPTION_EFFECT_UNKNOWN",\n                )\n            self._store.set_state(\n                key,\n                fingerprint,\n                IdempotencyState.UNKNOWN_EFFECT,\n                error_code="PROVIDER_EXCEPTION_EFFECT_UNKNOWN",\n            )\n            return ToolOutcome(\n                False,\n                error_code="PROVIDER_EXCEPTION_EFFECT_UNKNOWN",\n                failure_stage=FailureStage.PERSISTENCE,\n            )\n\n        if outcome.success:\n            if not outcome.receipt_id.strip() or not outcome.source.strip():\n                if uniqueness_reserved:\n                    self._store.set_state(\n                        uniqueness_key,\n                        fingerprint,\n                        IdempotencyState.UNKNOWN_EFFECT,\n                        error_code="PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",\n                    )\n                self._store.set_state(\n                    key,\n                    fingerprint,\n                    IdempotencyState.UNKNOWN_EFFECT,\n                    error_code="PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",\n                )\n                return ToolOutcome(\n                    False,\n                    error_code="PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN",\n                    failure_stage=FailureStage.PERSISTENCE,\n                )\n            if uniqueness_reserved:\n                self._store.set_state(\n                    uniqueness_key,\n                    fingerprint,\n                    IdempotencyState.SUCCEEDED,\n                    receipt_id=outcome.receipt_id,\n                    source=outcome.source,\n                )\n            self._store.set_state(\n                key,\n                fingerprint,\n                IdempotencyState.SUCCEEDED,\n                receipt_id=outcome.receipt_id,\n                source=outcome.source,\n            )\n            return outcome\n\n        if uniqueness_reserved:\n            try:\n                self._store.release(uniqueness_key, fingerprint)\n            except Exception:\n                code = "IDEMPOTENCY_UNIQUENESS_RELEASE_FAILED"\n                self._store.set_state(\n                    key,\n                    fingerprint,\n                    IdempotencyState.FAILED_NO_EFFECT,\n                    error_code=code,\n                )\n                return ToolOutcome(False, error_code=code, failure_stage=FailureStage.PERSISTENCE)\n        self._store.set_state(\n            key,\n            fingerprint,\n            IdempotencyState.FAILED_NO_EFFECT,\n            error_code=outcome.error_code or "PROVIDER_FAILED_NO_EFFECT",\n        )\n        return outcome'''
+          replace_once(broker, old_tail, new_tail)
+
+          postgres = "ai-space-generator/src/postgres_persistence.py"
+          replace_once(
+              postgres,
+              '''    def set_state(\n        self,\n        key: str,\n        fingerprint: str,\n        state: IdempotencyState,''',
+              '''    def release(self, key: str, fingerprint: str) -> None:\n        with self._database.transaction() as conn:\n            cursor = conn.execute(\n                """\n                DELETE FROM idempotency_records\n                WHERE key = %s AND action_fingerprint = %s AND state = %s\n                """,\n                (key, fingerprint, IdempotencyState.RESERVED.value),\n            )\n            if cursor.rowcount != 1:\n                raise ValueError("IDEMPOTENCY_RESERVATION_CHANGED_OR_MISSING")\n\n    def set_state(\n        self,\n        key: str,\n        fingerprint: str,\n        state: IdempotencyState,''',
+          )
+
+          adapter = "ai-space-generator/src/google_workspace_adapter.py"
+          replace_once(
+              adapter,
+              '''        self._by_binding = by_binding\n\n    def resolve(self, proposal: ActionProposal) -> DriveMutationCommand | None:''',
+              '''        self._by_binding = by_binding\n\n    def logical_append_uniqueness_key(self, proposal: ActionProposal) -> str:\n        binding_id = _binding_id(proposal)\n        target = self._by_binding.get(binding_id)\n        if target is None or target.mutation_mode != "logical_append":\n            return ""\n        arguments = _argument_map(proposal)\n        values, error = _validated_values_json(arguments.get("values_json", ""))\n        if error or values is None or len(values) != 1:\n            return ""\n        _, _, _, key_offset = _logical_append_columns(\n            target.range_a1.strip(), target.unique_key_column.strip()\n        )\n        row = values[0]\n        if key_offset >= len(row):\n            return ""\n        key = row[key_offset]\n        if key is None or (isinstance(key, str) and not key.strip()):\n            return ""\n        material = json.dumps(\n            {\n                "kind": "google-sheets-logical-append-unique-key",\n                "spreadsheet_id": target.spreadsheet_id.strip(),\n                "sheet_id": target.sheet_id,\n                "range_a1": target.range_a1.strip(),\n                "unique_key_column": target.unique_key_column.strip(),\n                "key": key,\n            },\n            ensure_ascii=False,\n            sort_keys=True,\n            separators=(",", ":"),\n        )\n        return "GSHEET-UNIQUE:" + sha256(material.encode("utf-8")).hexdigest()\n\n    def resolve(self, proposal: ActionProposal) -> DriveMutationCommand | None:''',
+          )
+
+          deployment = "ai-space-generator/src/runtime_deployment.py"
+          replace_once(
+              deployment,
+              '''    idempotent = IdempotentAsyncBroker(raw_provider, persistence.idempotency)''',
+              '''    idempotent = IdempotentAsyncBroker(\n        raw_provider,\n        persistence.idempotency,\n        uniqueness_key_resolver=resolver.logical_append_uniqueness_key,\n    )''',
+          )
+
+          broker_tests = Path("ai-space-generator/tests/test_idempotent_broker.py")
+          broker_text = broker_tests.read_text()
+          marker = "test_different_action_ids_with_same_uniqueness_key_serialize_provider"
+          if marker in broker_text:
+              raise SystemExit("TEST_ALREADY_PRESENT:test_idempotent_broker")
+          broker_tests.write_text(
+              broker_text
+              + '''\n\n\ndef test_different_action_ids_with_same_uniqueness_key_serialize_provider(tmp_path):\n    provider = Provider(delay=0.05)\n    broker = IdempotentAsyncBroker(\n        provider,\n        store(tmp_path),\n        uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",\n    )\n    first = mutation(\n        action_id="RUN-A:A0001:drive.update",\n        idempotency_key="RUN-A:A0001:drive.update",\n    )\n    second = mutation(\n        action_id="RUN-B:A0001:drive.update",\n        idempotency_key="RUN-B:A0001:drive.update",\n    )\n\n    async def run_both():\n        return await asyncio.gather(broker.execute(first), broker.execute(second))\n\n    results = asyncio.run(run_both())\n    assert provider.calls == 1\n    assert sum(result.success for result in results) == 1\n    blocked = [result for result in results if not result.success]\n    assert len(blocked) == 1\n    assert blocked[0].error_code == "IDEMPOTENCY_UNIQUENESS_CONFLICT"\n    assert blocked[0].failure_stage == FailureStage.POLICY\n\n\ndef test_uniqueness_reservation_is_released_after_confirmed_no_effect(tmp_path):\n    durable_store = store(tmp_path)\n    first_provider = Provider(\n        ToolOutcome(\n            False,\n            error_code="QUOTA_BLOCKED",\n            failure_stage=FailureStage.TOOL_EXECUTION,\n        )\n    )\n    first = mutation(\n        action_id="RUN-A:A0001:drive.update",\n        idempotency_key="RUN-A:A0001:drive.update",\n    )\n    first_outcome = asyncio.run(\n        IdempotentAsyncBroker(\n            first_provider,\n            durable_store,\n            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",\n        ).execute(first)\n    )\n    assert first_outcome.error_code == "QUOTA_BLOCKED"\n    assert durable_store.get("GSHEET-UNIQUE:REC-X") is None\n\n    second_provider = Provider()\n    second = mutation(\n        action_id="RUN-B:A0001:drive.update",\n        idempotency_key="RUN-B:A0001:drive.update",\n    )\n    second_outcome = asyncio.run(\n        IdempotentAsyncBroker(\n            second_provider,\n            durable_store,\n            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",\n        ).execute(second)\n    )\n    assert second_outcome.success is True\n    assert second_provider.calls == 1\n\n\ndef test_unknown_effect_keeps_uniqueness_reservation_and_blocks_new_run(tmp_path):\n    durable_store = store(tmp_path)\n    first_provider = Provider(exc=RuntimeError("connection dropped"))\n    first = mutation(\n        action_id="RUN-A:A0001:drive.update",\n        idempotency_key="RUN-A:A0001:drive.update",\n    )\n    first_outcome = asyncio.run(\n        IdempotentAsyncBroker(\n            first_provider,\n            durable_store,\n            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",\n        ).execute(first)\n    )\n    assert first_outcome.error_code == "PROVIDER_EXCEPTION_EFFECT_UNKNOWN"\n    assert durable_store.get("GSHEET-UNIQUE:REC-X").state == IdempotencyState.UNKNOWN_EFFECT\n\n    second_provider = Provider()\n    second = mutation(\n        action_id="RUN-B:A0001:drive.update",\n        idempotency_key="RUN-B:A0001:drive.update",\n    )\n    blocked = asyncio.run(\n        IdempotentAsyncBroker(\n            second_provider,\n            durable_store,\n            uniqueness_key_resolver=lambda proposal: "GSHEET-UNIQUE:REC-X",\n        ).execute(second)\n    )\n    assert blocked.success is False\n    assert blocked.error_code == "IDEMPOTENCY_UNIQUENESS_CONFLICT"\n    assert second_provider.calls == 0\n\n\ndef test_different_uniqueness_keys_do_not_serialize_each_other(tmp_path):\n    provider = Provider(delay=0.01)\n    broker = IdempotentAsyncBroker(\n        provider,\n        store(tmp_path),\n        uniqueness_key_resolver=lambda proposal: "UNIQUE:" + proposal.action_id.split(":", 1)[0],\n    )\n    first = mutation(\n        action_id="RUN-A:A0001:drive.update",\n        idempotency_key="RUN-A:A0001:drive.update",\n    )\n    second = mutation(\n        action_id="RUN-B:A0001:drive.update",\n        idempotency_key="RUN-B:A0001:drive.update",\n    )\n\n    async def run_both():\n        return await asyncio.gather(broker.execute(first), broker.execute(second))\n\n    results = asyncio.run(run_both())\n    assert provider.calls == 2\n    assert all(result.success for result in results)\n'''
+          )
+
+          adapter_tests = Path("ai-space-generator/tests/test_google_workspace_adapter.py")
+          adapter_text = adapter_tests.read_text()
+          marker = "test_logical_append_uniqueness_key_is_stable_across_runs"
+          if marker in adapter_text:
+              raise SystemExit("TEST_ALREADY_PRESENT:test_google_workspace_adapter")
+          adapter_tests.write_text(
+              adapter_text
+              + '''\n\n\ndef test_logical_append_uniqueness_key_is_stable_across_runs_and_payload_conflicts():\n    resolver = ConfiguredSheetsCommandResolver(\n        (\n            SheetsMutationTarget(\n                binding_id="drive.formal_cells.update",\n                spreadsheet_id="trusted-sheet",\n                range_a1="01_Intake!A:B",\n                mutation_mode="logical_append",\n                sheet_id=123,\n                unique_key_column="A",\n            ),\n        )\n    )\n    base = proposal()\n\n    def for_run(run_id, values_json):\n        return type(base)(\n            **{\n                **base.__dict__,\n                "action_id": f"{run_id}:A0001:drive.formal_cells.update",\n                "idempotency_key": f"{run_id}:A0001:drive.formal_cells.update",\n                "arguments": (("values_json", values_json),),\n            }\n        )\n\n    first = for_run("RUN-A", '[["REC-X","one"]]')\n    same_key_different_payload = for_run("RUN-B", '[["REC-X","two"]]')\n    different_key = for_run("RUN-C", '[["REC-Y","one"]]')\n\n    first_key = resolver.logical_append_uniqueness_key(first)\n    assert first_key.startswith("GSHEET-UNIQUE:")\n    assert resolver.logical_append_uniqueness_key(same_key_different_payload) == first_key\n    assert resolver.logical_append_uniqueness_key(different_key) != first_key\n\n\ndef test_fixed_range_has_no_secondary_uniqueness_key():\n    resolver = ConfiguredSheetsCommandResolver(\n        (\n            SheetsMutationTarget(\n                binding_id="drive.formal_cells.update",\n                spreadsheet_id="trusted-sheet",\n                range_a1="01_Intake!A10:B11",\n            ),\n        )\n    )\n    assert resolver.logical_append_uniqueness_key(proposal()) == ""\n'''
+          )
+          PY
+
+      - name: Install Runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q -r ai-space-generator/requirements-control.txt
+
+      - name: Run focused concurrency and adapter tests
+        working-directory: ai-space-generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          pytest -q \
+            tests/test_idempotent_broker.py \
+            tests/test_google_workspace_adapter.py \
+            tests/test_runtime_deployment.py \
+            tests/test_provider_reconciliation.py \
+            tests/test_reconciliation.py
+          python -m compileall -q src tests
+          git diff --check
+
+      - name: Commit tested candidate and self-remove workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/runtime-v2-logical-append-concurrency-materializer.yml
+          git config user.name "hao-runtime-v2-bot"
+          git config user.email "hao-runtime-v2-bot@users.noreply.github.com"
+          git add ai-space-generator/src/idempotent_broker.py \
+                  ai-space-generator/src/postgres_persistence.py \
+                  ai-space-generator/src/google_workspace_adapter.py \
+                  ai-space-generator/src/runtime_deployment.py \
+                  ai-space-generator/tests/test_idempotent_broker.py \
+                  ai-space-generator/tests/test_google_workspace_adapter.py \
+                  .github/workflows/runtime-v2-logical-append-concurrency-materializer.yml
+          git commit -m "EXP: serialize trusted Sheets logical append keys"
+          git push origin HEAD:exp/runtime-v2-logical-append-concurrency-fix
