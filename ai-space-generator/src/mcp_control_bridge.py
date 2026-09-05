@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 import sqlite3
 from typing import Any, Mapping, Protocol
 import uuid
@@ -11,11 +12,17 @@ from .control_gateway import ModelIngressRequest
 from .execution_control import RunPhase
 from .operational_state import ActiveOperationalState
 from .production_execution import PendingControlledRun
+from .reconciliation import (
+    ReconciliationDisposition,
+    ReconciliationPhase,
+    apply_reconciliation,
+)
 
 
 SCOPE_READ = "hao:read"
 SCOPE_EXECUTE = "hao:execute"
 SCOPE_APPROVE = "hao:approve"
+_ACTION_BINDING_SUFFIX = re.compile(r":A\d{4}:(.+)\Z")
 
 
 @dataclass(frozen=True)
@@ -194,10 +201,30 @@ class MCPParentChildSubmissionView:
     authorization_scope: str = ""
 
 
+@dataclass(frozen=True)
+class MCPReconciliationView:
+    case_id: str
+    run_id: str
+    action_id: str
+    kind: str
+    phase: str
+    effect_may_have_occurred: bool
+    disposition: str = ""
+    resolution_code: str = ""
+    evidence: tuple[str, ...] = ()
+
+
 def _argument_pairs(arguments: Mapping[str, str] | None) -> tuple[tuple[str, str], ...]:
     if not arguments:
         return ()
     return tuple((str(key), str(value)) for key, value in arguments.items())
+
+
+def _binding_from_action_id(action_id: str) -> str:
+    match = _ACTION_BINDING_SUFFIX.search(action_id.strip())
+    if match is None or not match.group(1).strip():
+        raise ValueError("RECONCILIATION_ACTION_BINDING_UNRESOLVED")
+    return match.group(1).strip()
 
 
 class MCPControlBridge:
@@ -212,6 +239,7 @@ class MCPControlBridge:
         identity_policy: HaoMCPIdentityPolicy,
         telemetry: RuntimeTelemetrySink | None = None,
         parent_tasks: Any | None = None,
+        reconciliation_store: Any | None = None,
     ) -> None:
         self._production = production
         self._operational_state = operational_state
@@ -219,6 +247,7 @@ class MCPControlBridge:
         self._identity_policy = identity_policy
         self._telemetry = telemetry
         self._parent_tasks = parent_tasks
+        self._reconciliation_store = reconciliation_store
 
     def _record(
         self,
@@ -242,6 +271,46 @@ class MCPControlBridge:
         if self._parent_tasks is None:
             raise ValueError("PARENT_TASK_RUNTIME_NOT_CONFIGURED")
         return self._parent_tasks
+
+    def _require_reconciliation_store(self) -> Any:
+        if self._reconciliation_store is None:
+            raise ValueError("RECONCILIATION_RUNTIME_NOT_CONFIGURED")
+        return self._reconciliation_store
+
+    @staticmethod
+    def _reconciliation_view(case: Any) -> MCPReconciliationView:
+        return MCPReconciliationView(
+            case_id=case.case_id,
+            run_id=case.run_id,
+            action_id=case.action_id,
+            kind=case.kind.value,
+            phase=case.phase.value,
+            effect_may_have_occurred=bool(case.effect_may_have_occurred),
+            disposition=case.disposition.value if case.disposition else "",
+            resolution_code=case.resolution_code,
+            evidence=tuple(
+                f"{item.evidence_id}:{item.kind.value}:{'PASS' if item.passed else 'FAIL'}:{item.source}"
+                for item in case.evidence
+            ),
+        )
+
+    def _owned_reconciliation_case(
+        self,
+        principal: MCPPrincipal,
+        *,
+        case_id: str,
+        required_scope: str,
+    ) -> tuple[Any, RegisteredControlledRun]:
+        self._identity_policy.require(principal, required_scope)
+        store = self._require_reconciliation_store()
+        case = store.get(case_id.strip())
+        if case is None:
+            raise ValueError("RECONCILIATION_CASE_NOT_FOUND")
+        registration = self._run_registry.require_owned(
+            workflow_id=case.run_id,
+            owner_subject=principal.subject,
+        )
+        return case, registration
 
     def operational_context(self, principal: MCPPrincipal) -> dict[str, object]:
         self._identity_policy.require(principal, SCOPE_READ)
@@ -416,8 +485,6 @@ class MCPControlBridge:
             phase=RunPhase.RESOLVED.value if approved else RunPhase.BLOCKED.value,
             provider=current.action.provider,
         )
-        # Approval is its own OAuth capability. Do not require an additional
-        # hao:read scope after the signal has already changed durable state.
         return await self._status_from_pending(workflow_id, pending)
 
     async def finalize(self, principal: MCPPrincipal, *, workflow_id: str) -> MCPFinalizeView:
@@ -585,4 +652,90 @@ class MCPControlBridge:
             task_run_id=accepted_record.task_run_id,
             phase=accepted_record.phase.value,
             failure_code=accepted_record.failure_code,
+        )
+
+    def reconciliation_inspect(
+        self,
+        principal: MCPPrincipal,
+        *,
+        case_id: str,
+    ) -> MCPReconciliationView:
+        case, _ = self._owned_reconciliation_case(
+            principal,
+            case_id=case_id,
+            required_scope=SCOPE_READ,
+        )
+        return self._reconciliation_view(case)
+
+    def reconciliation_resolve_after_human_confirmation(
+        self,
+        principal: MCPPrincipal,
+        *,
+        case_id: str,
+        disposition: str,
+        human_confirmed: bool,
+    ) -> MCPReconciliationView:
+        if not human_confirmed:
+            raise PermissionError("HUMAN_CONFIRMATION_REQUIRED")
+        case, _ = self._owned_reconciliation_case(
+            principal,
+            case_id=case_id,
+            required_scope=SCOPE_APPROVE,
+        )
+        if case.phase in {
+            ReconciliationPhase.RESOLVED,
+            ReconciliationPhase.PERMANENT_UNRESOLVED,
+        }:
+            raise ValueError("RECONCILIATION_CASE_TERMINAL")
+        try:
+            requested = ReconciliationDisposition(disposition.strip().upper())
+        except ValueError as exc:
+            raise ValueError("INVALID_RECONCILIATION_DISPOSITION") from exc
+        resolved = apply_reconciliation(case, requested)
+        saved = self._require_reconciliation_store().save(resolved)
+        return self._reconciliation_view(saved)
+
+    async def reconciliation_retry_with_delta(
+        self,
+        principal: MCPPrincipal,
+        *,
+        case_id: str,
+        expected_state_delta: str,
+        authorization_target: str = "",
+        arguments: Mapping[str, str] | None = None,
+    ) -> MCPSubmissionView:
+        case, registration = self._owned_reconciliation_case(
+            principal,
+            case_id=case_id,
+            required_scope=SCOPE_EXECUTE,
+        )
+        if case.phase != ReconciliationPhase.RESOLVED:
+            raise ValueError("RECONCILIATION_NOT_RESOLVED")
+        if case.disposition not in {
+            ReconciliationDisposition.ADOPT_VERIFIED_STATE,
+            ReconciliationDisposition.COMPENSATE_VERIFIED,
+        }:
+            raise ValueError("RECONCILIATION_DISPOSITION_NOT_RETRY_SAFE")
+
+        pending = await self._production.resume(
+            registration.workflow_id,
+            operational_version=registration.operational_version,
+        )
+        current = await self._production.current_state(pending)
+        if current is None or current.action is None:
+            raise ValueError("RECONCILIATION_ORIGINAL_ACTION_UNAVAILABLE")
+        if current.action.action_id != case.action_id:
+            raise ValueError("RECONCILIATION_ACTION_IDENTITY_MISMATCH")
+
+        new_delta = expected_state_delta.strip()
+        if not new_delta or new_delta == current.action.expected_state_delta.strip():
+            raise ValueError("RECONCILIATION_RETRY_REQUIRES_CHANGED_DELTA")
+
+        return await self.submit(
+            principal,
+            requested_capability=current.action.capability,
+            binding_id=_binding_from_action_id(current.action.action_id),
+            expected_state_delta=new_delta,
+            authorization_target=authorization_target,
+            arguments=arguments,
         )
