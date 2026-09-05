@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 
 ConnectionFactory = Callable[[], Any]
-CURRENT_RUNTIME_SCHEMA_VERSION = 2
+CURRENT_RUNTIME_SCHEMA_VERSION = 3
 MIGRATION_ADVISORY_LOCK_ID = 0x48414F52  # "HAOR"
 
 
@@ -133,7 +133,15 @@ _MIGRATION_2 = (
     """,
 )
 
-MIGRATIONS: dict[int, tuple[str, ...]] = {1: _MIGRATION_1, 2: _MIGRATION_2}
+_MIGRATION_3 = (
+    "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT ''",
+)
+
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: _MIGRATION_1,
+    2: _MIGRATION_2,
+    3: _MIGRATION_3,
+}
 
 _REQUIRED_TABLES = (
     "operational_state",
