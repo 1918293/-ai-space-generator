@@ -24,6 +24,8 @@ class RuntimeTelemetry:
     failures: Any
     authoritative_completions: Any
     reconciliation_cases: Any
+    trace_provider: Any | None = None
+    meter_provider: Any | None = None
 
     @contextmanager
     def span(
@@ -70,11 +72,13 @@ class RuntimeTelemetry:
         if failure_stage or failure_code:
             failure_attributes = dict(metric_attributes)
             if failure_code:
+                # Failure codes are runtime-owned enums/codes, never provider/model payloads.
                 failure_attributes["hao.failure.code"] = failure_code
             self.failures.add(1, failure_attributes)
 
         trace_attributes = dict(metric_attributes)
         if run_id:
+            # IDs are high-cardinality and therefore trace-only.
             trace_attributes["hao.run.id"] = run_id
         if failure_code:
             trace_attributes["hao.failure.code"] = failure_code
@@ -108,18 +112,40 @@ class RuntimeTelemetry:
         ):
             pass
 
+    def force_flush(self, timeout_millis: int = 2000) -> None:
+        for provider in (self.trace_provider, self.meter_provider):
+            if provider is None:
+                continue
+            flush = getattr(provider, "force_flush", None)
+            if callable(flush):
+                flush(timeout_millis=timeout_millis)
+
+    def shutdown(self, timeout_millis: int = 2000) -> None:
+        """Bounded exporter drain for Cloud Run SIGTERM handling."""
+        self.force_flush(timeout_millis=timeout_millis)
+        for provider in (self.trace_provider, self.meter_provider):
+            if provider is None:
+                continue
+            shutdown = getattr(provider, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+
 
 def configure_runtime_telemetry(
     *,
     endpoint: str,
     role: str,
     region: str,
+    environment: str = "production",
+    release_id: str = "",
+    deployment_id: str = "",
 ) -> RuntimeTelemetry:
-    """Initialize production OTLP/HTTP traces + metrics without logging payloads.
+    """Initialize OTLP/HTTP traces + metrics using a strict metadata allowlist.
 
-    High-cardinality run IDs belong only on spans. Metrics intentionally use
-    bounded operational labels and never include action arguments, Google data,
-    OAuth tokens, signing material, or other secret/content payloads.
+    No model prompts, model outputs, action arguments, expected-state deltas,
+    provider payloads, OAuth tokens, signing material, subject identifiers, or
+    secret values are accepted by this API. High-cardinality run IDs are span
+    attributes only, never metric labels.
     """
     from opentelemetry import metrics, trace
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
@@ -133,23 +159,34 @@ def configure_runtime_telemetry(
     trace_endpoint, metric_endpoint = otlp_http_signal_endpoints(endpoint)
     role = role.strip() or "unknown"
     region = region.strip() or "unknown"
-    resource = Resource.create(
-        {
-            "service.name": f"hao-runtime-v2-{role}",
-            "service.namespace": "hao-system",
-            "deployment.environment.name": "production",
-            "cloud.region": region,
-        }
-    )
+    resource_attributes = {
+        "service.name": f"hao-runtime-v2-{role}",
+        "service.namespace": "hao-system",
+        "deployment.environment.name": environment.strip() or "unknown",
+        "cloud.region": region,
+    }
+    if release_id.strip():
+        resource_attributes["service.version"] = release_id.strip()
+    if deployment_id.strip():
+        resource_attributes["service.instance.group"] = deployment_id.strip()
+    resource = Resource.create(resource_attributes)
 
     trace_provider = TracerProvider(resource=resource)
     trace_provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter(endpoint=trace_endpoint))
+        BatchSpanProcessor(
+            OTLPSpanExporter(endpoint=trace_endpoint),
+            max_queue_size=2048,
+            max_export_batch_size=512,
+            schedule_delay_millis=5000,
+            export_timeout_millis=3000,
+        )
     )
     trace.set_tracer_provider(trace_provider)
 
     metric_reader = PeriodicExportingMetricReader(
-        OTLPMetricExporter(endpoint=metric_endpoint)
+        OTLPMetricExporter(endpoint=metric_endpoint),
+        export_interval_millis=30000,
+        export_timeout_millis=3000,
     )
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(meter_provider)
@@ -178,4 +215,6 @@ def configure_runtime_telemetry(
             unit="{case}",
             description="Reconciliation cases opened by typed ambiguity.",
         ),
+        trace_provider=trace_provider,
+        meter_provider=meter_provider,
     )

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urlparse
@@ -16,10 +19,33 @@ class RuntimeEnvironment(StrEnum):
     PRODUCTION = "production"
 
 
+_SECRET_VERSION_RE = re.compile(
+    r"^projects/[^/]+/secrets/[^/]+/versions/(?P<version>[1-9][0-9]*)$"
+)
+_REQUIRED_PRODUCTION_SECRET_ENV_KEYS = frozenset(
+    {
+        "HAO_TEMPORAL_API_KEY",
+        "HAO_ATTESTATION_SECRET",
+        "HAO_MCP_REQUEST_STATE_KEYS",
+    }
+)
+
+
 def _required(values: dict[str, str], key: str) -> str:
     value = str(values.get(key, "")).strip()
     if not value:
         raise ValueError(f"MISSING_CONFIG:{key}")
+    return value
+
+
+def _positive_int(values: dict[str, str], key: str, *, production: bool, default: int) -> int:
+    raw = _required(values, key) if production else str(values.get(key, default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"INVALID_INTEGER_CONFIG:{key}") from exc
+    if value < 1:
+        raise ValueError(f"POSITIVE_INTEGER_REQUIRED:{key}")
     return value
 
 
@@ -39,13 +65,28 @@ def _validate_url(
     field: str,
     production: bool,
     normalize_trailing_slash: bool,
+    allow_loopback_http: bool = False,
 ) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"INVALID_URL:{field}")
-    if production and parsed.scheme != "https":
+    loopback_http = (
+        allow_loopback_http
+        and parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    )
+    if production and parsed.scheme != "https" and not loopback_http:
         raise ValueError(f"HTTPS_REQUIRED:{field}")
     return value.rstrip("/") if normalize_trailing_slash else value
+
+
+def _database_identity(value: str) -> str:
+    """Return a credential-free database endpoint identity for compatibility checks."""
+    parsed = urlparse(value)
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    path = parsed.path or ""
+    return f"{parsed.scheme}://{host}{port}{path}"
 
 
 def _host_from_url(value: str) -> str:
@@ -80,21 +121,58 @@ def _request_state_keys(values: dict[str, str]) -> tuple[str, ...]:
     return keys
 
 
+def _secret_bindings(values: dict[str, str], *, production: bool) -> tuple[tuple[str, str], ...]:
+    raw = str(values.get("HAO_SECRET_BINDINGS_JSON", "")).strip()
+    if not raw:
+        if production:
+            raise ValueError("MISSING_CONFIG:HAO_SECRET_BINDINGS_JSON")
+        return ()
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("INVALID_JSON_CONFIG:HAO_SECRET_BINDINGS_JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("HAO_SECRET_BINDINGS_OBJECT_REQUIRED")
+    normalized: list[tuple[str, str]] = []
+    for env_key, resource in decoded.items():
+        env_key = str(env_key).strip()
+        resource = str(resource).strip()
+        if not env_key or not resource:
+            raise ValueError("INVALID_SECRET_BINDING")
+        match = _SECRET_VERSION_RE.fullmatch(resource)
+        if production and match is None:
+            raise ValueError(f"SECRET_BINDING_EXPLICIT_VERSION_REQUIRED:{env_key}")
+        normalized.append((env_key, resource))
+    bound_keys = {key for key, _ in normalized}
+    missing = sorted(_REQUIRED_PRODUCTION_SECRET_ENV_KEYS - bound_keys)
+    if production and missing:
+        raise ValueError("MISSING_SECRET_BINDINGS:" + ",".join(missing))
+    return tuple(sorted(normalized))
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     environment: RuntimeEnvironment
     role: RuntimeRole
     region: str
+    release_id: str
+    deployment_id: str
     public_mcp_url: str
     mcp_allowed_hosts: tuple[str, ...]
     mcp_allowed_origins: tuple[str, ...]
     mcp_request_state_keys: tuple[str, ...]
     mcp_request_state_audience: str
     database_url: str
+    database_schema_version: int
+    database_rpo_seconds: int
+    database_rto_seconds: int
     temporal_endpoint: str
     temporal_namespace: str
     temporal_task_queue: str
+    temporal_worker_version: str
     temporal_api_key: str
+    worker_instance_count: int
+    graceful_shutdown_seconds: int
     oauth_issuer_url: str
     oauth_resource_url: str
     oauth_audience: str
@@ -102,11 +180,48 @@ class RuntimeSettings:
     expected_hao_subject: str
     attestation_key_id: str
     attestation_secret: str
+    secret_bindings: tuple[tuple[str, str], ...]
     otel_endpoint: str
 
     @property
     def request_state_key_bytes(self) -> tuple[bytes, ...]:
         return tuple(bytes.fromhex(value) for value in self.mcp_request_state_keys)
+
+    @property
+    def secret_binding_map(self) -> dict[str, str]:
+        return dict(self.secret_bindings)
+
+    @property
+    def deployment_identity(self) -> tuple[tuple[str, str], ...]:
+        """Non-secret compatibility identity that API and worker must share."""
+        return (
+            ("environment", self.environment.value),
+            ("region", self.region),
+            ("release_id", self.release_id),
+            ("deployment_id", self.deployment_id),
+            ("public_mcp_url", self.public_mcp_url),
+            ("database_identity", _database_identity(self.database_url)),
+            ("database_schema_version", str(self.database_schema_version)),
+            ("temporal_endpoint", self.temporal_endpoint),
+            ("temporal_namespace", self.temporal_namespace),
+            ("temporal_task_queue", self.temporal_task_queue),
+            ("temporal_worker_version", self.temporal_worker_version),
+            ("oauth_issuer_url", self.oauth_issuer_url),
+            ("oauth_resource_url", self.oauth_resource_url),
+            ("oauth_audience", self.oauth_audience),
+            ("expected_hao_subject", self.expected_hao_subject),
+            ("attestation_key_id", self.attestation_key_id),
+            ("mcp_request_state_audience", self.mcp_request_state_audience),
+        )
+
+    @property
+    def deployment_identity_fingerprint(self) -> str:
+        body = json.dumps(
+            dict(self.deployment_identity),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(body).hexdigest()
 
     @classmethod
     def from_mapping(cls, values: dict[str, str]) -> "RuntimeSettings":
@@ -126,23 +241,61 @@ class RuntimeSettings:
 
         production = environment == RuntimeEnvironment.PRODUCTION
         region = _required(values, "HAO_RUNTIME_REGION")
+        release_id = _required(values, "HAO_RELEASE_ID") if production else str(
+            values.get("HAO_RELEASE_ID", "dev")
+        ).strip() or "dev"
+        deployment_id = _required(values, "HAO_DEPLOYMENT_ID") if production else str(
+            values.get("HAO_DEPLOYMENT_ID", "local")
+        ).strip() or "local"
+
         database_url = _required(values, "HAO_DATABASE_URL")
+        database_schema_version = _positive_int(
+            values, "HAO_DATABASE_SCHEMA_VERSION", production=production, default=1
+        )
+        database_rpo_seconds = _positive_int(
+            values, "HAO_DATABASE_RPO_SECONDS", production=production, default=300
+        )
+        database_rto_seconds = _positive_int(
+            values, "HAO_DATABASE_RTO_SECONDS", production=production, default=3600
+        )
+        if production and database_rpo_seconds > 300:
+            raise ValueError("PRODUCTION_RPO_MUST_BE_300_SECONDS_OR_LESS")
+
         temporal_endpoint = _required(values, "HAO_TEMPORAL_ENDPOINT")
         temporal_namespace = _required(values, "HAO_TEMPORAL_NAMESPACE")
         temporal_task_queue = _required(values, "HAO_TEMPORAL_TASK_QUEUE")
+        temporal_worker_version = (
+            _required(values, "HAO_TEMPORAL_WORKER_VERSION")
+            if production
+            else str(values.get("HAO_TEMPORAL_WORKER_VERSION", release_id)).strip() or release_id
+        )
         temporal_api_key = _required(values, "HAO_TEMPORAL_API_KEY") if production else str(
             values.get("HAO_TEMPORAL_API_KEY", "")
         ).strip()
+        worker_instance_count = _positive_int(
+            values, "HAO_WORKER_INSTANCE_COUNT", production=production, default=1
+        )
+        graceful_shutdown_seconds = _positive_int(
+            values, "HAO_GRACEFUL_SHUTDOWN_SECONDS", production=production, default=8
+        )
+        if production and graceful_shutdown_seconds > 9:
+            raise ValueError("GRACEFUL_SHUTDOWN_MUST_FIT_CLOUD_RUN_SIGTERM_WINDOW")
+
         otel_endpoint = _required(values, "HAO_OTEL_ENDPOINT") if production else str(
             values.get("HAO_OTEL_ENDPOINT", "")
         ).strip()
+        if otel_endpoint:
+            otel_endpoint = _validate_url(
+                otel_endpoint,
+                field="HAO_OTEL_ENDPOINT",
+                production=production,
+                normalize_trailing_slash=True,
+                allow_loopback_http=True,
+            )
 
         if production and not database_url.startswith(("postgresql://", "postgres://")):
             raise ValueError("PRODUCTION_POSTGRES_REQUIRED")
 
-        # API-facing configuration is mandatory for both roles in one settings
-        # contract so API and worker describe the same deployment identity rather
-        # than drifting into incompatible runtime configurations.
         public_mcp_url = _validate_url(
             _required(values, "HAO_PUBLIC_MCP_URL"),
             field="HAO_PUBLIC_MCP_URL",
@@ -165,14 +318,9 @@ class RuntimeSettings:
                 normalize_trailing_slash=True,
             )
 
-        # MCP 2026-07-28 multi-round-trip resolver state is sealed with a per-
-        # process key by default. A Cloud Run fleet must share keys and audience
-        # or a human-approval retry can land on another instance and fail.
         request_state_keys = _request_state_keys(values)
         request_state_audience = _required(values, "HAO_MCP_REQUEST_STATE_AUDIENCE")
 
-        # OAuth issuer is an exact case-sensitive JWT `iss` identity. Validate
-        # its URL shape but never rewrite its trailing slash or other content.
         oauth_issuer_url = _validate_url(
             _required(values, "HAO_OAUTH_ISSUER_URL"),
             field="HAO_OAUTH_ISSUER_URL",
@@ -205,20 +353,30 @@ class RuntimeSettings:
         if len(attestation_secret.encode("utf-8")) < 32:
             raise ValueError("ATTESTATION_SECRET_MIN_32_BYTES")
 
+        secret_bindings = _secret_bindings(values, production=production)
+
         return cls(
             environment=environment,
             role=role,
             region=region,
+            release_id=release_id,
+            deployment_id=deployment_id,
             public_mcp_url=public_mcp_url,
             mcp_allowed_hosts=hosts,
             mcp_allowed_origins=origins,
             mcp_request_state_keys=request_state_keys,
             mcp_request_state_audience=request_state_audience,
             database_url=database_url,
+            database_schema_version=database_schema_version,
+            database_rpo_seconds=database_rpo_seconds,
+            database_rto_seconds=database_rto_seconds,
             temporal_endpoint=temporal_endpoint,
             temporal_namespace=temporal_namespace,
             temporal_task_queue=temporal_task_queue,
+            temporal_worker_version=temporal_worker_version,
             temporal_api_key=temporal_api_key,
+            worker_instance_count=worker_instance_count,
+            graceful_shutdown_seconds=graceful_shutdown_seconds,
             oauth_issuer_url=oauth_issuer_url,
             oauth_resource_url=oauth_resource_url,
             oauth_audience=oauth_audience,
@@ -226,5 +384,6 @@ class RuntimeSettings:
             expected_hao_subject=expected_hao_subject,
             attestation_key_id=attestation_key_id,
             attestation_secret=attestation_secret,
+            secret_bindings=secret_bindings,
             otel_endpoint=otel_endpoint,
         )

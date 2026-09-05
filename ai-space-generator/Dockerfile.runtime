@@ -17,5 +17,6 @@ RUN useradd --create-home --uid 10001 hao-runtime \
 USER hao-runtime
 
 EXPOSE 8080
+STOPSIGNAL SIGTERM
 
 CMD ["python", "-m", "src.runtime_deployment"]

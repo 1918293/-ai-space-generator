@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
 import json
 import os
 from typing import Any
@@ -39,6 +41,8 @@ from .reconciliation_persistence import (
     ReconciliationAwareBroker,
 )
 from .runtime_config import RuntimeRole, RuntimeSettings
+from .runtime_lifecycle import RuntimeLifecycle, ShutdownSignalController
+from .runtime_migrations import verify_postgres_schema
 from .runtime_observability import configure_runtime_telemetry
 from .runtime_observability_bridge import (
     ObservableMCPControlBridge,
@@ -58,6 +62,7 @@ FORMAL_SHEETS_ASSURANCE_TAGS = (
     "EXACT_CONFIGURED_TARGET",
     "DIRECT_STATE_READBACK",
 )
+TEMPORAL_DEPLOYMENT_NAME = "hao-runtime-v2"
 
 
 def _json_env(values: dict[str, str], key: str) -> object:
@@ -266,7 +271,28 @@ def _telemetry(settings: RuntimeSettings) -> Any | None:
         endpoint=settings.otel_endpoint,
         role=settings.role.value,
         region=settings.region,
+        environment=settings.environment.value,
+        release_id=settings.release_id,
+        deployment_id=settings.deployment_id,
     )
+
+
+def _verify_schema(settings: RuntimeSettings) -> int:
+    return verify_postgres_schema(
+        settings.database_url,
+        expected_version=settings.database_schema_version,
+    )
+
+
+def _runtime_identity_payload(settings: RuntimeSettings) -> dict[str, Any]:
+    return {
+        "role": settings.role.value,
+        "release_id": settings.release_id,
+        "deployment_id": settings.deployment_id,
+        "deployment_identity": settings.deployment_identity_fingerprint,
+        "schema_version": settings.database_schema_version,
+        "temporal_worker_version": settings.temporal_worker_version,
+    }
 
 
 async def build_api_app(values: dict[str, str]) -> Any:
@@ -274,13 +300,20 @@ async def build_api_app(values: dict[str, str]) -> Any:
     if settings.role != RuntimeRole.API:
         raise ValueError("API_ROLE_REQUIRED")
 
+    _verify_schema(settings)
     telemetry = _telemetry(settings)
     targets = load_sheets_targets(values)
     specs = load_task_policies(values)
     parent_plans = load_parent_task_plans(values)
     google_client = GoogleWorkspaceSheetsClient()
-    persistence = build_postgres_persistence(settings.database_url)
-    reconciliation = PostgresReconciliationStore(settings.database_url)
+    persistence = build_postgres_persistence(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    reconciliation = PostgresReconciliationStore(
+        settings.database_url,
+        initialize_schema=False,
+    )
     _initialize_operational_state(persistence, values)
 
     policy = GoogleAuthorityTaskPolicyProvider(google_client, specs)
@@ -297,11 +330,17 @@ async def build_api_app(values: dict[str, str]) -> Any:
             attestor=CompletionAttestor(settings.attestation_secret.encode("utf-8")),
             completion_store=persistence.completion,
         ),
-        PostgresFinalizationIssueStore(settings.database_url),
+        PostgresFinalizationIssueStore(
+            settings.database_url,
+            initialize_schema=False,
+        ),
     )
     parent_tasks = ProductionParentTaskService(
         production=production,
-        store=PostgresParentTaskStore(settings.database_url),
+        store=PostgresParentTaskStore(
+            settings.database_url,
+            initialize_schema=False,
+        ),
         plans=parent_plans,
     )
     base_bridge = MCPControlBridge(
@@ -339,29 +378,76 @@ async def build_api_app(values: dict[str, str]) -> Any:
     from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
 
-    async def healthz(request: Any) -> JSONResponse:
+    lifecycle = RuntimeLifecycle()
+    lifecycle.mark_started()
+
+    async def livez(request: Any) -> JSONResponse:
         del request
+        return JSONResponse({"status": "live", **_runtime_identity_payload(settings)})
+
+    async def startupz(request: Any) -> JSONResponse:
+        del request
+        status = 200 if lifecycle.startup_ready else 503
+        return JSONResponse(
+            {
+                "status": "started" if status == 200 else "starting",
+                **_runtime_identity_payload(settings),
+            },
+            status_code=status,
+        )
+
+    async def readyz(request: Any) -> JSONResponse:
+        del request
+        if not lifecycle.traffic_ready:
+            return JSONResponse(
+                {"status": "draining", **_runtime_identity_payload(settings)},
+                status_code=503,
+            )
         try:
+            _verify_schema(settings)
             state = persistence.operational_state.get()
             return JSONResponse(
                 {
                     "status": "ready",
-                    "role": settings.role.value,
                     "mode": state.mode.value,
                     "operational_version": state.version,
+                    **_runtime_identity_payload(settings),
                 }
             )
         except Exception as exc:
             return JSONResponse(
-                {"status": "not_ready", "error": type(exc).__name__},
+                {
+                    "status": "not_ready",
+                    "error": type(exc).__name__,
+                    **_runtime_identity_payload(settings),
+                },
                 status_code=503,
             )
 
+    @asynccontextmanager
+    async def lifespan(app: Any):
+        del app
+        try:
+            yield
+        finally:
+            lifecycle.begin_shutdown()
+            if telemetry is not None:
+                telemetry.shutdown(
+                    timeout_millis=min(
+                        settings.graceful_shutdown_seconds * 1000,
+                        1000,
+                    )
+                )
+
     return Starlette(
         routes=[
-            Route("/healthz", healthz, methods=["GET"]),
+            Route("/livez", livez, methods=["GET"]),
+            Route("/startupz", startupz, methods=["GET"]),
+            Route("/readyz", readyz, methods=["GET"]),
+            Route("/healthz", readyz, methods=["GET"]),
             Mount("/", app=mcp_app),
-        ]
+        ],
+        lifespan=lifespan,
     )
 
 
@@ -369,12 +455,21 @@ async def run_worker(values: dict[str, str]) -> None:
     settings = RuntimeSettings.from_mapping(values)
     if settings.role != RuntimeRole.WORKER:
         raise ValueError("WORKER_ROLE_REQUIRED")
+    if settings.worker_instance_count < 1:
+        raise ValueError("WORKER_INSTANCE_COUNT_MUST_BE_NON_ZERO")
 
+    _verify_schema(settings)
     telemetry = _telemetry(settings)
     targets = load_sheets_targets(values)
     google_client = GoogleWorkspaceSheetsClient()
-    persistence = build_postgres_persistence(settings.database_url)
-    reconciliation = PostgresReconciliationStore(settings.database_url)
+    persistence = build_postgres_persistence(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    reconciliation = PostgresReconciliationStore(
+        settings.database_url,
+        initialize_schema=False,
+    )
     resolver = ConfiguredSheetsCommandResolver(targets)
     raw_provider = ControlledGoogleDriveProvider(resolver, google_client)
     idempotent = IdempotentAsyncBroker(raw_provider, persistence.idempotency)
@@ -393,7 +488,8 @@ async def run_worker(values: dict[str, str]) -> None:
     )
     temporal_client = await connect_temporal(settings)
 
-    from temporalio.worker import Worker
+    from temporalio.common import VersioningBehavior, WorkerDeploymentVersion
+    from temporalio.worker import Worker, WorkerDeploymentConfig
 
     worker = Worker(
         temporal_client,
@@ -404,8 +500,36 @@ async def run_worker(values: dict[str, str]) -> None:
             activities.execute_tool,
             activities.verify_outcome,
         ],
+        identity=f"{settings.deployment_id}/{settings.temporal_worker_version}",
+        graceful_shutdown_timeout=timedelta(
+            seconds=max(1, settings.graceful_shutdown_seconds - 2)
+        ),
+        deployment_config=WorkerDeploymentConfig(
+            version=WorkerDeploymentVersion(
+                deployment_name=TEMPORAL_DEPLOYMENT_NAME,
+                build_id=settings.temporal_worker_version,
+            ),
+            use_worker_versioning=True,
+            default_versioning_behavior=VersioningBehavior.PINNED,
+        ),
     )
-    await worker.run()
+
+    loop = asyncio.get_running_loop()
+    shutdown = ShutdownSignalController()
+    shutdown.install(loop)
+
+    try:
+        async with worker:
+            await shutdown.event.wait()
+    finally:
+        shutdown.remove(loop)
+        if telemetry is not None:
+            telemetry.shutdown(
+                timeout_millis=min(
+                    settings.graceful_shutdown_seconds * 1000,
+                    1000,
+                )
+            )
 
 
 async def _main_async(values: dict[str, str]) -> None:
@@ -418,7 +542,13 @@ async def _main_async(values: dict[str, str]) -> None:
     import uvicorn
 
     port = int(str(values.get("PORT", "8080")))
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        timeout_graceful_shutdown=settings.graceful_shutdown_seconds,
+    )
     server = uvicorn.Server(config)
     await server.serve()
 
