@@ -104,6 +104,55 @@ class Bridge:
     def operational_context(self, principal):
         return {"mode": "EXP", "task": "test", "operational_version": 1}
 
+    def parent_start(self, principal, *, plan_id):
+        return SimpleNamespace(task_run_id="TASK-1", phase="OPEN")
+
+    async def parent_submit_child(self, principal, **kwargs):
+        return SimpleNamespace(
+            task_run_id=kwargs["task_run_id"],
+            workflow_id="TASK-1:C001",
+            accepted=True,
+            phase="AWAITING_HAO",
+            code="CONTROLLED_RUN_SUBMITTED",
+        )
+
+    async def parent_refresh(self, principal, *, task_run_id):
+        return SimpleNamespace(
+            task_run_id=task_run_id,
+            phase="RECONCILIATION_REQUIRED",
+            failure_code="CHILD_RECONCILIATION_REQUIRED",
+        )
+
+    async def parent_accept_after_human_confirmation(self, principal, **kwargs):
+        return SimpleNamespace(
+            task_run_id=kwargs["task_run_id"],
+            phase="CLOSED",
+            failure_code="",
+        )
+
+    def reconciliation_inspect(self, principal, *, case_id):
+        return SimpleNamespace(
+            case_id=case_id,
+            run_id="RUN-RECON-ORIGINAL",
+            phase="OPEN",
+            resolution_code="",
+        )
+
+    def reconciliation_resolve_after_human_confirmation(self, principal, **kwargs):
+        return SimpleNamespace(
+            case_id=kwargs["case_id"],
+            run_id="RUN-RECON-ORIGINAL",
+            phase="RESOLVED",
+            resolution_code="ADOPTED_VERIFIED_EXTERNAL_STATE",
+        )
+
+    async def reconciliation_retry_with_delta(self, principal, **kwargs):
+        return SimpleNamespace(
+            workflow_id="RUN-RETRY-1",
+            phase="AWAITING_HAO",
+            code="CONTROLLED_RUN_SUBMITTED",
+        )
+
 
 def test_mcp_observer_records_state_but_never_model_arguments():
     async def scenario():
@@ -117,13 +166,40 @@ def test_mcp_observer_records_state_but_never_model_arguments():
         )
         await bridge.status(object(), workflow_id="RUN-1")
         await bridge.finalize(object(), workflow_id="RUN-1")
+        bridge.parent_start(object(), plan_id="formal.plan")
+        await bridge.parent_submit_child(
+            object(),
+            task_run_id="TASK-1",
+            slot_id="write",
+            arguments={"values_json": "[[\"parent private content\"]]"},
+        )
+        await bridge.parent_refresh(object(), task_run_id="TASK-1")
+        bridge.reconciliation_inspect(object(), case_id="RECON-1")
+        bridge.reconciliation_resolve_after_human_confirmation(
+            object(),
+            case_id="RECON-1",
+            disposition="ADOPT_VERIFIED_STATE",
+            human_confirmed=True,
+        )
+        await bridge.reconciliation_retry_with_delta(
+            object(),
+            case_id="RECON-1",
+            expected_state_delta="private changed delta",
+            arguments={"values_json": "[[\"reconciliation private content\"]]"},
+        )
         return item
 
     item = asyncio.run(scenario())
     all_attributes = [attributes for _, attributes in item.tracer.spans]
     assert any(attrs.get("hao.run.id") == "RUN-1" for attrs in all_attributes)
+    assert any(attrs.get("hao.run.id") == "TASK-1" for attrs in all_attributes)
+    assert any(attrs.get("hao.run.id") == "RUN-RECON-ORIGINAL" for attrs in all_attributes)
+    assert any(attrs.get("hao.run.id") == "RUN-RETRY-1" for attrs in all_attributes)
     serialized = repr(all_attributes)
     assert "private content" not in serialized
+    assert "parent private content" not in serialized
+    assert "reconciliation private content" not in serialized
+    assert "private changed delta" not in serialized
     assert item.authoritative_completions.calls == [(1, {})]
 
 
