@@ -9,6 +9,7 @@ from src.production_execution import ProductionExecutionResult
 from src.runtime_deployment import (
     FORMAL_SHEETS_ASSURANCE_TAGS,
     action_catalog_for_targets,
+    load_parent_task_plans,
     load_sheets_targets,
     load_task_policies,
 )
@@ -41,6 +42,21 @@ def deployment_values():
             "required_acceptance_gate_ids": ["FORMAL_RECORD_WRITTEN"],
             "required_action_tags": ["TASK_BOUND"],
             "forbidden_action_tags": ["FULL_GENERATION"]
+          }
+        ]""",
+        "HAO_PARENT_TASK_PLANS_JSON": """[
+          {
+            "plan_id": "runtime.formal-record",
+            "task": "Runtime v2 formal persistence",
+            "children": [
+              {
+                "slot_id": "write-intake",
+                "requested_capability": "formal_persistence",
+                "binding_id": "formal.intake.append",
+                "authorization_target": "Hao System Intake"
+              }
+            ],
+            "hao_acceptance_required": true
           }
         ]""",
     }
@@ -79,6 +95,19 @@ def test_task_policy_forces_direct_readback_gate_and_formal_assurance_tags():
     assert spec.forbidden_action_tags == ("FULL_GENERATION",)
 
 
+def test_parent_plan_identity_and_child_binding_are_deployment_owned():
+    plan = load_parent_task_plans(deployment_values()).get("runtime.formal-record")
+    assert plan is not None
+    assert plan.task == "Runtime v2 formal persistence"
+    assert plan.hao_acceptance_required is True
+    assert len(plan.children) == 1
+    child = plan.children[0]
+    assert child.slot_id == "write-intake"
+    assert child.requested_capability == "formal_persistence"
+    assert child.binding_id == "formal.intake.append"
+    assert child.authorization_target == "Hao System Intake"
+
+
 def test_empty_or_malformed_deployment_targets_fail_closed():
     values = deployment_values()
     values["HAO_SHEETS_TARGETS_JSON"] = "[]"
@@ -88,6 +117,17 @@ def test_empty_or_malformed_deployment_targets_fail_closed():
     values["HAO_SHEETS_TARGETS_JSON"] = "not-json"
     with pytest.raises(ValueError, match="INVALID_JSON_CONFIG:HAO_SHEETS_TARGETS_JSON"):
         load_sheets_targets(values)
+
+
+def test_empty_parent_plan_config_fails_closed():
+    values = deployment_values()
+    values["HAO_PARENT_TASK_PLANS_JSON"] = "[]"
+    with pytest.raises(ValueError, match="HAO_PARENT_TASK_PLANS_REQUIRED"):
+        load_parent_task_plans(values)
+
+    values["HAO_PARENT_TASK_PLANS_JSON"] = "{}"
+    with pytest.raises(ValueError, match="HAO_PARENT_TASK_PLANS_LIST_REQUIRED"):
+        load_parent_task_plans(values)
 
 
 def test_authority_source_is_required_for_every_deployment_target():
