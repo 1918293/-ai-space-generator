@@ -1,0 +1,60 @@
+name: Runtime v2 Integration Gate
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-integration-current
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integrated-runtime-gate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-space-generator
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install complete integration dependencies
+        run: >-
+          python -m pip install --upgrade pytest
+          -r requirements.txt
+          -r requirements-control.txt
+      - name: Run complete Runtime v2 integration surface
+        run: >-
+          python -m pytest tests -q
+          --ignore=tests/test_core.py
+          --ignore=tests/test_validation.py
+      - name: Compile runtime production entrypoints
+        run: >-
+          python -m py_compile
+          src/runtime_config.py
+          src/runtime_migrations.py
+          src/runtime_lifecycle.py
+          src/runtime_observability.py
+          src/runtime_deployment.py
+          src/parent_task_production.py
+          src/provider_reconciliation.py
+          src/reconciliation_retry.py
+      - name: Build runtime container
+        run: docker build -f Dockerfile.runtime .
+
+  integrated-legacy-gate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-space-generator
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install legacy application dependencies
+        run: python -m pip install --upgrade pytest -r requirements.txt
+      - name: Run legacy application regression surface
+        run: python -m pytest tests/test_core.py tests/test_validation.py -q
