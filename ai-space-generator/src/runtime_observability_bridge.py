@@ -13,8 +13,6 @@ class ObservableMCPControlBridge:
         self._telemetry = telemetry
 
     def __getattr__(self, name: str) -> Any:
-        # Keep newly added control-plane methods reachable through the telemetry
-        # decorator instead of silently creating a second, non-observed bridge.
         return getattr(self._bridge, name)
 
     def operational_context(self, principal: Any) -> dict[str, object]:
@@ -68,6 +66,98 @@ class ObservableMCPControlBridge:
         )
         if result.authoritative:
             self._telemetry.record_authoritative_completion()
+        return result
+
+    def parent_start(self, principal: Any, *, plan_id: str) -> Any:
+        result = self._bridge.parent_start(principal, plan_id=plan_id)
+        self._telemetry.record_run_event(
+            "parent_started",
+            run_id=result.task_run_id,
+            phase=result.phase,
+        )
+        return result
+
+    async def parent_submit_child(self, principal: Any, **kwargs: Any) -> Any:
+        result = await self._bridge.parent_submit_child(principal, **kwargs)
+        self._telemetry.record_run_event(
+            "parent_child_submitted" if result.accepted else "parent_child_rejected",
+            run_id=result.workflow_id or result.task_run_id,
+            phase=result.phase,
+            failure_stage="" if result.accepted else "ADMISSION",
+            failure_code="" if result.accepted else result.code,
+        )
+        return result
+
+    async def parent_refresh(self, principal: Any, *, task_run_id: str) -> Any:
+        result = await self._bridge.parent_refresh(principal, task_run_id=task_run_id)
+        self._telemetry.record_run_event(
+            "parent_refreshed",
+            run_id=result.task_run_id,
+            phase=result.phase,
+            failure_stage="RECONCILIATION" if result.failure_code else "",
+            failure_code=result.failure_code,
+        )
+        return result
+
+    async def parent_accept_after_human_confirmation(
+        self,
+        principal: Any,
+        **kwargs: Any,
+    ) -> Any:
+        result = await self._bridge.parent_accept_after_human_confirmation(
+            principal, **kwargs
+        )
+        self._telemetry.record_run_event(
+            "parent_hao_acceptance",
+            run_id=result.task_run_id,
+            phase=result.phase,
+            failure_code=result.failure_code,
+        )
+        return result
+
+    def reconciliation_inspect(self, principal: Any, *, case_id: str) -> Any:
+        result = self._bridge.reconciliation_inspect(principal, case_id=case_id)
+        self._telemetry.record_run_event(
+            "reconciliation_inspect",
+            run_id=result.run_id,
+            phase=result.phase,
+            failure_stage="RECONCILIATION",
+            failure_code=result.resolution_code,
+        )
+        return result
+
+    def reconciliation_resolve_after_human_confirmation(
+        self,
+        principal: Any,
+        **kwargs: Any,
+    ) -> Any:
+        result = self._bridge.reconciliation_resolve_after_human_confirmation(
+            principal, **kwargs
+        )
+        self._telemetry.record_run_event(
+            "reconciliation_resolve",
+            run_id=result.run_id,
+            phase=result.phase,
+            failure_stage="RECONCILIATION" if result.phase == "OPEN" else "",
+            failure_code=result.resolution_code if result.phase == "OPEN" else "",
+        )
+        return result
+
+    async def reconciliation_retry_with_delta(
+        self,
+        principal: Any,
+        **kwargs: Any,
+    ) -> Any:
+        result = await self._bridge.reconciliation_retry_with_delta(
+            principal, **kwargs
+        )
+        self._telemetry.record_run_event(
+            "reconciliation_retry_submitted" if result.workflow_id else "reconciliation_retry_rejected",
+            run_id=result.workflow_id,
+            phase=result.phase,
+            failure_stage="" if result.workflow_id else "RECONCILIATION",
+            failure_code="" if result.workflow_id else result.code,
+        )
         return result
 
 
