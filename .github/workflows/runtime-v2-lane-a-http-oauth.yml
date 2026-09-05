@@ -21,9 +21,11 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: ai-space-generator/requirements-control.txt
-      - name: Install Runtime v2 dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements-control.txt pytest
+          cache-dependency-path: |
+            ai-space-generator/requirements.txt
+            ai-space-generator/requirements-control.txt
+      - name: Install repository and Runtime v2 dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt -r requirements-control.txt pytest
       - name: Real TCP Streamable HTTP OAuth gate
         run: pytest -q tests/test_mcp_http_oauth_network_e2e.py tests/test_oauth_verifier.py tests/test_mcp_control_server.py tests/test_mcp_control_bridge.py
       - name: Runtime v2 regression
