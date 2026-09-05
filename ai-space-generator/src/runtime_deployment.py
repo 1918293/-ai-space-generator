@@ -306,6 +306,17 @@ def _runtime_identity_payload(settings: RuntimeSettings) -> dict[str, Any]:
     }
 
 
+def _completion_attestor(settings: RuntimeSettings) -> CompletionAttestor:
+    return CompletionAttestor(
+        settings.attestation_secret.encode("utf-8"),
+        key_id=settings.attestation_key_id,
+        verification_keys={
+            key_id: secret.encode("utf-8")
+            for key_id, secret in settings.attestation_previous_keys
+        },
+    )
+
+
 async def build_api_app(values: dict[str, str]) -> Any:
     settings = RuntimeSettings.from_mapping(values)
     if settings.role != RuntimeRole.API:
@@ -348,7 +359,7 @@ async def build_api_app(values: dict[str, str]) -> Any:
         ProductionExecutionService(
             gateway=gateway,
             starter=starter,
-            attestor=CompletionAttestor(settings.attestation_secret.encode("utf-8")),
+            attestor=_completion_attestor(settings),
             completion_store=persistence.completion,
         ),
         PostgresFinalizationIssueStore(
