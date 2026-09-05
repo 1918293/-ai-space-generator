@@ -40,6 +40,7 @@ class ParentTaskRecord:
     hao_accepted: bool = False
     phase: ParentTaskPhase = ParentTaskPhase.OPEN
     failure_code: str = ""
+    store_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,8 @@ def validate_parent_task(record: ParentTaskRecord) -> ParentTaskRecord:
         raise ValueError("TASK_REQUIRED")
     if record.admitted_operational_version < 1:
         raise ValueError("ADMITTED_OPERATIONAL_VERSION_REQUIRED")
+    if record.store_revision < 0:
+        raise ValueError("PARENT_TASK_STORE_REVISION_INVALID")
     required_actions = _normalized_unique(record.required_action_ids, field="REQUIRED_ACTION_ID")
     required_gates = _normalized_unique(record.required_gate_ids, field="REQUIRED_GATE_ID")
     if record.phase == ParentTaskPhase.CLOSED:
