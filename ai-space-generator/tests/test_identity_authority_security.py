@@ -90,7 +90,6 @@ def test_semantic_authority_snapshot_excludes_projection_and_rejects_stale():
     with pytest.raises(PermissionError, match="STALE_AUTHORITY_SNAPSHOT"):
         base.require_fresh(stale)
 
-
 def test_direct_semantic_authority_adapter_readback_rejects_projection_and_stale_changes():
     class Reader:
         def __init__(self):
