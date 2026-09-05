@@ -68,6 +68,8 @@ Responsibilities:
 - exact Host/Origin transport security;
 - runtime context/status APIs;
 - controlled-run submission/finalization;
+- deployment-owned parent-task control surface;
+- owner-bound reconciliation inspect/resolve/retry-with-changed-delta control surface;
 - health/readiness endpoints;
 - no provider side effect outside the broker boundary.
 
@@ -101,6 +103,7 @@ PostgreSQL owns application/runtime records that must survive process replacemen
 - operational state/events;
 - MCP workflow ownership bindings;
 - authoritative completion records;
+- stable finalization issuance reservations needed for response-loss/restart idempotency;
 - durable broker idempotency/effect state;
 - reconciliation records;
 - parent task/application state not already owned by Temporal workflow history.
@@ -176,7 +179,9 @@ Important separation:
 - `hao:access` is the only global MCP middleware scope.
 - `hao:read`, `hao:execute`, and `hao:approve` are per-tool application permissions.
 - A read token must not require or imply `hao:approve`.
+- An approve-only operation must not change durable state and then fail its response merely because a hidden `hao:read` check was added afterward.
 - OAuth identity is not itself a consequential-action approval; exact action approval remains a Hao-origin human confirmation bound to current run scope.
+- Parent-task Hao acceptance and reconciliation dispositions also require human confirmation at their own control boundaries.
 
 Auth0 is currently the leading implementation candidate because it supports custom API audiences and scopes and standard OAuth authorization flows. It is not yet production-selected until the actual ChatGPT/private MCP connection completes end-to-end with the required client registration/authorization behavior. Runtime interfaces remain provider-neutral so a standards-compatible IdP can replace it without changing execution semantics.
 
@@ -194,7 +199,16 @@ API and worker must load the same deployment identity, including:
 - OAuth issuer/resource/audience;
 - expected Hao subject;
 - attestation key ID;
-- observability endpoint.
+- observability endpoint;
+- deployment-owned provider target catalog through `HAO_SHEETS_TARGETS_JSON`;
+- trusted task policies and Authority source bindings through `HAO_TASK_POLICIES_JSON`;
+- deployment-owned multi-action parent plans through `HAO_PARENT_TASK_PLANS_JSON`.
+
+The three JSON contracts are application configuration, not model-authored instructions. For the currently implemented Google Sheets controlled path:
+
+- `HAO_SHEETS_TARGETS_JSON` owns the exact binding ID, spreadsheet ID, A1 range, write option, and Authority file sources;
+- `HAO_TASK_POLICIES_JSON` owns TASK acceptance criteria, Authority sources, required gates, Hao-acceptance requirement, and required/forbidden action assurance tags;
+- `HAO_PARENT_TASK_PLANS_JSON` owns parent `plan_id`, exact TASK identity, child slot IDs, requested capabilities, trusted binding IDs, authorization targets, parent gates, and parent Hao-acceptance requirement.
 
 Critical invariants:
 
@@ -205,9 +219,14 @@ public MCP hostname in explicit Host allowlist
 production public/auth URLs use HTTPS
 production persistence is PostgreSQL
 required secrets exist and signing secret meets minimum strength
+provider target / task policy / parent plan config exists and parses successfully
+parent plan TASK == current runtime TASK at parent start
+model cannot author target spreadsheet/range or parent child capability/binding
+API and worker use the same database identity
+API and worker use compatible provider target configuration for the controlled provider path
 ```
 
-Misconfiguration is a startup failure, not a warning.
+Missing or malformed required deployment-owned configuration is a startup failure, not a warning. A configuration failure must not be repaired by allowing the model to supply runtime-owned target, binding, Authority, safety, or completion fields.
 
 ## 10. What is deliberately not selected
 
@@ -227,6 +246,10 @@ Reason: a real hostname is not justification for removing the boundary; exact Ho
 
 Reason: global read+execute+approve scopes collapse the authorization layers. Runtime uses base access + per-tool scopes instead.
 
+### Not selected: model-supplied reconciliation evidence or blind replay
+
+Reason: `UNKNOWN_EFFECT` means the prior side effect may already have occurred. Reconciliation resolution may use only trusted evidence already present in the durable case. Retry-with-delta is allowed only after a retry-safe verified resolution, must change the expected-state delta, creates a new controlled run, and still goes through normal authorization and verification.
+
 ### Not selected: Temporal Serverless Workers for GCP Cloud Run as initial production dependency
 
 Reason: the feature is pre-release as of this design checkpoint. The selected baseline uses ordinary Cloud Run Worker Pools until the newer integration has mature production evidence.
@@ -239,14 +262,14 @@ Reason: Runtime v2 exists to replace that authority model. Native/direct effects
 
 A production environment is not ready until all are true:
 
-1. Runtime config startup validation PASS.
+1. Runtime config startup validation PASS, including all required deployment-owned target/policy/parent-plan contracts.
 2. Streamable HTTP Host/Origin security PASS on the real hostname.
 3. OAuth negative and positive E2E PASS against the real Authorization Server.
 4. Wrong subject / missing per-tool scope tests PASS.
-5. Cloud SQL migrations and transactional concurrency tests PASS.
+5. Cloud SQL migrations and transactional concurrency tests PASS, including completion, stable-finalization, parent-task, workflow-ownership, idempotency, and reconciliation records.
 6. Temporal worker restart/resume/signal tests PASS against the target namespace.
 7. completion signing key rotation/replay tests PASS.
-8. OpenTelemetry traces correlate MCP request -> workflow -> activity -> provider receipt -> verification -> completion.
+8. OpenTelemetry traces correlate MCP request -> parent/child workflow where applicable -> activity -> provider receipt -> verification -> reconciliation/finalization -> completion without recording model payloads or expected-state contents.
 9. first real Authority adapter PASS.
 10. first real provider mutation adapter PASS with receipt/readback/idempotency/reconciliation.
 11. no uncontrolled/native result can update authoritative completion.
@@ -258,12 +281,14 @@ Designed / implemented in EXP branch:
 
 - Runtime v2 core contracts;
 - Temporal workflow prototype;
-- MCP server/bridge;
-- explicit HTTP transport allowlist;
-- OAuth scope separation and subject policy;
-- production configuration contract;
-- completion attestation;
-- parent task completion contract.
+- MCP server/bridge and explicit HTTP transport allowlist;
+- OAuth scope separation, exact subject policy, and post-approval response behavior that does not add a hidden read scope;
+- deployment-owned provider target, trusted task policy, and parent-task plan configuration contracts;
+- completion attestation plus stable finalization issuance reservation wired into the shared API production path for response-loss/restart retries;
+- parent multi-action task coordinator using the same controlled child `ProductionExecutionService` path, shared workflow ownership registry, existing authorization path, restart-safe Postgres state, and `UNSYNCED` reconciliation boundary;
+- owner-bound reconciliation inspect/resolve/retry-with-changed-delta MCP controls over the existing durable reconciliation store, with no model-supplied verification evidence and no blind replay of `UNKNOWN_EFFECT`;
+- OpenTelemetry-compatible events for direct controlled runs, parent-task controls, reconciliation controls, provider outcomes, and authoritative completion, with regression coverage preventing model payload/delta leakage;
+- dual Runtime v2 and legacy application CI gates for engineering regression coverage.
 
 Not executed yet:
 
@@ -278,4 +303,4 @@ Not executed yet:
 - natural-use production traffic;
 - legacy critical-path decommission.
 
-No item in the second list may be described as completed until direct deployment/readback evidence exists.
+No item in the second list may be described as completed until direct deployment/readback evidence exists. CI PASS is Engineering PASS only; it is not Deployment PASS, Natural-use PASS, or System PASS.
