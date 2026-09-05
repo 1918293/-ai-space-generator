@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - exp/runtime-v2-integration-current
+      - exp/runtime-v2-deployment-preflight-fixes
   workflow_dispatch:
 
 permissions:
