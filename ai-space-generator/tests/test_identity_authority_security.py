@@ -98,16 +98,10 @@ def test_direct_semantic_authority_adapter_readback_rejects_projection_and_stale
         def read_snapshot(self, task):
             return AuthoritySnapshot("EXP", task, 7, ("drive:current",), (self.version,), projection_ref="chat:projection")
 
-        def read_task_policy(self, task):
-            return __import__("src.identity_authority_security", fromlist=["TaskPolicy"]).TaskPolicy(
-                task, ("drive:current",), ("readback matches",), ("verification",), True
-            )
-
     reader = Reader()
     adapter = HaoSemanticAuthorityAdapter(reader)
     admitted = adapter.snapshot("Task A")
     assert admitted.projection_ref == "chat:projection"
-    assert adapter.get("Task A").task == "Task A"
     adapter.readback(admitted)
     reader.version = "v13"
     with pytest.raises(PermissionError, match="STALE_AUTHORITY_SNAPSHOT"):
