@@ -5,7 +5,7 @@ from hashlib import sha256
 import hmac
 import json
 import sqlite3
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from .execution_control import CompletionClaim, ExecutionRecord, RunPhase, can_claim
 
@@ -21,6 +21,7 @@ class ExecutionAttestation:
     evidence_digest: str
     issued_at: str
     signature: str
+    key_id: str = ""
 
 
 def evidence_digest(record: ExecutionRecord) -> str:
@@ -45,10 +46,11 @@ def _payload_dict(
     *,
     operational_version: int,
     issued_at: str,
+    key_id: str = "",
 ) -> dict[str, object]:
     if record.action is None:
         raise ValueError("ATTESTATION_REQUIRES_ACTION")
-    return {
+    payload: dict[str, object] = {
         "run_id": record.run_id,
         "action_id": record.action.action_id,
         "task": record.task,
@@ -58,6 +60,12 @@ def _payload_dict(
         "evidence_digest": evidence_digest(record),
         "issued_at": issued_at,
     }
+    # Preserve verification compatibility for pre-key-id engineering receipts.
+    # Production Runtime v2 always supplies a non-empty key id and therefore
+    # cryptographically binds that identity into the signed payload.
+    if key_id:
+        payload["key_id"] = key_id
+    return payload
 
 
 def _canonical_bytes(payload: dict[str, object]) -> bytes:
@@ -70,20 +78,43 @@ def _canonical_bytes(payload: dict[str, object]) -> bytes:
 
 
 class CompletionAttestor:
-    """Runtime-only authority for minting Hao System completion receipts.
+    """Runtime-only authority for minting and verifying completion receipts.
 
-    A direct/native tool result cannot become authoritative completion merely by
-    matching this dataclass. It must carry a valid MAC generated with a secret
-    owned by the deployed control-plane service.
+    `key_id` selects the current signing key. `verification_keys` may retain
+    previous keys for verification-only use during bounded rotation windows.
+    Removing a previous key makes receipts carrying that key id unverifiable by
+    the new runtime, which is the explicit revocation behavior.
     """
 
-    def __init__(self, secret: bytes) -> None:
+    def __init__(
+        self,
+        secret: bytes,
+        *,
+        key_id: str = "",
+        verification_keys: Mapping[str, bytes] | None = None,
+    ) -> None:
         if len(secret) < 32:
             raise ValueError("ATTESTATION_SECRET_MIN_32_BYTES")
-        self._secret = secret
+        self._current_key_id = key_id.strip()
+        keys: dict[str, bytes] = {self._current_key_id: secret}
+        for prior_key_id, prior_secret in (verification_keys or {}).items():
+            prior_key_id = str(prior_key_id).strip()
+            if not prior_key_id:
+                raise ValueError("ATTESTATION_VERIFICATION_KEY_ID_REQUIRED")
+            if len(prior_secret) < 32:
+                raise ValueError("ATTESTATION_VERIFICATION_SECRET_MIN_32_BYTES")
+            existing = keys.get(prior_key_id)
+            if existing is not None and existing != prior_secret:
+                raise ValueError("ATTESTATION_KEY_ID_CONFLICT")
+            keys[prior_key_id] = prior_secret
+        self._verification_keys = keys
 
-    def _sign_payload(self, payload: dict[str, object]) -> str:
-        return hmac.new(self._secret, _canonical_bytes(payload), sha256).hexdigest()
+    @property
+    def current_key_id(self) -> str:
+        return self._current_key_id
+
+    def _sign_payload(self, payload: dict[str, object], secret: bytes) -> str:
+        return hmac.new(secret, _canonical_bytes(payload), sha256).hexdigest()
 
     def issue(
         self,
@@ -106,8 +137,12 @@ class CompletionAttestor:
             record,
             operational_version=operational_version,
             issued_at=issued_at.strip(),
+            key_id=self._current_key_id,
         )
-        return ExecutionAttestation(**payload, signature=self._sign_payload(payload))
+        return ExecutionAttestation(
+            **payload,
+            signature=self._sign_payload(payload, self._verification_keys[self._current_key_id]),
+        )
 
     def verify(
         self,
@@ -120,16 +155,22 @@ class CompletionAttestor:
             return False
         if not can_claim(record, CompletionClaim.COMPLETED).allowed:
             return False
+        verification_secret = self._verification_keys.get(attestation.key_id)
+        if verification_secret is None:
+            return False
         expected_payload = _payload_dict(
             record,
             operational_version=operational_version,
             issued_at=attestation.issued_at,
+            key_id=attestation.key_id,
         )
         supplied_payload = asdict(attestation)
         supplied_signature = supplied_payload.pop("signature")
+        if not attestation.key_id:
+            supplied_payload.pop("key_id", None)
         if supplied_payload != expected_payload:
             return False
-        expected_signature = self._sign_payload(expected_payload)
+        expected_signature = self._sign_payload(expected_payload, verification_secret)
         return hmac.compare_digest(supplied_signature, expected_signature)
 
 
@@ -173,10 +214,20 @@ class SQLiteAuthoritativeCompletionStore:
                     authority_snapshot_fingerprint TEXT NOT NULL,
                     evidence_digest TEXT NOT NULL,
                     issued_at TEXT NOT NULL,
-                    signature TEXT NOT NULL
+                    signature TEXT NOT NULL,
+                    key_id TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(authoritative_completions)")
+            }
+            if "key_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE authoritative_completions "
+                    "ADD COLUMN key_id TEXT NOT NULL DEFAULT ''"
+                )
 
     def commit(
         self,
@@ -196,13 +247,16 @@ class SQLiteAuthoritativeCompletionStore:
         with sqlite3.connect(self._path, isolation_level=None) as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT * FROM authoritative_completions WHERE run_id = ?",
+                "SELECT key_id, signature FROM authoritative_completions WHERE run_id = ?",
                 (attestation.run_id,),
             ).fetchone()
             if existing is not None:
-                existing_signature = existing[8]
+                existing_key_id, existing_signature = existing
                 conn.execute("COMMIT")
-                if hmac.compare_digest(existing_signature, attestation.signature):
+                if (
+                    existing_key_id == attestation.key_id
+                    and hmac.compare_digest(existing_signature, attestation.signature)
+                ):
                     return CompletionCommitResult(True, "ATTESTATION_ALREADY_COMMITTED")
                 return CompletionCommitResult(False, "AUTHORITATIVE_COMPLETION_CONFLICT")
 
@@ -211,8 +265,8 @@ class SQLiteAuthoritativeCompletionStore:
                 INSERT INTO authoritative_completions(
                     run_id, action_id, task, mode, operational_version,
                     authority_snapshot_fingerprint, evidence_digest, issued_at,
-                    signature
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    key_id, signature
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attestation.run_id,
@@ -223,6 +277,7 @@ class SQLiteAuthoritativeCompletionStore:
                     attestation.authority_snapshot_fingerprint,
                     attestation.evidence_digest,
                     attestation.issued_at,
+                    attestation.key_id,
                     attestation.signature,
                 ),
             )
