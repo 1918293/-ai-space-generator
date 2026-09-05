@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 
 ConnectionFactory = Callable[[], Any]
-CURRENT_RUNTIME_SCHEMA_VERSION = 1
+CURRENT_RUNTIME_SCHEMA_VERSION = 2
 MIGRATION_ADVISORY_LOCK_ID = 0x48414F52  # "HAOR"
 
 
@@ -120,7 +120,20 @@ _MIGRATION_1 = (
     """,
 )
 
-MIGRATIONS: dict[int, tuple[str, ...]] = {1: _MIGRATION_1}
+_MIGRATION_2 = (
+    "ALTER TABLE parent_tasks ADD COLUMN IF NOT EXISTS row_revision INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE parent_task_children ADD COLUMN IF NOT EXISTS depends_on_slots_json TEXT NOT NULL DEFAULT '[]'",
+    """
+    CREATE TABLE IF NOT EXISTS reconciliation_retry_reservations (
+        case_id TEXT PRIMARY KEY,
+        owner_ref TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        retry_run_id TEXT NOT NULL UNIQUE
+    )
+    """,
+)
+
+MIGRATIONS: dict[int, tuple[str, ...]] = {1: _MIGRATION_1, 2: _MIGRATION_2}
 
 _REQUIRED_TABLES = (
     "operational_state",
@@ -130,6 +143,7 @@ _REQUIRED_TABLES = (
     "mcp_control_runs",
     "finalization_issue_times",
     "reconciliation_cases",
+    "reconciliation_retry_reservations",
     "parent_tasks",
     "parent_task_children",
 )
