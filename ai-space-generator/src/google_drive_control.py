@@ -105,12 +105,22 @@ def _command_error(proposal: ActionProposal, command: DriveMutationCommand | Non
     return ""
 
 
-def _resolve_command(
+def resolve_drive_mutation_command(
     resolver: DriveCommandResolver,
     proposal: ActionProposal,
 ) -> tuple[DriveMutationCommand | None, str]:
+    """Resolve and validate the runtime-owned provider command for one proposal.
+
+    This is shared by mutation, authority/readback verification and reconciliation
+    so none of those paths can accept a caller/model-selected provider target.
+    """
+
     command = resolver.resolve(proposal)
     return command, _command_error(proposal, command)
+
+
+# Backward-compatible private alias for any existing internal callers.
+_resolve_command = resolve_drive_mutation_command
 
 
 class ControlledGoogleDriveProvider:
@@ -131,7 +141,7 @@ class ControlledGoogleDriveProvider:
         self._client = client
 
     async def execute(self, proposal: ActionProposal) -> ToolOutcome:
-        command, error = _resolve_command(self._resolver, proposal)
+        command, error = resolve_drive_mutation_command(self._resolver, proposal)
         if error:
             return ToolOutcome(False, error_code=error, failure_stage=FailureStage.BINDING)
         assert command is not None
@@ -166,7 +176,7 @@ class GoogleDriveAuthorityGuard:
         self._client = client
 
     async def verify_current(self, proposal: ActionProposal) -> AuthorityPreflightOutcome:
-        command, error = _resolve_command(self._resolver, proposal)
+        command, error = resolve_drive_mutation_command(self._resolver, proposal)
         if error:
             return AuthorityPreflightOutcome(False, error_code=error)
         assert command is not None
@@ -198,7 +208,7 @@ class GoogleDriveOutcomeVerifier:
         proposal: ActionProposal,
         tool_outcome: ToolOutcome,
     ) -> VerificationOutcome:
-        command, error = _resolve_command(self._resolver, proposal)
+        command, error = resolve_drive_mutation_command(self._resolver, proposal)
         if error:
             return VerificationOutcome(False, error_code=error, failure_stage=FailureStage.BINDING)
         assert command is not None
