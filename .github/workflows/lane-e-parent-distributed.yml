@@ -22,7 +22,7 @@ jobs:
           cache: pip
           cache-dependency-path: ai-space-generator/requirements-control.txt
       - name: Install Runtime v2 dependencies
-        run: python -m pip install -r requirements-control.txt
+        run: python -m pip install --upgrade pytest -r requirements-control.txt
       - name: Run Lane E distributed regressions and parent baseline
         run: >-
           python -m pytest -q
