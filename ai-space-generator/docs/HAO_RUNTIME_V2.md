@@ -499,3 +499,61 @@ Runtime v2 does not require:
 Runtime v2 succeeds only when reliability-critical Hao System work is governed by a system whose execution, evidence, state transitions, and completion cannot be authored solely by the same probabilistic model that proposes the work.
 
 The migration is complete for a scope only when the legacy self-governed execution path has lost authoritative power for that scope.
+
+## 20. Bounded parallel work coordination
+
+Parallel conversations or engineering agents may accelerate independent Runtime v2 work, but parallelism must not create competing Current or completion authorities.
+
+The coordination model is one integration authority plus bounded work lanes:
+
+```text
+Current / Integration Authority
+  -> Lane A: engineering baseline and OAuth/MCP
+  -> Lane B: production foundation
+  -> Lane C: identity / semantic Authority / security
+  -> Lane D: provider / reconciliation
+  -> Lane E: parent / distributed verification
+  -> Lane F: Hao System formal records / continuity
+```
+
+Each lane is a bounded child work package, not a second Runtime or a peer Current. Before execution, every lane must resolve and carry:
+
+- `lane_id`;
+- exact `starting_head_sha` or equivalent Authority version;
+- stable TASK and Mode inherited from Current;
+- owned scope and, for code work, owned files/components where practical;
+- dependencies and prerequisite gates;
+- explicit do-not-touch scope;
+- acceptance criteria;
+- expected evidence/readback;
+- externality and authorization boundary.
+
+A lane may research, implement, test, and produce evidence inside its owned scope. A lane must not independently:
+
+- promote Hao System Current;
+- rewrite the Current Resume Front;
+- mint authoritative completion for the parent migration;
+- merge PR #17;
+- perform production cutover;
+- revoke legacy authority;
+- perform a consequential production mutation merely because another lane expects it;
+- overwrite an overlapping lane's code or formal record target without reconciliation.
+
+Each lane closes with a candidate result contract:
+
+```text
+lane_id
+starting_head_sha / Authority version
+resulting_head_sha or evidence version
+changed scope/files
+test and readback evidence
+PASS | FAIL | BLOCKED | RECONCILIATION_REQUIRED
+newly discovered dependencies
+remaining risks
+```
+
+Only the integration authority may reconcile concurrent lane results and advance the shared frontier. Integration must fresh-read the latest head/Authority, reject stale or overlapping results when unsafe, rerun shared regression gates after merge/rebase/integration, and update formal Current only after direct verification.
+
+For GitHub work, overlapping mutations to the same branch/file should be serialized or isolated onto separate branches/worktrees before integration. For formal Hao System persistence, there is one authoritative writer per target record/Current projection; parallel lanes return candidate evidence rather than independently writing competing Current state.
+
+Parallelism is therefore an execution optimization, not an authority model. If lane independence is uncertain, default to serialization. If integration cannot prove that a candidate result was produced against a compatible Authority/head, the result is stale evidence and must be revalidated rather than silently adopted.
