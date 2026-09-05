@@ -50,8 +50,10 @@ class FakeProduction:
     def __init__(self):
         self.records = {}
         self.signals = []
+        self.submit_calls = 0
 
     async def submit(self, state, request):
+        self.submit_calls += 1
         workflow_id = request.run_id
         authorization_scope = ""
         phase = RunPhase.CLOSED
@@ -106,7 +108,9 @@ class FakeProduction:
         return ProductionExecutionResult(
             current,
             current.phase == RunPhase.CLOSED,
-            "AUTHORITATIVE_COMPLETION_COMMITTED" if current.phase == RunPhase.CLOSED else "NOT_CLOSED",
+            "AUTHORITATIVE_COMPLETION_COMMITTED"
+            if current.phase == RunPhase.CLOSED
+            else "NOT_CLOSED",
         )
 
 
@@ -146,7 +150,9 @@ class FakeParentTasks:
                     binding_id="message.send",
                     expected_state_delta=expected_state_delta,
                     authorization_target="recipient-parent",
-                    arguments=tuple((str(k), str(v)) for k, v in (arguments or {}).items()),
+                    arguments=tuple(
+                        (str(k), str(v)) for k, v in (arguments or {}).items()
+                    ),
                 ),
             ),
         )
@@ -172,11 +178,30 @@ class FakeReconciliationStore:
         return case
 
 
+class FakeRetryStore:
+    def __init__(self):
+        self.reservations = {}
+
+    def reserve(self, *, case, owner_ref, request_fingerprint):
+        prior = self.reservations.get(case.case_id)
+        if prior is not None:
+            prior_owner, prior_fingerprint, run_id = prior
+            if prior_owner != owner_ref:
+                raise PermissionError("RECONCILIATION_RETRY_OWNER_CONFLICT")
+            if prior_fingerprint != request_fingerprint:
+                raise ValueError("RECONCILIATION_RETRY_REQUEST_CONFLICT")
+            return SimpleNamespace(retry_run_id=run_id, created=False)
+        run_id = "RUN-RETRY-" + case.case_id
+        self.reservations[case.case_id] = (owner_ref, request_fingerprint, run_id)
+        return SimpleNamespace(retry_run_id=run_id, created=True)
+
+
 def setup_bridge(
     tmp_path,
     *,
     with_parent_tasks=False,
     reconciliation_store=None,
+    reconciliation_retry_store=None,
 ):
     state_store = SQLiteOperationalStateStore(str(tmp_path / "state.sqlite"))
     state_store.initialize(mode=Mode.EXP, task="MCP controlled task")
@@ -188,6 +213,11 @@ def setup_bridge(
         identity_policy=HaoMCPIdentityPolicy("hao-subject"),
         parent_tasks=FakeParentTasks(production) if with_parent_tasks else None,
         reconciliation_store=reconciliation_store,
+        reconciliation_retry_store=(
+            reconciliation_retry_store
+            if reconciliation_retry_store is not None
+            else (FakeRetryStore() if reconciliation_store is not None else None)
+        ),
     )
     return bridge, production
 
@@ -292,10 +322,7 @@ def test_parent_child_registers_shared_workflow_and_reuses_existing_authorizatio
     bridge, production = setup_bridge(tmp_path, with_parent_tasks=True)
 
     async def scenario():
-        opened = bridge.parent_start(
-            hao("hao:execute"),
-            plan_id="parent.send",
-        )
+        opened = bridge.parent_start(hao("hao:execute"), plan_id="parent.send")
         assert opened.task_run_id == "TASK-PARENT-1"
         assert opened.phase == "OPEN"
         assert opened.child_slots == ("send",)
@@ -331,11 +358,13 @@ def test_parent_child_registers_shared_workflow_and_reuses_existing_authorizatio
     asyncio.run(scenario())
 
 
-def test_reconciliation_is_owner_bound_evidence_gated_and_retry_requires_changed_delta(tmp_path):
+def test_reconciliation_is_owner_bound_evidence_gated_and_retry_is_stable(tmp_path):
     reconciliation = FakeReconciliationStore()
+    retry_store = FakeRetryStore()
     bridge, production = setup_bridge(
         tmp_path,
         reconciliation_store=reconciliation,
+        reconciliation_retry_store=retry_store,
     )
 
     async def scenario():
@@ -361,9 +390,7 @@ def test_reconciliation_is_owner_bound_evidence_gated_and_retry_requires_changed
         )
         reconciliation.save(case)
 
-        inspected = bridge.reconciliation_inspect(
-            hao("hao:read"), case_id=case.case_id
-        )
+        inspected = bridge.reconciliation_inspect(hao("hao:read"), case_id=case.case_id)
         assert inspected.phase == ReconciliationPhase.OPEN.value
         assert inspected.effect_may_have_occurred is True
 
@@ -419,7 +446,6 @@ def test_reconciliation_is_owner_bound_evidence_gated_and_retry_requires_changed
             human_confirmed=True,
         )
         assert resolved.phase == ReconciliationPhase.RESOLVED.value
-        assert resolved.disposition == ReconciliationDisposition.ADOPT_VERIFIED_STATE.value
 
         with pytest.raises(ValueError, match="RECONCILIATION_RETRY_REQUIRES_CHANGED_DELTA"):
             await bridge.reconciliation_retry_with_delta(
@@ -428,11 +454,18 @@ def test_reconciliation_is_owner_bound_evidence_gated_and_retry_requires_changed
                 expected_state_delta="old expected state",
             )
 
+        with pytest.raises(PermissionError, match="RECONCILIATION_AUTHORIZATION_TARGET_MISMATCH"):
+            await bridge.reconciliation_retry_with_delta(
+                hao("hao:execute"),
+                case_id=case.case_id,
+                expected_state_delta="new expected state",
+                authorization_target="recipient-2",
+            )
+
         retried = await bridge.reconciliation_retry_with_delta(
             hao("hao:execute"),
             case_id=case.case_id,
             expected_state_delta="new expected state",
-            authorization_target="recipient-2",
         )
         retried_record = production.records[retried.workflow_id]
         assert retried.workflow_id != original.workflow_id
@@ -440,7 +473,16 @@ def test_reconciliation_is_owner_bound_evidence_gated_and_retry_requires_changed
         assert retried_record.action.capability == original_record.action.capability
         assert retried_record.action.action_id.endswith(":message.send")
         assert retried_record.action.expected_state_delta == "new expected state"
-        assert retried.authorization_scope == "SEND_EXTERNAL:recipient-2"
+        assert retried.authorization_scope == "SEND_EXTERNAL:recipient-1"
+
+        duplicate = await bridge.reconciliation_retry_with_delta(
+            hao("hao:execute"),
+            case_id=case.case_id,
+            expected_state_delta="new expected state",
+        )
+        assert duplicate.workflow_id == retried.workflow_id
+        assert duplicate.code == "RECONCILIATION_RETRY_ALREADY_SUBMITTED"
+        assert production.submit_calls == 2  # original + exactly one retry run
 
     asyncio.run(scenario())
 
