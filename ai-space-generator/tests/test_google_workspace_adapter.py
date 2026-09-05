@@ -504,3 +504,74 @@ def test_logical_append_numeric_duplicate_preflight_uses_canonical_key_semantics
     assert duplicate.error_code == "SHEETS_LOGICAL_APPEND_KEY_DUPLICATE"
     assert duplicate.no_effect_confirmed is True
     assert client._sheets.spreadsheets_api.batch_update_calls == []
+
+
+
+def test_logical_append_keys_use_provider_double_precision():
+    resolver = ConfiguredSheetsCommandResolver(
+        (
+            SheetsMutationTarget(
+                binding_id="drive.formal_cells.update",
+                spreadsheet_id="trusted-sheet",
+                range_a1="01_Intake!A:B",
+                mutation_mode="logical_append",
+                sheet_id=123,
+                unique_key_column="A",
+            ),
+        )
+    )
+    base = proposal()
+
+    def for_run(run_id, values_json):
+        return type(base)(
+            **{
+                **base.__dict__,
+                "action_id": f"{run_id}:A0001:drive.formal_cells.update",
+                "idempotency_key": f"{run_id}:A0001:drive.formal_cells.update",
+                "arguments": (("values_json", values_json),),
+            }
+        )
+
+    lower = resolver.logical_append_uniqueness_key(
+        for_run("RUN-LOW", '[[9007199254740992,"one"]]')
+    )
+    rounded_same = resolver.logical_append_uniqueness_key(
+        for_run("RUN-HIGH", '[[9007199254740993,"two"]]')
+    )
+    next_double = resolver.logical_append_uniqueness_key(
+        for_run("RUN-NEXT", '[[9007199254740994,"three"]]')
+    )
+
+    assert lower == rounded_same
+    assert next_double != lower
+
+
+def test_logical_append_duplicate_preflight_uses_provider_double_precision():
+    command = logical_append_command('[[9007199254740993,"new"]]')
+    client = client_with_fakes()
+    client._sheets.values_api.values = [
+        ["record_id", "value"],
+        [9007199254740992, "old"],
+    ]
+
+    duplicate = asyncio.run(client.mutate(command))
+
+    assert duplicate.success is False
+    assert duplicate.error_code == "SHEETS_LOGICAL_APPEND_KEY_DUPLICATE"
+    assert duplicate.no_effect_confirmed is True
+    assert client._sheets.spreadsheets_api.batch_update_calls == []
+
+
+def test_logical_append_readback_digest_normalizes_sheets_numbers():
+    command = logical_append_command('[["REC-N",1.0]]')
+    client = client_with_fakes()
+    client._sheets.values_api.values = [["REC-N", 1]]
+
+    readback = asyncio.run(client.readback(command))
+
+    assert readback.matched is True
+    assert readback.state_digest == command.expected_state_digest
+
+
+def test_fixed_range_digest_semantics_remain_unchanged():
+    assert canonical_values_digest([[1]]) != canonical_values_digest([[1.0]])

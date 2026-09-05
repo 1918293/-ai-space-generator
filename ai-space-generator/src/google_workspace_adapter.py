@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from decimal import Decimal
 from hashlib import sha256
 import json
+import math
 import re
 from typing import Any, Iterable, Mapping
 
@@ -46,20 +46,53 @@ def canonical_values_digest(values: object) -> str:
     return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _canonical_sheet_double(value: int | float) -> str:
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("SHEETS_LOGICAL_APPEND_NUMERIC_VALUE_INVALID") from exc
+    if not math.isfinite(number):
+        raise ValueError("SHEETS_LOGICAL_APPEND_NUMERIC_VALUE_INVALID")
+    # Sheets numberValue is IEEE-754 double. Collapse signed zero because provider
+    # readback may not preserve the sign bit for a displayed zero.
+    if number == 0.0:
+        number = 0.0
+    return number.hex()
+
+
 def _canonical_logical_key(value: Any) -> str:
     if isinstance(value, bool):
         payload: object = ["bool", value]
     elif isinstance(value, (int, float)):
-        number = Decimal(str(value))
-        if not number.is_finite():
-            raise ValueError("SHEETS_LOGICAL_APPEND_NUMERIC_KEY_INVALID")
-        canonical_number = "0" if number == 0 else format(number.normalize(), "f")
-        payload = ["number", canonical_number]
+        payload = ["number", _canonical_sheet_double(value)]
     elif isinstance(value, str):
         payload = ["string", value]
     else:
         raise ValueError("SHEETS_LOGICAL_APPEND_KEY_TYPE_INVALID")
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _logical_append_values_digest(values: object) -> str:
+    normalized = _normalized_sheet_values(values)
+    if not isinstance(normalized, list):
+        raise ValueError("SHEETS_LOGICAL_APPEND_VALUES_INVALID")
+    canonical_rows: list[list[Any]] = []
+    for raw_row in normalized:
+        if not isinstance(raw_row, list):
+            raise ValueError("SHEETS_LOGICAL_APPEND_VALUES_INVALID")
+        row: list[Any] = []
+        for item in raw_row:
+            if isinstance(item, bool):
+                row.append(item)
+            elif isinstance(item, (int, float)):
+                row.append(["__sheets_number__", _canonical_sheet_double(item)])
+            else:
+                row.append(item)
+        canonical_rows.append(row)
+    payload = json.dumps(
+        canonical_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _argument_map(proposal: ActionProposal) -> dict[str, str]:
@@ -210,7 +243,14 @@ class ConfiguredSheetsCommandResolver(DriveCommandResolver):
         values, error = _validated_values_json(arguments.get("values_json", ""))
         if error or values is None:
             return None
-        expected_digest = canonical_values_digest(values)
+        try:
+            expected_digest = (
+                _logical_append_values_digest(values)
+                if target.mutation_mode == "logical_append"
+                else canonical_values_digest(values)
+            )
+        except ValueError:
+            return None
         trusted_payload = {
             "binding_id": binding_id,
             "spreadsheet_id": target.spreadsheet_id.strip(),
@@ -607,7 +647,15 @@ class GoogleWorkspaceSheetsClient:
                 False,
                 "GOOGLE_SHEETS_APPEND_KEY_NOT_EXACTLY_ONCE",
             )
-        digest = canonical_values_digest([matching_rows[0]])
+        try:
+            digest = _logical_append_values_digest([matching_rows[0]])
+        except ValueError:
+            return DriveStateReadback(
+                "",
+                "google-sheets:spreadsheets.values.get",
+                False,
+                "GOOGLE_SHEETS_APPEND_NUMERIC_READBACK_INVALID",
+            )
         return DriveStateReadback(
             digest,
             "google-sheets:spreadsheets.values.get",
