@@ -1,6 +1,9 @@
+import json
+
 import pytest
 
 from src.runtime_config import RuntimeEnvironment, RuntimeRole, RuntimeSettings
+from src.runtime_migrations import CURRENT_RUNTIME_SCHEMA_VERSION
 
 
 def production_values(**overrides):
@@ -16,7 +19,7 @@ def production_values(**overrides):
         "HAO_MCP_REQUEST_STATE_KEYS": ("11" * 32) + "," + ("22" * 32),
         "HAO_MCP_REQUEST_STATE_AUDIENCE": "hao-system-control",
         "HAO_DATABASE_URL": "postgresql://runtime@db/runtime",
-        "HAO_DATABASE_SCHEMA_VERSION": "1",
+        "HAO_DATABASE_SCHEMA_VERSION": str(CURRENT_RUNTIME_SCHEMA_VERSION),
         "HAO_DATABASE_RPO_SECONDS": "300",
         "HAO_DATABASE_RTO_SECONDS": "3600",
         "HAO_TEMPORAL_ENDPOINT": "hao-runtime.tmprl.cloud:7233",
@@ -33,6 +36,7 @@ def production_values(**overrides):
         "HAO_EXPECTED_SUBJECT": "auth0|hao-subject",
         "HAO_ATTESTATION_KEY_ID": "completion-signing-v1",
         "HAO_ATTESTATION_SECRET": "x" * 64,
+        "HAO_ATTESTATION_PREVIOUS_KEYS_JSON": "{}",
         "HAO_SECRET_BINDINGS_JSON": """{
           "HAO_TEMPORAL_API_KEY":
             "projects/hao-prod/secrets/temporal-api-key/versions/7",
@@ -45,6 +49,16 @@ def production_values(**overrides):
     }
     values.update(overrides)
     return values
+
+
+def secret_bindings(**extra):
+    values = {
+        "HAO_TEMPORAL_API_KEY": "projects/hao-prod/secrets/temporal-api-key/versions/7",
+        "HAO_ATTESTATION_SECRET": "projects/hao-prod/secrets/completion-signing-v1/versions/3",
+        "HAO_MCP_REQUEST_STATE_KEYS": "projects/hao-prod/secrets/mcp-request-state-keys/versions/5",
+    }
+    values.update(extra)
+    return json.dumps(values)
 
 
 def test_valid_production_configuration_loads_as_one_runtime_identity():
@@ -62,7 +76,8 @@ def test_valid_production_configuration_loads_as_one_runtime_identity():
         bytes.fromhex("11" * 32),
         bytes.fromhex("22" * 32),
     )
-    assert settings.database_schema_version == 1
+    assert settings.database_schema_version == CURRENT_RUNTIME_SCHEMA_VERSION
+    assert settings.attestation_previous_keys == ()
     assert settings.worker_instance_count == 1
 
 
@@ -144,6 +159,37 @@ def test_production_requires_transactional_postgres_not_sqlite_reference_store()
         )
 
 
+def test_password_bearing_database_url_requires_numeric_secret_binding():
+    with pytest.raises(ValueError, match="DATABASE_URL_PASSWORD_SECRET_BINDING_REQUIRED"):
+        RuntimeSettings.from_mapping(
+            production_values(HAO_DATABASE_URL="postgresql://runtime:db-secret@db/runtime")
+        )
+
+    settings = RuntimeSettings.from_mapping(
+        production_values(
+            HAO_DATABASE_URL="postgresql://runtime:db-secret@db/runtime",
+            HAO_SECRET_BINDINGS_JSON=secret_bindings(
+                HAO_DATABASE_URL="projects/hao-prod/secrets/database-url/versions/4"
+            ),
+        )
+    )
+    assert settings.database_url == "postgresql://runtime:db-secret@db/runtime"
+    assert "db-secret" not in repr(settings.deployment_identity)
+
+    with pytest.raises(
+        ValueError,
+        match="SECRET_BINDING_EXPLICIT_VERSION_REQUIRED:HAO_DATABASE_URL",
+    ):
+        RuntimeSettings.from_mapping(
+            production_values(
+                HAO_DATABASE_URL="postgresql://runtime:db-secret@db/runtime",
+                HAO_SECRET_BINDINGS_JSON=secret_bindings(
+                    HAO_DATABASE_URL="projects/hao-prod/secrets/database-url/versions/latest"
+                ),
+            )
+        )
+
+
 def test_oauth_resource_and_audience_are_bound_to_public_runtime_identity():
     with pytest.raises(ValueError, match="OAUTH_RESOURCE_MUST_EQUAL_PUBLIC_MCP_URL"):
         RuntimeSettings.from_mapping(
@@ -168,6 +214,62 @@ def test_weak_attestation_secret_is_rejected():
     with pytest.raises(ValueError, match="ATTESTATION_SECRET_MIN_32_BYTES"):
         RuntimeSettings.from_mapping(
             production_values(HAO_ATTESTATION_SECRET="too-short")
+        )
+
+
+def test_attestation_previous_keys_are_secret_bound_rotation_only():
+    previous_secret = "p" * 64
+    with pytest.raises(ValueError, match="ATTESTATION_PREVIOUS_KEYS_SECRET_BINDING_REQUIRED"):
+        RuntimeSettings.from_mapping(
+            production_values(
+                HAO_ATTESTATION_PREVIOUS_KEYS_JSON=json.dumps(
+                    {"completion-signing-v0": previous_secret}
+                )
+            )
+        )
+
+    settings = RuntimeSettings.from_mapping(
+        production_values(
+            HAO_ATTESTATION_PREVIOUS_KEYS_JSON=json.dumps(
+                {"completion-signing-v0": previous_secret}
+            ),
+            HAO_SECRET_BINDINGS_JSON=secret_bindings(
+                HAO_ATTESTATION_PREVIOUS_KEYS_JSON=(
+                    "projects/hao-prod/secrets/completion-previous-keys/versions/2"
+                )
+            ),
+        )
+    )
+    assert settings.attestation_previous_key_map == {
+        "completion-signing-v0": previous_secret
+    }
+
+    with pytest.raises(ValueError, match="ATTESTATION_PREVIOUS_KEY_ID_CONFLICT"):
+        RuntimeSettings.from_mapping(
+            production_values(
+                HAO_ATTESTATION_PREVIOUS_KEYS_JSON=json.dumps(
+                    {"completion-signing-v1": previous_secret}
+                ),
+                HAO_SECRET_BINDINGS_JSON=secret_bindings(
+                    HAO_ATTESTATION_PREVIOUS_KEYS_JSON=(
+                        "projects/hao-prod/secrets/completion-previous-keys/versions/2"
+                    )
+                ),
+            )
+        )
+
+    with pytest.raises(ValueError, match="ATTESTATION_SECRET_REUSE_NOT_ALLOWED"):
+        RuntimeSettings.from_mapping(
+            production_values(
+                HAO_ATTESTATION_PREVIOUS_KEYS_JSON=json.dumps(
+                    {"completion-signing-v0": "x" * 64}
+                ),
+                HAO_SECRET_BINDINGS_JSON=secret_bindings(
+                    HAO_ATTESTATION_PREVIOUS_KEYS_JSON=(
+                        "projects/hao-prod/secrets/completion-previous-keys/versions/2"
+                    )
+                ),
+            )
         )
 
 
