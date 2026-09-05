@@ -1,0 +1,195 @@
+name: Runtime v2 Logical Append Postgres Proof
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-logical-append-postgres-proof
+
+permissions:
+  contents: write
+
+jobs:
+  postgres-uniqueness-proof:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: hao_runtime
+          POSTGRES_PASSWORD: hao_runtime_test
+          POSTGRES_DB: hao_runtime_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U hao_runtime -d hao_runtime_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      DATABASE_URL: postgresql://hao_runtime:hao_runtime_test@127.0.0.1:5432/hao_runtime_test
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Guard exact source head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "240e9a628f9fe8b2b8e3e8412006a18bbcfa87f5"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/runtime-v2-logical-append-postgres-proof.yml"
+
+      - name: Install Runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q -r ai-space-generator/requirements-control.txt
+
+      - name: Prove secondary uniqueness semantics on real Postgres
+        working-directory: ai-space-generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import asyncio
+          import os
+
+          from src.controlled_runner import ToolOutcome
+          from src.execution_control import ActionArchetype, ActionExternality, ActionProposal, FailureStage
+          from src.idempotent_broker import IdempotentAsyncBroker, IdempotencyState
+          from src.postgres_persistence import build_postgres_persistence
+
+          db = os.environ["DATABASE_URL"]
+          persistence = build_postgres_persistence(db, initialize_schema=True)
+
+          def mutation(run_id: str, suffix: str = "row") -> ActionProposal:
+              action_id = f"{run_id}:A0001:drive.formal_cells.update"
+              return ActionProposal(
+                  action_id=action_id,
+                  archetype=ActionArchetype.MUTATE,
+                  externality=ActionExternality.PRIVATE_REVERSIBLE,
+                  capability="formal_persistence",
+                  provider="google-drive",
+                  action_name="update_cells",
+                  expected_state_delta=f"append {suffix}",
+                  idempotency_key=action_id,
+              )
+
+          class SuccessProvider:
+              def __init__(self, delay: float = 0.0):
+                  self.calls = 0
+                  self.delay = delay
+              async def execute(self, proposal):
+                  self.calls += 1
+                  if self.delay:
+                      await asyncio.sleep(self.delay)
+                  return ToolOutcome(True, f"R-{proposal.action_id}", "postgres-proof")
+
+          class NoEffectProvider:
+              def __init__(self):
+                  self.calls = 0
+              async def execute(self, proposal):
+                  self.calls += 1
+                  return ToolOutcome(False, error_code="CONFIRMED_NO_EFFECT", failure_stage=FailureStage.TOOL_EXECUTION)
+
+          class UnknownProvider:
+              def __init__(self):
+                  self.calls = 0
+              async def execute(self, proposal):
+                  self.calls += 1
+                  raise RuntimeError("transport dropped after dispatch")
+
+          async def concurrent_same_key():
+              provider = SuccessProvider(delay=0.15)
+              broker = IdempotentAsyncBroker(
+                  provider,
+                  persistence.idempotency,
+                  uniqueness_key_resolver=lambda _: "GSHEET-UNIQUE:PG-SAME",
+              )
+              results = await asyncio.gather(
+                  broker.execute(mutation("RUN-PG-A", "same-a")),
+                  broker.execute(mutation("RUN-PG-B", "same-b")),
+              )
+              assert provider.calls == 1, provider.calls
+              assert sum(result.success for result in results) == 1
+              blocked = [result for result in results if not result.success]
+              assert len(blocked) == 1
+              assert blocked[0].error_code == "IDEMPOTENCY_UNIQUENESS_CONFLICT"
+              assert persistence.idempotency.get("GSHEET-UNIQUE:PG-SAME").state == IdempotencyState.SUCCEEDED
+
+          async def confirmed_no_effect_release():
+              first_provider = NoEffectProvider()
+              first = IdempotentAsyncBroker(
+                  first_provider,
+                  persistence.idempotency,
+                  uniqueness_key_resolver=lambda _: "GSHEET-UNIQUE:PG-RELEASE",
+              )
+              outcome = await first.execute(mutation("RUN-PG-C", "release-first"))
+              assert not outcome.success and outcome.error_code == "CONFIRMED_NO_EFFECT"
+              assert persistence.idempotency.get("GSHEET-UNIQUE:PG-RELEASE") is None
+
+              second_provider = SuccessProvider()
+              second = IdempotentAsyncBroker(
+                  second_provider,
+                  persistence.idempotency,
+                  uniqueness_key_resolver=lambda _: "GSHEET-UNIQUE:PG-RELEASE",
+              )
+              retry = await second.execute(mutation("RUN-PG-D", "release-second"))
+              assert retry.success
+              assert second_provider.calls == 1
+
+          async def unknown_effect_retains_lock():
+              first_provider = UnknownProvider()
+              first = IdempotentAsyncBroker(
+                  first_provider,
+                  persistence.idempotency,
+                  uniqueness_key_resolver=lambda _: "GSHEET-UNIQUE:PG-UNKNOWN",
+              )
+              outcome = await first.execute(mutation("RUN-PG-E", "unknown-first"))
+              assert not outcome.success
+              assert outcome.error_code == "PROVIDER_EXCEPTION_EFFECT_UNKNOWN"
+              assert outcome.failure_stage == FailureStage.PERSISTENCE
+              assert persistence.idempotency.get("GSHEET-UNIQUE:PG-UNKNOWN").state == IdempotencyState.UNKNOWN_EFFECT
+
+              second_provider = SuccessProvider()
+              second = IdempotentAsyncBroker(
+                  second_provider,
+                  persistence.idempotency,
+                  uniqueness_key_resolver=lambda _: "GSHEET-UNIQUE:PG-UNKNOWN",
+              )
+              blocked = await second.execute(mutation("RUN-PG-F", "unknown-second"))
+              assert not blocked.success
+              assert blocked.error_code == "IDEMPOTENCY_UNIQUENESS_CONFLICT"
+              assert second_provider.calls == 0
+
+          async def different_keys_parallel():
+              provider = SuccessProvider(delay=0.05)
+              broker = IdempotentAsyncBroker(
+                  provider,
+                  persistence.idempotency,
+                  uniqueness_key_resolver=lambda p: "GSHEET-UNIQUE:" + p.action_id.split(":", 1)[0],
+              )
+              results = await asyncio.gather(
+                  broker.execute(mutation("RUN-PG-G", "different-g")),
+                  broker.execute(mutation("RUN-PG-H", "different-h")),
+              )
+              assert provider.calls == 2
+              assert all(result.success for result in results)
+
+          asyncio.run(concurrent_same_key())
+          asyncio.run(confirmed_no_effect_release())
+          asyncio.run(unknown_effect_retains_lock())
+          asyncio.run(different_keys_parallel())
+          print("POSTGRES_SECONDARY_UNIQUENESS_PROOF=PASS")
+          PY
+
+      - name: Self-remove proof workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/runtime-v2-logical-append-postgres-proof.yml
+          git config user.name "hao-runtime-v2-bot"
+          git config user.email "hao-runtime-v2-bot@users.noreply.github.com"
+          git add .github/workflows/runtime-v2-logical-append-postgres-proof.yml
+          git commit -m "ci(runtime-v2): remove postgres uniqueness proof"
+          git push origin HEAD:exp/runtime-v2-logical-append-postgres-proof
