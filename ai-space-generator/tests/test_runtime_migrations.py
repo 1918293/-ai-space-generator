@@ -105,6 +105,18 @@ def test_runtime_refuses_database_newer_than_code():
     assert any(call[0] == "ROLLBACK" for call in conn.calls)
 
 
+def test_schema_readiness_rejects_config_binary_version_drift_before_database_access():
+    conn = FakePostgresConnection(initial_version=CURRENT_RUNTIME_SCHEMA_VERSION - 1)
+    with pytest.raises(RuntimeError, match="RUNTIME_BINARY_SCHEMA_VERSION_MISMATCH"):
+        verify_postgres_schema(
+            "postgresql://runtime/test",
+            expected_version=CURRENT_RUNTIME_SCHEMA_VERSION - 1,
+            connect_factory=factory(conn),
+        )
+    assert conn.calls == []
+    assert conn.closed is False
+
+
 def test_schema_readiness_requires_exact_version_and_every_runtime_table():
     conn = FakePostgresConnection(initial_version=CURRENT_RUNTIME_SCHEMA_VERSION)
     assert verify_postgres_schema(
