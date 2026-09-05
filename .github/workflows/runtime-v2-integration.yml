@@ -6,6 +6,7 @@ on:
       - exp/runtime-v2-integration-current
       - exp/runtime-v2-deployment-preflight-fixes
       - exp/runtime-v2-role-scoped-secrets
+      - exp/runtime-v2-infrastructure-terraform-candidate
   workflow_dispatch:
 
 permissions:

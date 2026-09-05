@@ -1,0 +1,29 @@
+name: Runtime v2 Terraform Candidate
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-infrastructure-terraform-candidate
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-static-gate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-space-generator/deploy/terraform/runtime-v2
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+      - name: Terraform format
+        run: terraform fmt -check -recursive
+      - name: Terraform init without backend
+        run: terraform init -backend=false -input=false
+      - name: Terraform validate
+        run: terraform validate -no-color
