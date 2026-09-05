@@ -41,12 +41,19 @@ class FakeSheetProvider:
             rid = f"r-{self.calls}"
             self.receipts.append(rid)
             return ProviderReceipt(True, rid, "fake:sheet:update")
+        if self.mode == "readback_exception":
+            self.state[key] = intent.expected_state_delta
+            rid = f"r-{self.calls}"
+            self.receipts.append(rid)
+            return ProviderReceipt(True, rid, "fake:sheet:update")
         self.state[key] = intent.expected_state_delta
         rid = f"r-{self.calls}"
         self.receipts.append(rid)
         return ProviderReceipt(True, rid, "fake:sheet:update")
 
     async def readback(self, binding, intent):
+        if self.mode == "readback_exception":
+            raise ConnectionError("readback unavailable")
         value = self.state.get(binding.target_ref, "")
         return DirectReadback(
             matched=value == intent.expected_state_delta,
@@ -123,6 +130,35 @@ async def test_unknown_effect_reconciles_only_from_direct_provider_readback_not_
     resolved = await runtime.reconcile_from_direct_provider_readback(result.reconciliation_case_id, "hao-sub", intent())
     assert resolved.state == ReconciliationState.VERIFIED_APPLIED
     assert resolved.trusted_evidence_digest.startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_provider_success_without_receipt_is_unknown_effect(tmp_path):
+    provider = FakeSheetProvider()
+    provider.mode = "success_without_receipt"
+    runtime, provider, _, _ = make_runtime(tmp_path, provider)
+    result = await runtime.execute(intent())
+    assert result.effect_state == EffectState.UNKNOWN_EFFECT
+    assert result.code == "PROVIDER_SUCCESS_WITHOUT_RECEIPT_EFFECT_UNKNOWN"
+    assert result.reconciliation_case_id
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_readback_exception_after_receipt_is_unknown_and_not_blind_retried(tmp_path):
+    provider = FakeSheetProvider()
+    provider.mode = "readback_exception"
+    runtime, provider, _, _ = make_runtime(tmp_path, provider)
+    first = await runtime.execute(intent())
+    assert first.effect_state == EffectState.UNKNOWN_EFFECT
+    assert first.code == "DIRECT_READBACK_EXCEPTION_EFFECT_UNKNOWN:ConnectionError"
+    calls = provider.calls
+    second = await runtime.execute(intent())
+    assert second.effect_state == EffectState.UNKNOWN_EFFECT
+    assert provider.calls == calls == 1
+    with pytest.raises(RuntimeError, match="DIRECT_PROVIDER_READBACK_FAILED:ConnectionError"):
+        await runtime.reconcile_from_direct_provider_readback(first.reconciliation_case_id, "hao-sub", intent())
+    assert runtime.inspect_reconciliation(first.reconciliation_case_id, "hao-sub").state == ReconciliationState.OPEN
 
 
 @pytest.mark.asyncio
