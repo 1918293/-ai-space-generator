@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict
 from hashlib import sha256
 import json
 from typing import Any, Callable, Iterator
@@ -20,6 +19,9 @@ from .reconciliation import (
 
 
 ConnectionFactory = Callable[[], Any]
+_TERMINAL_PHASES = frozenset(
+    {ReconciliationPhase.RESOLVED, ReconciliationPhase.PERMANENT_UNRESOLVED}
+)
 
 
 def _default_connect_factory(database_url: str) -> ConnectionFactory:
@@ -102,7 +104,8 @@ class PostgresReconciliationStore:
 
     One action may have at most one case. Opening an UNKNOWN_EFFECT case is
     deterministic and idempotent, so a restart or repeated status check cannot
-    create duplicate incident records.
+    create duplicate incident records. Terminal cases are immutable at the store
+    boundary so concurrent/stale reconcilers cannot reopen or overwrite them.
     """
 
     def __init__(
@@ -172,14 +175,19 @@ class PostgresReconciliationStore:
             )
         )
 
+    @staticmethod
+    def _select_case_sql(*, for_update: bool = False) -> str:
+        suffix = " FOR UPDATE" if for_update else ""
+        return (
+            "SELECT case_id, run_id, action_id, kind, effect_may_have_occurred, "
+            "evidence_json, phase, disposition, resolution_code, trigger_error_code "
+            "FROM reconciliation_cases WHERE case_id = %s" + suffix
+        )
+
     def get(self, case_id: str) -> ReconciliationCase | None:
         with self._transaction() as conn:
             row = conn.execute(
-                """
-                SELECT case_id, run_id, action_id, kind, effect_may_have_occurred,
-                       evidence_json, phase, disposition, resolution_code, trigger_error_code
-                FROM reconciliation_cases WHERE case_id = %s
-                """,
+                self._select_case_sql(),
                 (case_id.strip(),),
             ).fetchone()
         return None if row is None else self._case(row)
@@ -252,16 +260,26 @@ class PostgresReconciliationStore:
         case = validate_case(case)
         with self._transaction() as conn:
             row = conn.execute(
-                "SELECT run_id, action_id FROM reconciliation_cases WHERE case_id = %s FOR UPDATE",
+                self._select_case_sql(for_update=True),
                 (case.case_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("RECONCILIATION_CASE_NOT_FOUND")
-            if str(_value(row, "run_id", 0)) != case.run_id or str(
-                _value(row, "action_id", 1)
-            ) != case.action_id:
+            existing = self._case(row)
+            if existing.run_id != case.run_id or existing.action_id != case.action_id:
                 raise ValueError("RECONCILIATION_CASE_IDENTITY_CONFLICT")
-            conn.execute(
+
+            if existing.phase in _TERMINAL_PHASES:
+                if existing == case:
+                    return existing
+                raise ValueError("RECONCILIATION_CASE_TERMINAL")
+            if (
+                existing.phase == ReconciliationPhase.AWAITING_HAO
+                and case.phase == ReconciliationPhase.OPEN
+            ):
+                raise ValueError("RECONCILIATION_PHASE_REGRESSION")
+
+            cursor = conn.execute(
                 """
                 UPDATE reconciliation_cases
                 SET kind = %s,
@@ -270,7 +288,7 @@ class PostgresReconciliationStore:
                     phase = %s,
                     disposition = %s,
                     resolution_code = %s
-                WHERE case_id = %s
+                WHERE case_id = %s AND phase = %s
                 """,
                 (
                     case.kind.value,
@@ -280,8 +298,12 @@ class PostgresReconciliationStore:
                     case.disposition.value if case.disposition else "",
                     case.resolution_code,
                     case.case_id,
+                    existing.phase.value,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise ValueError("RECONCILIATION_SAVE_RACE")
+
         saved = self.get(case.case_id)
         if saved is None:
             raise RuntimeError("RECONCILIATION_CASE_SAVE_LOST")
