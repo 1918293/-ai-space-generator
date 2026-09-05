@@ -132,8 +132,6 @@ def test_mcp_http_app_requires_explicit_non_wildcard_host_allowlist():
 
 def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
     async def scenario():
-        # In-memory Client intentionally bypasses HTTP OAuth. Use it only to
-        # inspect the registered tool surface and model-visible schemas.
         async with Client(server()) as client:
             result = await client.list_tools()
             tools = {tool.name: tool for tool in result.tools}
@@ -163,7 +161,7 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
             assert tools["hao_parent_accept"].annotations.idempotent_hint is True
             assert tools["hao_reconciliation_inspect"].annotations.read_only_hint is True
             assert tools["hao_reconciliation_resolve"].annotations.idempotent_hint is True
-            assert tools["hao_reconciliation_retry_with_delta"].annotations.idempotent_hint is False
+            assert tools["hao_reconciliation_retry_with_delta"].annotations.idempotent_hint is True
 
             submit_fields = set(tools["hao_control_submit"].input_schema["properties"])
             assert "mode" not in submit_fields
@@ -216,10 +214,10 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
             )
             assert "binding_id" not in reconciliation_retry_fields
             assert "requested_capability" not in reconciliation_retry_fields
+            assert "authorization_target" not in reconciliation_retry_fields
             assert reconciliation_retry_fields == {
                 "case_id",
                 "expected_state_delta",
-                "authorization_target",
                 "action_arguments",
             }
 
