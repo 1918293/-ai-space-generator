@@ -8,6 +8,7 @@ on:
       - exp/runtime-v2-role-scoped-secrets
       - exp/runtime-v2-infrastructure-terraform-candidate
       - exp/runtime-v2-cloud-sql-edition-preflight
+      - exp/runtime-v2-deployment-execution-profile
   workflow_dispatch:
 
 permissions:
