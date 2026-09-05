@@ -143,6 +143,10 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
                 "hao_control_status",
                 "hao_control_authorize",
                 "hao_control_finalize",
+                "hao_parent_start",
+                "hao_parent_submit_child",
+                "hao_parent_refresh",
+                "hao_parent_accept",
             }
             assert tools["hao_control_context"].annotations.read_only_hint is True
             assert tools["hao_control_status"].annotations.read_only_hint is True
@@ -150,6 +154,10 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
             assert tools["hao_control_authorize"].annotations.destructive_hint is True
             assert tools["hao_control_authorize"].annotations.open_world_hint is True
             assert tools["hao_control_finalize"].annotations.idempotent_hint is True
+            assert tools["hao_parent_start"].annotations.idempotent_hint is False
+            assert tools["hao_parent_submit_child"].annotations.idempotent_hint is True
+            assert tools["hao_parent_refresh"].annotations.idempotent_hint is True
+            assert tools["hao_parent_accept"].annotations.idempotent_hint is True
 
             submit_fields = set(tools["hao_control_submit"].input_schema["properties"])
             assert "mode" not in submit_fields
@@ -170,6 +178,23 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
             authorize_fields = set(tools["hao_control_authorize"].input_schema["properties"])
             assert "confirmation" not in authorize_fields
             assert authorize_fields == {"workflow_id", "scope", "approved", "reason"}
+
+            parent_start_fields = set(tools["hao_parent_start"].input_schema["properties"])
+            assert parent_start_fields == {"plan_id"}
+            parent_child_fields = set(
+                tools["hao_parent_submit_child"].input_schema["properties"]
+            )
+            assert parent_child_fields == {
+                "task_run_id",
+                "slot_id",
+                "expected_state_delta",
+                "action_arguments",
+            }
+            parent_accept_fields = set(
+                tools["hao_parent_accept"].input_schema["properties"]
+            )
+            assert "confirmation" not in parent_accept_fields
+            assert parent_accept_fields == {"task_run_id", "accepted"}
 
     asyncio.run(scenario())
 
