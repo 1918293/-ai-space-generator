@@ -29,7 +29,7 @@ Every production API and worker process must load the same non-secret deployment
 Production startup fails if any required deployment field is missing or malformed. Additional Lane B gates are:
 
 - PostgreSQL is mandatory.
-- `HAO_DATABASE_SCHEMA_VERSION` must be a positive supported version.
+- `HAO_DATABASE_SCHEMA_VERSION` must be a positive supported version and must exactly match the binary-supported Runtime schema.
 - `HAO_DATABASE_RPO_SECONDS` must be positive and no greater than 300 seconds.
 - `HAO_DATABASE_RTO_SECONDS` must be positive. The declared value is a requirement, not evidence that it has been achieved.
 - `HAO_WORKER_INSTANCE_COUNT >= 1`.
@@ -38,13 +38,20 @@ Production startup fails if any required deployment field is missing or malforme
 - production OTel export uses HTTPS unless the application exports to a loopback collector (`127.0.0.1`, `localhost`, or `::1`).
 - `HAO_SECRET_BINDINGS_JSON` is required metadata for secret-backed values and must bind each required secret to a **numeric immutable Secret Manager version**, never `latest` or another moving alias.
 
-Required secret bindings currently include:
+Unconditionally required secret bindings currently include:
 
 - `HAO_TEMPORAL_API_KEY`
 - `HAO_ATTESTATION_SECRET`
 - `HAO_MCP_REQUEST_STATE_KEYS`
 
+Conditional secret bindings are fail-closed when the corresponding secret-bearing configuration is used:
+
+- `HAO_ATTESTATION_PREVIOUS_KEYS_JSON` is required in the binding map when the previous-key verification map is non-empty.
+- `HAO_DATABASE_URL` is required in the binding map when the PostgreSQL URL embeds a password. A passwordless/workload-bound URL does not force one specific Cloud SQL authentication mechanism.
+
 The actual secret values remain injected at runtime and are never stored in this repository. A missing injected value is already a startup failure through the normal Runtime settings contract.
+
+A brand-new empty `operational_state` also requires deployment-owned `HAO_INITIAL_MODE` and `HAO_INITIAL_TASK`. These values seed first boot only; once durable operational state exists, that state remains authoritative.
 
 ## 3. Container startup and shutdown contract
 
@@ -59,17 +66,19 @@ The API builds all required configuration and production dependencies before bec
 - `/readyz`: traffic readiness; verifies exact database schema compatibility and durable operational-state readability, and returns `503` while draining.
 - `/healthz`: compatibility alias for readiness.
 
-Cloud Run currently supports startup/liveness/readiness probes, but readiness probes are still Preview. Therefore the production baseline must not depend on readiness Preview as its sole safety boundary. Configure the startup probe so it only succeeds when the instance is safe to receive traffic, use `/readyz` for explicit canary/synthetic checks, and keep the zero-traffic/tagged revision gate before traffic migration.
+Cloud Run startup, liveness, and readiness probes are generally available. The production baseline still must not treat the readiness probe as the only admission boundary: an instance's startup-success condition must itself mean that the process is safe to serve, while `/readyz` remains the explicit runtime/readback check used for canary and synthetic validation. Keep the zero-traffic/tagged revision gate before traffic migration.
 
 Recommended service probe intent:
 
 - startup: HTTP `/startupz`, short interval, enough failure budget for dependency initialization;
 - liveness: HTTP `/livez`; never include database reachability in liveness;
-- readiness where accepted under the relevant GCP launch-stage policy: HTTP `/readyz`.
+- readiness: HTTP `/readyz`.
 
 ### Worker lifecycle
 
-Cloud Run Worker Pools do not autoscale. Production must explicitly configure a non-zero instance count; `0` means disabled. The worker installs SIGTERM/SIGINT handlers, stops polling through Temporal worker shutdown, gives Temporal most of the configured termination budget, then performs a bounded OTel flush. Provider semantics are not changed by shutdown: unknown-effect work remains subject to existing idempotency/reconciliation rules.
+Cloud Run Worker Pools are generally available. They do not provide a native request-driven autoscaler, although an external control plane can adjust instance count. Runtime v2 therefore keeps an explicitly managed, fixed non-zero worker count as the conservative initial production baseline; later external autoscaling is a separate deployment decision and must not change Runtime idempotency/reconciliation semantics.
+
+The worker installs SIGTERM/SIGINT handlers, stops polling through Temporal worker shutdown, gives Temporal most of the configured termination budget, then performs a bounded OTel flush. Provider semantics are not changed by shutdown: unknown-effect work remains subject to existing idempotency/reconciliation rules.
 
 ## 4. PostgreSQL migrations, locking, and concurrency
 
@@ -97,7 +106,11 @@ Required environment:
 6. refusal when the database schema is newer than the application target;
 7. exact-version/readiness verification before API or worker starts.
 
-Schema v1 centralizes the durable tables already required by Runtime v2 and retains their uniqueness contracts, including primary/unique identities for operational events, idempotency keys, authoritative completions, MCP workflow ownership, reconciliation action IDs, parent-child action IDs, and stable finalization issuance reservations.
+The current engineering schema is **v3**:
+
+- v1 centralizes the original durable Runtime v2 tables and their uniqueness contracts, including operational events, idempotency keys, authoritative completions, MCP workflow ownership, reconciliation action IDs, parent-child action IDs, and stable finalization issuance reservations;
+- v2 adds parent-task row revision/CAS support, child dependency persistence, and reconciliation retry reservations;
+- v3 adds `authoritative_completions.key_id`, making completion signing-key identity durable and allowing restart/rotation verification to distinguish the exact key that minted a receipt.
 
 Existing runtime store transactions remain serializable and use row locking/CAS or uniqueness constraints for concurrent state transitions. The migration lock protects schema transition; it does not replace application-level locking.
 
@@ -110,7 +123,7 @@ Existing runtime store transactions remain serializable and use row locking/CAS 
 5. Only then allow candidate API/worker revisions to start.
 6. If migration fails, keep serving the old compatible revision; do not force-start a runtime against a mismatched database.
 
-A destructive/non-backward-compatible migration requires its own expand/migrate/contract plan and is outside schema v1. Cloud Run traffic rollback cannot undo a destructive database migration.
+A destructive/non-backward-compatible future migration requires its own expand/migrate/contract plan. Cloud Run traffic rollback cannot undo a destructive database migration.
 
 ## 5. Backup, PITR, RPO, RTO, and restore drill
 
@@ -133,18 +146,21 @@ Until this has been executed against a real instance, report the restore contrac
 
 Secret Manager secret versions are immutable. Production rollout must bind numeric versions, not `latest`, so application rollback also restores the previous credential binding.
 
+Completion signing rotation is key-ID aware in the Runtime engineering path: the current non-empty `HAO_ATTESTATION_KEY_ID` is cryptographically included in the signed completion payload and persisted in `authoritative_completions.key_id`. `HAO_ATTESTATION_PREVIOUS_KEYS_JSON` is verification-only; a retained prior key can verify/replay a receipt minted before rotation, but it cannot become the current signing key. Removing a prior key ID from that map makes receipts carrying that key ID unverifiable by the new runtime and is the explicit Runtime-level revocation behavior.
+
 Rotation sequence:
 
 1. create a new secret version outside source control;
 2. assign a new signing key ID when rotating completion signing material;
-3. update `HAO_SECRET_BINDINGS_JSON` metadata and runtime secret injection to the exact numeric version;
-4. deploy as a candidate revision with zero traffic / bounded worker allocation;
-5. pass startup, OAuth/identity-owned gates from the relevant lanes, controlled canary, and finalization/replay checks;
-6. advance the release;
-7. retain the prior secret version during the rollback and in-flight-drain window;
-8. disable the old version first; destroy it only after the rollback window has closed and there is direct evidence no compatible in-flight execution requires it.
+3. keep any still-valid prior key in the verification-only previous-key map and bind that map to an immutable Secret Manager version;
+4. update `HAO_SECRET_BINDINGS_JSON` metadata and runtime secret injection to the exact numeric versions;
+5. deploy as a candidate revision with zero traffic / bounded worker allocation;
+6. pass startup, OAuth/identity-owned gates from the relevant lanes, controlled canary, key-ID substitution/replay/revocation tests, and stable finalization checks;
+7. advance the release;
+8. retain the prior secret/version only during the rollback and in-flight-drain window in which old receipts must remain verifiable;
+9. remove the prior key ID from the verification map and disable the old Secret Manager version after the compatibility window closes; destroy it only after direct evidence shows no compatible in-flight execution requires it.
 
-Request-state sealing already accepts an ordered key tuple, which supports read-old/write-new style rotation when the owning protocol lane confirms the exact key ordering contract. Lane B does not redefine that protocol semantic.
+Request-state sealing already accepts an ordered key tuple, which supports read-old/write-new style rotation when the owning protocol lane confirms the exact key ordering contract. This completion-attestation rotation contract does not redefine that protocol semantic.
 
 ## 7. OpenTelemetry production assembly
 
@@ -183,7 +199,7 @@ Rollback is traffic reassignment to the prior revision, not a rebuild. If the da
 
 ## 9. Worker Pool rollout, Temporal versioning, and rollback
 
-Worker pools use **instance splitting**, not HTTP traffic splitting. They also require manual non-zero scaling.
+Worker pools use **instance splitting**, not HTTP traffic splitting. Runtime v2's initial production baseline uses an explicitly managed non-zero allocation rather than assuming a request-driven autoscaler.
 
 Every worker revision registers an immutable Temporal deployment version using the pinned SDK's `WorkerDeploymentConfig` and `WorkerDeploymentVersion`. Runtime v2 defaults controlled workflows to `PINNED` versioning behavior so a long-running workflow does not silently jump to a new build.
 
@@ -239,13 +255,13 @@ This package deliberately does not perform or claim:
 
 ## 12. Integration checklist
 
-Before Integration Authority consumes Lane B:
+Before Integration Authority consumes this production-foundation delta:
 
-- compare the Lane B branch against its exact starting SHA;
-- reconcile schema v1 with Lane D reconciliation-table changes and Lane E parent-task-table changes before cherry-picking if those lanes altered columns/constraints;
-- reconcile `runtime_deployment.py` with Lane A transport/OAuth changes and Lane C identity/security changes rather than choosing one whole-file version;
-- preserve Lane B's `initialize_schema=False` + migration verification boundary when resolving overlaps;
-- preserve Lane B's health/lifecycle/versioning assembly without weakening Lane A/C/D/E semantics;
-- run the full Runtime v2 test suite plus the Lane B replay/migration/config/lifecycle tests on the integrated resulting SHA;
-- build the runtime container on the integrated SHA;
-- keep all real-resource and cutover gates explicitly NOT EXECUTED until direct readback exists.
+- compare the candidate branch against its exact shared starting SHA;
+- preserve current schema v3 ordering and all earlier v1/v2 persistence semantics when resolving future overlaps;
+- reconcile `runtime_deployment.py` with transport/OAuth/identity/provider/parent semantics rather than choosing one whole-file version;
+- preserve `initialize_schema=False` + exact migration verification for production startup;
+- preserve health/lifecycle/Temporal versioning assembly without weakening identity/provider/distributed semantics;
+- run the full Runtime v2 test suite plus replay/migration/config/lifecycle/key-rotation regressions on the exact integrated resulting SHA;
+- compile production entrypoints and build the runtime container on the exact integrated SHA;
+- keep all real-resource and cutover gates explicitly NOT EXECUTED until direct deployment/readback evidence exists.
