@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import re
 from typing import Any, Iterable, Mapping
 
 from .execution_control import ActionProposal, AuthorityStamp, authority_snapshot_fingerprint
@@ -89,6 +90,35 @@ class SheetsMutationTarget:
     range_a1: str
     value_input_option: str = "RAW"
     authority_sources: tuple[AuthorityFileSource, ...] = ()
+    mutation_mode: str = "fixed_range"
+    sheet_id: int | None = None
+    unique_key_column: str = ""
+
+
+_FULL_COLUMN_RANGE = re.compile(
+    r"^(?P<sheet>'(?:[^']|'')+'|[^!]+)!(?P<start>[A-Z]+):(?P<end>[A-Z]+)$"
+)
+
+
+def _column_index(column: str) -> int:
+    if not column or not column.isalpha() or not column.isupper():
+        raise ValueError("SHEETS_UNIQUE_KEY_COLUMN_INVALID")
+    result = 0
+    for character in column:
+        result = result * 26 + ord(character) - ord("A") + 1
+    return result - 1
+
+
+def _logical_append_columns(range_a1: str, unique_key_column: str) -> tuple[str, int, int, int]:
+    match = _FULL_COLUMN_RANGE.fullmatch(range_a1)
+    if match is None:
+        raise ValueError("SHEETS_LOGICAL_APPEND_RANGE_INVALID")
+    start = _column_index(match.group("start"))
+    end = _column_index(match.group("end"))
+    key = _column_index(unique_key_column)
+    if end < start or not start <= key <= end:
+        raise ValueError("SHEETS_UNIQUE_KEY_COLUMN_OUTSIDE_RANGE")
+    return match.group("sheet"), start, end, key - start
 
 
 class ConfiguredSheetsCommandResolver(DriveCommandResolver):
@@ -104,6 +134,14 @@ class ConfiguredSheetsCommandResolver(DriveCommandResolver):
                 raise ValueError("SHEETS_TARGET_REQUIRED")
             if target.value_input_option not in {"RAW", "USER_ENTERED"}:
                 raise ValueError("SHEETS_VALUE_INPUT_OPTION_INVALID")
+            if target.mutation_mode not in {"fixed_range", "logical_append"}:
+                raise ValueError("SHEETS_MUTATION_MODE_INVALID")
+            if target.mutation_mode == "logical_append":
+                if target.sheet_id is None or target.sheet_id < 0:
+                    raise ValueError("SHEETS_LOGICAL_APPEND_SHEET_ID_REQUIRED")
+                if target.value_input_option != "RAW":
+                    raise ValueError("SHEETS_LOGICAL_APPEND_RAW_REQUIRED")
+                _logical_append_columns(target.range_a1.strip(), target.unique_key_column.strip())
             by_binding[key] = target
         self._by_binding = by_binding
 
@@ -122,6 +160,7 @@ class ConfiguredSheetsCommandResolver(DriveCommandResolver):
             "spreadsheet_id": target.spreadsheet_id.strip(),
             "range_a1": target.range_a1.strip(),
             "value_input_option": target.value_input_option,
+            "mutation_mode": target.mutation_mode,
             "values_json": json.dumps(values, ensure_ascii=False, separators=(",", ":")),
             "authority_sources_json": json.dumps(
                 [
@@ -133,6 +172,9 @@ class ConfiguredSheetsCommandResolver(DriveCommandResolver):
                 separators=(",", ":"),
             ),
         }
+        if target.mutation_mode == "logical_append":
+            trusted_payload["sheet_id"] = str(target.sheet_id)
+            trusted_payload["unique_key_column"] = target.unique_key_column.strip()
         return DriveMutationCommand(
             action_id=proposal.action_id,
             provider=proposal.provider,
@@ -242,7 +284,63 @@ class GoogleWorkspaceSheetsClient:
             raise ValueError(error or "SHEETS_TRUSTED_TARGET_INVALID")
         return spreadsheet_id, range_a1, value_input_option, values
 
+    @staticmethod
+    def _logical_append_input(
+        command: DriveMutationCommand,
+    ) -> tuple[str, str, int, str, int, int, int, list[Any]] | None:
+        payload = _payload(command)
+        if payload.get("mutation_mode", "fixed_range") == "fixed_range":
+            return None
+        if payload.get("mutation_mode") != "logical_append":
+            raise ValueError("SHEETS_MUTATION_MODE_INVALID")
+        spreadsheet_id, range_a1, value_input_option, values = GoogleWorkspaceSheetsClient._mutation_input(
+            command
+        )
+        if value_input_option != "RAW" or len(values) != 1:
+            raise ValueError("SHEETS_LOGICAL_APPEND_ONE_RAW_ROW_REQUIRED")
+        try:
+            sheet_id = int(payload.get("sheet_id", ""))
+        except ValueError as exc:
+            raise ValueError("SHEETS_LOGICAL_APPEND_SHEET_ID_INVALID") from exc
+        sheet, start_column, end_column, key_offset = _logical_append_columns(
+            range_a1, payload.get("unique_key_column", "").strip()
+        )
+        row = values[0]
+        if len(row) > end_column - start_column + 1:
+            raise ValueError("SHEETS_LOGICAL_APPEND_ROW_TOO_WIDE")
+        return spreadsheet_id, range_a1, sheet_id, sheet, start_column, end_column, key_offset, row
+
+    @staticmethod
+    def _cell_data(value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, bool):
+            return {"userEnteredValue": {"boolValue": value}}
+        if isinstance(value, (int, float)):
+            return {"userEnteredValue": {"numberValue": value}}
+        return {"userEnteredValue": {"stringValue": value}}
+
+    def _sheet_values(self, spreadsheet_id: str, range_a1: str) -> list[list[Any]]:
+        result = (
+            self._sheets.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                range=range_a1,
+                valueRenderOption="UNFORMATTED_VALUE",
+                dateTimeRenderOption="SERIAL_NUMBER",
+            )
+            .execute()
+        )
+        values = result.get("values", [])
+        if not isinstance(values, list) or any(not isinstance(row, list) for row in values):
+            raise ValueError("GOOGLE_SHEETS_VALUES_INVALID")
+        return values
+
     def _mutate_sync(self, command: DriveMutationCommand) -> DriveMutationReceipt:
+        logical_append = self._logical_append_input(command)
+        if logical_append is not None:
+            return self._logical_append_sync(command, logical_append)
         spreadsheet_id, range_a1, value_input_option, values = self._mutation_input(command)
         try:
             result = (
@@ -282,10 +380,82 @@ class GoogleWorkspaceSheetsClient:
         receipt_id = "GSHEETS-" + sha256(receipt_material.encode("utf-8")).hexdigest()[:32]
         return DriveMutationReceipt(True, receipt_id, "google-sheets:spreadsheets.values.update")
 
+    def _logical_append_sync(
+        self,
+        command: DriveMutationCommand,
+        mutation: tuple[str, str, int, str, int, int, int, list[Any]],
+    ) -> DriveMutationReceipt:
+        spreadsheet_id, range_a1, sheet_id, _, start_column, _, key_offset, row = mutation
+        key = row[key_offset] if key_offset < len(row) else None
+        if key is None or (isinstance(key, str) and not key.strip()):
+            return DriveMutationReceipt(
+                False, error_code="SHEETS_LOGICAL_APPEND_KEY_REQUIRED", no_effect_confirmed=True
+            )
+        try:
+            current_values = self._sheet_values(spreadsheet_id, range_a1)
+        except Exception as exc:
+            return DriveMutationReceipt(
+                False,
+                error_code=f"GOOGLE_SHEETS_APPEND_PREFLIGHT_FAILED:{type(exc).__name__}",
+                no_effect_confirmed=True,
+            )
+        existing_keys = [
+            existing[key_offset]
+            for existing in current_values
+            if key_offset < len(existing)
+        ]
+        if key in existing_keys:
+            return DriveMutationReceipt(
+                False, error_code="SHEETS_LOGICAL_APPEND_KEY_DUPLICATE", no_effect_confirmed=True
+            )
+        row_index = len(_normalized_sheet_values(current_values))
+        body = {
+            "requests": [
+                {
+                    "insertDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": row_index,
+                            "endIndex": row_index + 1,
+                        },
+                        "inheritFromBefore": row_index > 0,
+                    }
+                },
+                {
+                    "updateCells": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": row_index,
+                            "endRowIndex": row_index + 1,
+                            "startColumnIndex": start_column,
+                            "endColumnIndex": start_column + len(row),
+                        },
+                        "rows": [{"values": [self._cell_data(value) for value in row]}],
+                        "fields": "userEnteredValue",
+                    }
+                },
+            ]
+        }
+        try:
+            self._sheets.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=body
+            ).execute()
+        except Exception:
+            # A transport failure can hide a successful atomic mutation. The caller must
+            # reconcile by stable key and must not blindly replay this append.
+            raise
+        receipt_material = f"{spreadsheet_id}:{sheet_id}:{row_index}:{key}:{command.action_id}"
+        receipt_id = "GSHEETS-" + sha256(receipt_material.encode("utf-8")).hexdigest()[:32]
+        return DriveMutationReceipt(True, receipt_id, "google-sheets:spreadsheets.batchUpdate")
+
     async def mutate(self, command: DriveMutationCommand) -> DriveMutationReceipt:
         return await asyncio.to_thread(self._mutate_sync, command)
 
     def _readback_sync(self, command: DriveMutationCommand) -> DriveStateReadback:
+        logical_append = self._logical_append_input(command)
+        if logical_append is not None:
+            return self._logical_append_readback(command, logical_append)
         spreadsheet_id, range_a1, _, _ = self._mutation_input(command)
         result = (
             self._sheets.spreadsheets()
@@ -300,6 +470,39 @@ class GoogleWorkspaceSheetsClient:
         )
         values = result.get("values", [])
         digest = canonical_values_digest(values)
+        return DriveStateReadback(
+            digest,
+            "google-sheets:spreadsheets.values.get",
+            digest == command.expected_state_digest,
+            "" if digest == command.expected_state_digest else "GOOGLE_SHEETS_READBACK_MISMATCH",
+        )
+
+    def _logical_append_readback(
+        self,
+        command: DriveMutationCommand,
+        mutation: tuple[str, str, int, str, int, int, int, list[Any]],
+    ) -> DriveStateReadback:
+        spreadsheet_id, range_a1, _, sheet, start_column, end_column, key_offset, expected_row = mutation
+        key = expected_row[key_offset] if key_offset < len(expected_row) else None
+        values = self._sheet_values(spreadsheet_id, range_a1)
+        matching_rows = [
+            index
+            for index, row in enumerate(values)
+            if key_offset < len(row) and row[key_offset] == key
+        ]
+        if len(matching_rows) != 1:
+            return DriveStateReadback(
+                "",
+                "google-sheets:spreadsheets.values.get",
+                False,
+                "GOOGLE_SHEETS_APPEND_KEY_NOT_EXACTLY_ONCE",
+            )
+        row_number = matching_rows[0] + 1
+        start_name = _payload(command)["range_a1"].split("!", 1)[1].split(":", 1)[0]
+        end_name = _payload(command)["range_a1"].rsplit(":", 1)[1]
+        exact_range = f"{sheet}!{start_name}{row_number}:{end_name}{row_number}"
+        exact_values = self._sheet_values(spreadsheet_id, exact_range)
+        digest = canonical_values_digest(exact_values)
         return DriveStateReadback(
             digest,
             "google-sheets:spreadsheets.values.get",

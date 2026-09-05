@@ -109,6 +109,11 @@ def load_sheets_targets(values: dict[str, str]) -> tuple[SheetsMutationTarget, .
                 range_a1=str(item.get("range_a1", "")).strip(),
                 value_input_option=str(item.get("value_input_option", "RAW")).strip(),
                 authority_sources=_authority_sources(item.get("authority_sources", [])),
+                mutation_mode=str(item.get("mutation_mode", "fixed_range")).strip(),
+                sheet_id=(
+                    int(item["sheet_id"]) if item.get("sheet_id") is not None else None
+                ),
+                unique_key_column=str(item.get("unique_key_column", "")).strip(),
             )
         )
     if not targets:

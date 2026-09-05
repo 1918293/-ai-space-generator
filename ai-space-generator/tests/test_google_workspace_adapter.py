@@ -170,9 +170,14 @@ class ValuesAPI:
 class SpreadsheetsAPI:
     def __init__(self, values_api):
         self.values_api = values_api
+        self.batch_update_calls = []
 
     def values(self):
         return self.values_api
+
+    def batchUpdate(self, **kwargs):
+        self.batch_update_calls.append(kwargs)
+        return Request({"replies": [{}, {}]})
 
 
 class SheetsService:
@@ -229,3 +234,164 @@ def test_real_adapter_preflight_mutation_and_exact_readback_use_configured_targe
     get_call = client._sheets.values_api.get_calls[0]
     assert get_call["spreadsheetId"] == "trusted-sheet"
     assert get_call["range"] == "01_Intake!A10:B11"
+
+
+def logical_append_command(values_json='[["REC-2","new"]]'):
+    current_proposal = proposal()
+    current_proposal = type(current_proposal)(
+        **{
+            **current_proposal.__dict__,
+            "arguments": (("values_json", values_json),),
+        }
+    )
+    resolver = ConfiguredSheetsCommandResolver(
+        (
+            SheetsMutationTarget(
+                binding_id="drive.formal_cells.update",
+                spreadsheet_id="trusted-sheet",
+                range_a1="01_Intake!A:B",
+                authority_sources=(AuthorityFileSource("AUTH:MAIN", "trusted-sheet"),),
+                mutation_mode="logical_append",
+                sheet_id=123,
+                unique_key_column="A",
+            ),
+        )
+    )
+    command = resolver.resolve(current_proposal)
+    assert command is not None
+    return command
+
+
+def test_logical_append_resolves_fresh_tail_and_uses_one_atomic_batch():
+    command = logical_append_command()
+    client = client_with_fakes()
+    client._sheets.values_api.values = [["record_id", "value"], ["REC-1", "old"]]
+
+    mutation = asyncio.run(client.mutate(command))
+
+    assert mutation.success is True
+    assert mutation.source == "google-sheets:spreadsheets.batchUpdate"
+    assert client._sheets.values_api.update_calls == []
+    assert client._sheets.values_api.get_calls[0]["range"] == "01_Intake!A:B"
+    batch = client._sheets.spreadsheets_api.batch_update_calls[0]
+    assert batch["spreadsheetId"] == "trusted-sheet"
+    assert batch["body"] == {
+        "requests": [
+            {
+                "insertDimension": {
+                    "range": {
+                        "sheetId": 123,
+                        "dimension": "ROWS",
+                        "startIndex": 2,
+                        "endIndex": 3,
+                    },
+                    "inheritFromBefore": True,
+                }
+            },
+            {
+                "updateCells": {
+                    "range": {
+                        "sheetId": 123,
+                        "startRowIndex": 2,
+                        "endRowIndex": 3,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 2,
+                    },
+                    "rows": [
+                        {
+                            "values": [
+                                {"userEnteredValue": {"stringValue": "REC-2"}},
+                                {"userEnteredValue": {"stringValue": "new"}},
+                            ]
+                        }
+                    ],
+                    "fields": "userEnteredValue",
+                }
+            },
+        ]
+    }
+
+
+def test_logical_append_blocks_blank_duplicate_and_multiple_rows_before_mutation():
+    client = client_with_fakes()
+
+    blank = asyncio.run(client.mutate(logical_append_command('[["","new"]]')))
+    assert blank.success is False
+    assert blank.error_code == "SHEETS_LOGICAL_APPEND_KEY_REQUIRED"
+    assert blank.no_effect_confirmed is True
+
+    client._sheets.values_api.values = [["record_id", "value"], ["REC-2", "old"]]
+    duplicate = asyncio.run(client.mutate(logical_append_command()))
+    assert duplicate.success is False
+    assert duplicate.error_code == "SHEETS_LOGICAL_APPEND_KEY_DUPLICATE"
+    assert duplicate.no_effect_confirmed is True
+
+    try:
+        asyncio.run(client.mutate(logical_append_command('[["REC-2"],["REC-3"]]')))
+    except ValueError as exc:
+        assert str(exc) == "SHEETS_LOGICAL_APPEND_ONE_RAW_ROW_REQUIRED"
+    else:
+        raise AssertionError("multiple append rows must fail closed")
+    assert client._sheets.spreadsheets_api.batch_update_calls == []
+
+
+def test_logical_append_readback_requires_one_key_and_exact_canonical_row():
+    command = logical_append_command()
+    client = client_with_fakes()
+    responses = iter(
+        [
+            [["record_id", "value"], ["REC-2", "new"]],
+            [["REC-2", "new"]],
+        ]
+    )
+
+    def get(**kwargs):
+        client._sheets.values_api.get_calls.append(kwargs)
+        return Request({"range": kwargs["range"], "values": next(responses)})
+
+    client._sheets.values_api.get = get
+    readback = asyncio.run(client.readback(command))
+    assert readback.matched is True
+    assert client._sheets.values_api.get_calls[1]["range"] == "01_Intake!A2:B2"
+
+    client = client_with_fakes()
+    client._sheets.values_api.values = [["REC-2", "new"], ["REC-2", "new"]]
+    duplicate = asyncio.run(client.readback(command))
+    assert duplicate.matched is False
+    assert duplicate.error_code == "GOOGLE_SHEETS_APPEND_KEY_NOT_EXACTLY_ONCE"
+
+    client = client_with_fakes()
+    responses = iter([[["REC-2", "wrong"]], [["REC-2", "wrong"]]])
+    client._sheets.values_api.get = lambda **kwargs: Request(
+        {"range": kwargs["range"], "values": next(responses)}
+    )
+    mismatch = asyncio.run(client.readback(command))
+    assert mismatch.matched is False
+    assert mismatch.error_code == "GOOGLE_SHEETS_READBACK_MISMATCH"
+
+
+def test_logical_append_target_coordinates_are_deployment_owned():
+    command = logical_append_command()
+    payload = dict(command.payload)
+    assert payload["spreadsheet_id"] == "trusted-sheet"
+    assert payload["range_a1"] == "01_Intake!A:B"
+    assert payload["sheet_id"] == "123"
+    assert payload["unique_key_column"] == "A"
+
+    try:
+        ConfiguredSheetsCommandResolver(
+            (
+                SheetsMutationTarget(
+                    binding_id="drive.formal_cells.update",
+                    spreadsheet_id="trusted-sheet",
+                    range_a1="01_Intake!A:B",
+                    mutation_mode="logical_append",
+                    sheet_id=123,
+                    unique_key_column="C",
+                ),
+            )
+        )
+    except ValueError as exc:
+        assert str(exc) == "SHEETS_UNIQUE_KEY_COLUMN_OUTSIDE_RANGE"
+    else:
+        raise AssertionError("key coordinates outside the trusted range must be rejected")
