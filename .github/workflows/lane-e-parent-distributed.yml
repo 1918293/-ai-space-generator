@@ -23,12 +23,8 @@ jobs:
           cache-dependency-path: ai-space-generator/requirements-control.txt
       - name: Install Runtime v2 dependencies
         run: python -m pip install --upgrade pytest -r requirements-control.txt
-      - name: Run Lane E distributed regressions and parent baseline
+      - name: Run complete Runtime v2 surface including Lane E regressions
         run: >-
-          python -m pytest -q
-          tests/test_parent_distributed_verification.py
-          tests/test_parent_task_production.py
-          tests/test_task_runtime.py
-          tests/test_temporal_control.py
-          tests/test_temporal_workflow_integration.py
-          tests/test_production_temporal_integration.py
+          python -m pytest tests -q
+          --ignore=tests/test_core.py
+          --ignore=tests/test_validation.py
