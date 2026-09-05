@@ -147,6 +147,9 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
                 "hao_parent_submit_child",
                 "hao_parent_refresh",
                 "hao_parent_accept",
+                "hao_reconciliation_inspect",
+                "hao_reconciliation_resolve",
+                "hao_reconciliation_retry_with_delta",
             }
             assert tools["hao_control_context"].annotations.read_only_hint is True
             assert tools["hao_control_status"].annotations.read_only_hint is True
@@ -158,6 +161,9 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
             assert tools["hao_parent_submit_child"].annotations.idempotent_hint is True
             assert tools["hao_parent_refresh"].annotations.idempotent_hint is True
             assert tools["hao_parent_accept"].annotations.idempotent_hint is True
+            assert tools["hao_reconciliation_inspect"].annotations.read_only_hint is True
+            assert tools["hao_reconciliation_resolve"].annotations.idempotent_hint is True
+            assert tools["hao_reconciliation_retry_with_delta"].annotations.idempotent_hint is False
 
             submit_fields = set(tools["hao_control_submit"].input_schema["properties"])
             assert "mode" not in submit_fields
@@ -195,6 +201,27 @@ def test_mcp_tool_surface_is_focused_and_annotations_match_effects():
             )
             assert "confirmation" not in parent_accept_fields
             assert parent_accept_fields == {"task_run_id", "accepted"}
+
+            reconciliation_inspect_fields = set(
+                tools["hao_reconciliation_inspect"].input_schema["properties"]
+            )
+            assert reconciliation_inspect_fields == {"case_id"}
+            reconciliation_resolve_fields = set(
+                tools["hao_reconciliation_resolve"].input_schema["properties"]
+            )
+            assert "confirmation" not in reconciliation_resolve_fields
+            assert reconciliation_resolve_fields == {"case_id", "disposition"}
+            reconciliation_retry_fields = set(
+                tools["hao_reconciliation_retry_with_delta"].input_schema["properties"]
+            )
+            assert "binding_id" not in reconciliation_retry_fields
+            assert "requested_capability" not in reconciliation_retry_fields
+            assert reconciliation_retry_fields == {
+                "case_id",
+                "expected_state_delta",
+                "authorization_target",
+                "action_arguments",
+            }
 
     asyncio.run(scenario())
 
