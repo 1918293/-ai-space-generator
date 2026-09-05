@@ -65,5 +65,11 @@ class TemporalWorkflowStarter:
         workflow_id = workflow_id.strip()
         if not workflow_id:
             raise ValueError("WORKFLOW_RUN_ID_REQUIRED")
-        handle = self._client.get_workflow_handle(workflow_id)
+        # String-ID attachment loses the workflow method's return annotation unless
+        # the result type is supplied explicitly. Without it, a process/API restart
+        # can deserialize DurableRunResult as a plain dict and break finalization.
+        handle = self._client.get_workflow_handle(
+            workflow_id,
+            result_type=DurableRunResult,
+        )
         return TemporalControlledRunHandle(handle, workflow_id)
