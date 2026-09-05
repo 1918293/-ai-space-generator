@@ -1,0 +1,131 @@
+name: Runtime v2 GCP identity probe
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-gcp-identity-probe
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve existing non-secret deployment identifiers
+        id: vars
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gcp-probe
+          python - <<'PY'
+          import json, os
+          keys = [
+              'GCP_PROJECT_ID',
+              'GCP_WIF_PROVIDER',
+              'GCP_DEPLOY_SERVICE_ACCOUNT',
+              'TF_STATE_BUCKET',
+              'TF_STATE_PREFIX',
+          ]
+          values = {key: os.environ.get(key, '') for key in keys}
+          missing = [key for key, value in values.items() if not value]
+          with open('/tmp/gcp-probe/variable_state.json', 'w') as fh:
+              json.dump(
+                  {
+                      'ready': not missing,
+                      'missing': missing,
+                      'configured': {key: bool(value) for key, value in values.items()},
+                      'project_id': values['GCP_PROJECT_ID'] or None,
+                      'deployment_principal': values['GCP_DEPLOY_SERVICE_ACCOUNT'] or None,
+                      'wif_provider': values['GCP_WIF_PROVIDER'] or None,
+                      'tf_state_bucket': values['TF_STATE_BUCKET'] or None,
+                      'tf_state_prefix': values['TF_STATE_PREFIX'] or None,
+                  },
+                  fh,
+                  indent=2,
+              )
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"ready={'true' if not missing else 'false'}\n")
+          PY
+
+      - name: Authenticate with existing GitHub OIDC to Google WIF
+        id: auth
+        if: steps.vars.outputs.ready == 'true'
+        continue-on-error: true
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/cloud-platform
+
+      - name: Read Resource Manager and Billing
+        if: steps.vars.outputs.ready == 'true' && steps.auth.outcome == 'success'
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          project_status=$(curl --silent --show-error --output /tmp/gcp-probe/project_search.json --write-out '%{http_code}' \
+            --get \
+            --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+            --data-urlencode "query=id:${GCP_PROJECT_ID}" \
+            'https://cloudresourcemanager.googleapis.com/v3/projects:search')
+          billing_status=$(curl --silent --show-error --output /tmp/gcp-probe/billing.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+            "https://cloudbilling.googleapis.com/v1/projects/${GCP_PROJECT_ID}/billingInfo")
+          printf '{"resource_manager_http":%s,"billing_http":%s}\n' "$project_status" "$billing_status" > /tmp/gcp-probe/http_status.json
+
+      - name: Finalize probe status
+        if: always()
+        shell: bash
+        env:
+          VARS_READY: ${{ steps.vars.outputs.ready }}
+          AUTH_OUTCOME: ${{ steps.auth.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path('/tmp/gcp-probe')
+          root.mkdir(exist_ok=True)
+          summary = {
+              'variables_ready': os.environ.get('VARS_READY') == 'true',
+              'wif_auth_outcome': os.environ.get('AUTH_OUTCOME') or 'not_attempted',
+              'mutation_performed': False,
+              'scope': 'read_only_target_identity_and_billing_discovery',
+          }
+          (root / 'summary.json').write_text(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload private probe evidence artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-v2-gcp-identity-probe
+          path: /tmp/gcp-probe
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Remove one-shot probe workflow
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/runtime-v2-gcp-identity-probe.yml
+          git config user.name 'hao-runtime-v2-bot'
+          git config user.email 'hao-runtime-v2-bot@users.noreply.github.com'
+          git commit -m 'EXP: close one-shot GCP identity probe'
+          git push origin HEAD:exp/runtime-v2-gcp-identity-probe
