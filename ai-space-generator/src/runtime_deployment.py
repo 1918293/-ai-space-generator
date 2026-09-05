@@ -280,6 +280,7 @@ async def build_api_app(values: dict[str, str]) -> Any:
     parent_plans = load_parent_task_plans(values)
     google_client = GoogleWorkspaceSheetsClient()
     persistence = build_postgres_persistence(settings.database_url)
+    reconciliation = PostgresReconciliationStore(settings.database_url)
     _initialize_operational_state(persistence, values)
 
     policy = GoogleAuthorityTaskPolicyProvider(google_client, specs)
@@ -309,6 +310,7 @@ async def build_api_app(values: dict[str, str]) -> Any:
         run_registry=persistence.run_registry,
         identity_policy=HaoMCPIdentityPolicy(settings.expected_hao_subject),
         parent_tasks=parent_tasks,
+        reconciliation_store=reconciliation,
     )
     bridge = (
         ObservableMCPControlBridge(base_bridge, telemetry)
