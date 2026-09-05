@@ -202,7 +202,6 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
   name                = "${var.name_prefix}-worker"
   location            = var.region
   deletion_protection = true
-  service_account     = google_service_account.worker.email
 
   scaling {
     scaling_mode          = "MANUAL"
@@ -215,6 +214,8 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
   }
 
   template {
+    service_account = google_service_account.worker.email
+
     vpc_access {
       egress = "PRIVATE_RANGES_ONLY"
 
