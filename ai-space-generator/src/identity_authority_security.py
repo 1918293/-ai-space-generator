@@ -8,7 +8,6 @@ import sqlite3
 import time
 from typing import Mapping, Protocol
 
-
 SCOPE_ACCESS = "hao:access"
 SCOPE_READ = "hao:read"
 SCOPE_EXECUTE = "hao:execute"
@@ -56,19 +55,15 @@ class AuthoritySnapshot:
     projection_ref: str = ""
 
     def fingerprint(self) -> str:
-        payload = json.dumps(
-            {
-                "mode": self.mode,
-                "task": self.task,
-                "operational_version": self.operational_version,
-                "authority_refs": list(self.authority_refs),
-                "authority_versions": list(self.authority_versions),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        return "sha256:" + sha256(payload).hexdigest()
+        material = {
+            "mode": self.mode,
+            "task": self.task,
+            "operational_version": self.operational_version,
+            "authority_refs": list(self.authority_refs),
+            "authority_versions": list(self.authority_versions),
+        }
+        payload = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
 
     def require_fresh(self, current: "AuthoritySnapshot") -> None:
         if self.fingerprint() != current.fingerprint():
@@ -91,25 +86,17 @@ class TaskPolicyProvider(Protocol):
 
 
 class SemanticAuthorityReader(Protocol):
-    """Direct read contract for canonical semantic Authority, never projection."""
-
     def read_snapshot(self, task: str) -> AuthoritySnapshot | None: ...
 
-    def read_task_policy(self, task: str) -> TaskPolicy | None: ...
 
-
-class HaoSemanticAuthorityAdapter(TaskPolicyProvider):
-    """Fail-closed adapter over a canonical Hao semantic Authority reader.
-
-    Projection references may be returned as display metadata on the snapshot,
-    but never participate in its authoritative fingerprint.
-    """
+class HaoSemanticAuthorityAdapter:
+    """Canonical semantic Authority adapter; projection metadata never becomes Authority."""
 
     def __init__(self, reader: SemanticAuthorityReader) -> None:
         self._reader = reader
 
     @staticmethod
-    def _validate_snapshot(snapshot: AuthoritySnapshot, task: str) -> AuthoritySnapshot:
+    def _validate(snapshot: AuthoritySnapshot, task: str) -> AuthoritySnapshot:
         if snapshot.task.strip() != task.strip():
             raise PermissionError("AUTHORITY_TASK_MISMATCH")
         if snapshot.operational_version < 1:
@@ -123,42 +110,31 @@ class HaoSemanticAuthorityAdapter(TaskPolicyProvider):
         return snapshot
 
     def snapshot(self, task: str) -> AuthoritySnapshot:
-        key = task.strip()
-        if not key:
+        task = task.strip()
+        if not task:
             raise ValueError("TASK_REQUIRED")
-        snapshot = self._reader.read_snapshot(key)
+        snapshot = self._reader.read_snapshot(task)
         if snapshot is None:
             raise PermissionError("SEMANTIC_AUTHORITY_UNAVAILABLE")
-        return self._validate_snapshot(snapshot, key)
+        return self._validate(snapshot, task)
 
     def readback(self, admitted: AuthoritySnapshot) -> AuthoritySnapshot:
         current = self.snapshot(admitted.task)
         admitted.require_fresh(current)
         return current
 
-    def get(self, task: str) -> TaskPolicy:
-        key = task.strip()
-        if not key:
-            raise ValueError("TASK_REQUIRED")
-        policy = self._reader.read_task_policy(key)
-        if policy is None:
-            raise PermissionError("TASK_POLICY_NOT_FOUND_IN_SEMANTIC_AUTHORITY")
-        if policy.task.strip() != key:
-            raise PermissionError("TASK_POLICY_AUTHORITY_MISMATCH")
-        if not policy.authority_sources or not policy.acceptance_criteria or not policy.required_gates:
-            raise PermissionError("TASK_POLICY_AUTHORITY_INCOMPLETE")
-        return policy
-
 
 class ConfiguredTaskPolicyProvider:
+    """Deployment-owned TaskPolicyProvider; the model cannot synthesize missing policy."""
+
     def __init__(self, raw_json: str) -> None:
         self._policies = _parse_task_policies(raw_json)
 
     def get(self, task: str) -> TaskPolicy:
-        key = task.strip()
-        if not key or key not in self._policies:
+        policy = self._policies.get(task.strip())
+        if policy is None:
             raise PermissionError("TASK_POLICY_NOT_CONFIGURED")
-        return self._policies[key]
+        return policy
 
 
 @dataclass(frozen=True)
@@ -170,18 +146,18 @@ class DeploymentAuthorityContracts:
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> "DeploymentAuthorityContracts":
         sheets = _required_json_object(values, "HAO_SHEETS_TARGETS_JSON")
-        policies_raw = str(values.get("HAO_TASK_POLICIES_JSON", "")).strip()
-        if not policies_raw:
+        raw_policies = str(values.get("HAO_TASK_POLICIES_JSON", "")).strip()
+        if not raw_policies:
             raise ValueError("MISSING_CONFIG:HAO_TASK_POLICIES_JSON")
-        policies = _parse_task_policies(policies_raw)
         parents = _required_json_object(values, "HAO_PARENT_TASK_PLANS_JSON")
+        policies = _parse_task_policies(raw_policies)
         _validate_sheets_targets(sheets)
         _validate_parent_plans(parents)
         return cls(sheets, policies, parents)
 
 
 class SQLiteIdentitySecurityStore:
-    """Durable semantic identity/replay state without persisting bearer credentials."""
+    """Reference durable owner/replay store; bearer credentials are never persisted."""
 
     def __init__(self, path: str) -> None:
         self._path = path
@@ -222,7 +198,7 @@ class SQLiteIdentitySecurityStore:
         token_fp = sha256(identity.token_id.encode("utf-8")).hexdigest()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT owner_subject, token_fingerprint FROM identity_sessions WHERE session_id = ?",
+                "SELECT owner_subject, token_fingerprint FROM identity_sessions WHERE session_id=?",
                 (session_id,),
             ).fetchone()
             if row is not None:
@@ -230,14 +206,14 @@ class SQLiteIdentitySecurityStore:
                     raise PermissionError("SESSION_IDENTITY_CONFLICT")
                 return
             conn.execute(
-                "INSERT INTO identity_sessions(session_id, owner_subject, token_fingerprint, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO identity_sessions VALUES (?, ?, ?, ?)",
                 (session_id, identity.subject, token_fp, int(time.time())),
             )
 
     def require_session(self, session_id: str, subject: str) -> None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT owner_subject FROM identity_sessions WHERE session_id = ?",
+                "SELECT owner_subject FROM identity_sessions WHERE session_id=?",
                 (session_id.strip(),),
             ).fetchone()
         if row is None:
@@ -250,16 +226,16 @@ class SQLiteIdentitySecurityStore:
         if not run_id or not owner_subject:
             raise ValueError("RUN_OWNER_REQUIRED")
         with self._connect() as conn:
-            row = conn.execute("SELECT owner_subject FROM run_owners WHERE run_id = ?", (run_id,)).fetchone()
+            row = conn.execute("SELECT owner_subject FROM run_owners WHERE run_id=?", (run_id,)).fetchone()
             if row is not None:
                 if row["owner_subject"] != owner_subject:
                     raise PermissionError("RUN_OWNER_CONFLICT")
                 return
-            conn.execute("INSERT INTO run_owners(run_id, owner_subject) VALUES (?, ?)", (run_id, owner_subject))
+            conn.execute("INSERT INTO run_owners VALUES (?, ?)", (run_id, owner_subject))
 
     def require_run_owner(self, run_id: str, owner_subject: str) -> None:
         with self._connect() as conn:
-            row = conn.execute("SELECT owner_subject FROM run_owners WHERE run_id = ?", (run_id.strip(),)).fetchone()
+            row = conn.execute("SELECT owner_subject FROM run_owners WHERE run_id=?", (run_id.strip(),)).fetchone()
         if row is None:
             raise PermissionError("UNKNOWN_RUN_IDENTITY")
         if row["owner_subject"] != owner_subject.strip():
@@ -274,14 +250,14 @@ class SQLiteIdentitySecurityStore:
         scope: str,
         authority_fingerprint: str,
     ) -> None:
-        fields = [replay_kind, artifact_id, owner_subject, scope, authority_fingerprint]
-        if any(not str(item).strip() for item in fields):
+        values = tuple(item.strip() for item in (replay_kind, artifact_id, owner_subject, scope, authority_fingerprint))
+        if any(not item for item in values):
             raise ValueError("REPLAY_ARTIFACT_FIELDS_REQUIRED")
         try:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO replay_ledger(replay_kind, artifact_id, owner_subject, scope, authority_fingerprint) VALUES (?, ?, ?, ?, ?)",
-                    tuple(str(item).strip() for item in fields),
+                    values,
                 )
         except sqlite3.IntegrityError as exc:
             raise PermissionError("REPLAY_ARTIFACT_ALREADY_REGISTERED") from exc
@@ -299,7 +275,7 @@ class SQLiteIdentitySecurityStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT * FROM replay_ledger WHERE replay_kind = ? AND artifact_id = ?",
+                "SELECT * FROM replay_ledger WHERE replay_kind=? AND artifact_id=?",
                 (replay_kind.strip(), artifact_id.strip()),
             ).fetchone()
             if row is None:
@@ -312,11 +288,11 @@ class SQLiteIdentitySecurityStore:
                 raise PermissionError("REPLAY_ARTIFACT_SCOPE_MISMATCH")
             if row["authority_fingerprint"] != authority_fingerprint.strip():
                 raise PermissionError("REPLAY_ARTIFACT_STALE_AUTHORITY")
-            conn.execute(
-                "UPDATE replay_ledger SET consumed = 1 WHERE replay_kind = ? AND artifact_id = ? AND consumed = 0",
+            cursor = conn.execute(
+                "UPDATE replay_ledger SET consumed=1 WHERE replay_kind=? AND artifact_id=? AND consumed=0",
                 (replay_kind.strip(), artifact_id.strip()),
             )
-            if conn.total_changes != 1:
+            if cursor.rowcount != 1:
                 raise PermissionError("REPLAY_ARTIFACT_CONSUME_RACE")
             conn.commit()
         except Exception:
@@ -328,7 +304,7 @@ class SQLiteIdentitySecurityStore:
     def stored_session_material(self, session_id: str) -> tuple[str, str]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT owner_subject, token_fingerprint FROM identity_sessions WHERE session_id = ?",
+                "SELECT owner_subject, token_fingerprint FROM identity_sessions WHERE session_id=?",
                 (session_id.strip(),),
             ).fetchone()
         if row is None:
@@ -367,9 +343,9 @@ class HaoSemanticSecurityPolicy:
             raise PermissionError("TOKEN_REVOKED_OR_UNIDENTIFIED")
         if SCOPE_ACCESS not in identity.scopes:
             raise PermissionError(f"MISSING_SCOPE:{SCOPE_ACCESS}")
-        required = _PERMISSION_SCOPE[permission]
-        if required != SCOPE_ACCESS and required not in identity.scopes:
-            raise PermissionError(f"MISSING_SCOPE:{required}")
+        required_scope = _PERMISSION_SCOPE[permission]
+        if required_scope != SCOPE_ACCESS and required_scope not in identity.scopes:
+            raise PermissionError(f"MISSING_SCOPE:{required_scope}")
         if session_id:
             self._store.require_session(session_id, identity.subject)
         if run_id:
@@ -394,7 +370,7 @@ def _required_json_object(values: Mapping[str, str], key: str) -> dict[str, obje
     return parsed
 
 
-def _as_str_tuple(value: object, code: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+def _str_tuple(value: object, code: str, *, allow_empty: bool = False) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise ValueError(code)
     result = tuple(str(item).strip() for item in value if str(item).strip())
@@ -412,34 +388,33 @@ def _parse_task_policies(raw_json: str) -> dict[str, TaskPolicy]:
         raise ValueError("CONFIG_OBJECT_REQUIRED:HAO_TASK_POLICIES_JSON")
     result: dict[str, TaskPolicy] = {}
     for key, raw in parsed.items():
-        task_key = str(key).strip()
-        if not task_key or not isinstance(raw, dict):
+        task = str(key).strip()
+        if not task or not isinstance(raw, dict):
             raise ValueError("TASK_POLICY_OBJECT_REQUIRED")
-        declared_task = str(raw.get("task", task_key)).strip()
-        if declared_task != task_key:
+        if str(raw.get("task", task)).strip() != task:
             raise ValueError("TASK_POLICY_KEY_TASK_MISMATCH")
-        result[task_key] = TaskPolicy(
-            task=task_key,
-            authority_sources=_as_str_tuple(raw.get("authority_sources"), "TASK_POLICY_AUTHORITY_SOURCES_REQUIRED"),
-            acceptance_criteria=_as_str_tuple(raw.get("acceptance_criteria"), "TASK_POLICY_ACCEPTANCE_CRITERIA_REQUIRED"),
-            required_gates=_as_str_tuple(raw.get("required_gates"), "TASK_POLICY_REQUIRED_GATES_REQUIRED"),
+        result[task] = TaskPolicy(
+            task=task,
+            authority_sources=_str_tuple(raw.get("authority_sources"), "TASK_POLICY_AUTHORITY_SOURCES_REQUIRED"),
+            acceptance_criteria=_str_tuple(raw.get("acceptance_criteria"), "TASK_POLICY_ACCEPTANCE_CRITERIA_REQUIRED"),
+            required_gates=_str_tuple(raw.get("required_gates"), "TASK_POLICY_REQUIRED_GATES_REQUIRED"),
             hao_acceptance_required=bool(raw.get("hao_acceptance_required", False)),
-            required_assurance_tags=_as_str_tuple(raw.get("required_assurance_tags", []), "TASK_POLICY_REQUIRED_ASSURANCE_TAGS_INVALID", allow_empty=True),
-            forbidden_assurance_tags=_as_str_tuple(raw.get("forbidden_assurance_tags", []), "TASK_POLICY_FORBIDDEN_ASSURANCE_TAGS_INVALID", allow_empty=True),
+            required_assurance_tags=_str_tuple(raw.get("required_assurance_tags", []), "TASK_POLICY_REQUIRED_ASSURANCE_TAGS_INVALID", allow_empty=True),
+            forbidden_assurance_tags=_str_tuple(raw.get("forbidden_assurance_tags", []), "TASK_POLICY_FORBIDDEN_ASSURANCE_TAGS_INVALID", allow_empty=True),
         )
     return result
 
 
-def _validate_sheets_targets(parsed: Mapping[str, object]) -> None:
-    for binding_id, raw in parsed.items():
+def _validate_sheets_targets(targets: Mapping[str, object]) -> None:
+    for binding_id, raw in targets.items():
         if not str(binding_id).strip() or not isinstance(raw, dict):
             raise ValueError("SHEETS_TARGET_OBJECT_REQUIRED")
         if not str(raw.get("spreadsheet_id", "")).strip() or not str(raw.get("range_a1", "")).strip():
             raise ValueError("SHEETS_TARGET_FIELDS_REQUIRED")
 
 
-def _validate_parent_plans(parsed: Mapping[str, object]) -> None:
-    for plan_id, raw in parsed.items():
+def _validate_parent_plans(plans: Mapping[str, object]) -> None:
+    for plan_id, raw in plans.items():
         if not str(plan_id).strip() or not isinstance(raw, dict):
             raise ValueError("PARENT_PLAN_OBJECT_REQUIRED")
         if not str(raw.get("task", "")).strip():
