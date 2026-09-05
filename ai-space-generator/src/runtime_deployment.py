@@ -25,6 +25,13 @@ from .mcp_control_bridge import HaoMCPIdentityPolicy, MCPControlBridge
 from .mcp_control_server import SCOPE_ACCESS, build_mcp_control_server
 from .mcp_http import build_mcp_http_app
 from .oauth_verifier import JWKSAccessTokenVerifier
+from .parent_task_production import (
+    ParentChildPlan,
+    ParentTaskPlan,
+    ParentTaskPlanCatalog,
+    PostgresParentTaskStore,
+    ProductionParentTaskService,
+)
 from .postgres_persistence import build_postgres_persistence
 from .production_execution import ProductionExecutionService
 from .reconciliation_persistence import (
@@ -148,6 +155,53 @@ def load_task_policies(values: dict[str, str]) -> tuple[ConfiguredTaskPolicySpec
     return tuple(specs)
 
 
+def load_parent_task_plans(values: dict[str, str]) -> ParentTaskPlanCatalog:
+    raw = _json_env(values, "HAO_PARENT_TASK_PLANS_JSON")
+    if not isinstance(raw, list):
+        raise ValueError("HAO_PARENT_TASK_PLANS_LIST_REQUIRED")
+    plans: list[ParentTaskPlan] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("HAO_PARENT_TASK_PLAN_OBJECT_REQUIRED")
+        raw_children = item.get("children", [])
+        if not isinstance(raw_children, list):
+            raise ValueError("HAO_PARENT_TASK_CHILDREN_LIST_REQUIRED")
+        children: list[ParentChildPlan] = []
+        for child in raw_children:
+            if not isinstance(child, dict):
+                raise ValueError("HAO_PARENT_TASK_CHILD_OBJECT_REQUIRED")
+            children.append(
+                ParentChildPlan(
+                    slot_id=str(child.get("slot_id", "")).strip(),
+                    requested_capability=str(
+                        child.get("requested_capability", "")
+                    ).strip(),
+                    binding_id=str(child.get("binding_id", "")).strip(),
+                    authorization_target=str(
+                        child.get("authorization_target", "")
+                    ).strip(),
+                )
+            )
+        plans.append(
+            ParentTaskPlan(
+                plan_id=str(item.get("plan_id", "")).strip(),
+                task=str(item.get("task", "")).strip(),
+                children=tuple(children),
+                required_gate_ids=tuple(
+                    str(value).strip()
+                    for value in item.get("required_gate_ids", [])
+                    if str(value).strip()
+                ),
+                hao_acceptance_required=bool(
+                    item.get("hao_acceptance_required", False)
+                ),
+            )
+        )
+    if not plans:
+        raise ValueError("HAO_PARENT_TASK_PLANS_REQUIRED")
+    return ParentTaskPlanCatalog(plans)
+
+
 def action_catalog_for_targets(targets: tuple[SheetsMutationTarget, ...]) -> ActionCatalog:
     return ActionCatalog(
         ActionBinding(
@@ -223,6 +277,7 @@ async def build_api_app(values: dict[str, str]) -> Any:
     telemetry = _telemetry(settings)
     targets = load_sheets_targets(values)
     specs = load_task_policies(values)
+    parent_plans = load_parent_task_plans(values)
     google_client = GoogleWorkspaceSheetsClient()
     persistence = build_postgres_persistence(settings.database_url)
     _initialize_operational_state(persistence, values)
@@ -243,11 +298,17 @@ async def build_api_app(values: dict[str, str]) -> Any:
         ),
         PostgresFinalizationIssueStore(settings.database_url),
     )
+    parent_tasks = ProductionParentTaskService(
+        production=production,
+        store=PostgresParentTaskStore(settings.database_url),
+        plans=parent_plans,
+    )
     base_bridge = MCPControlBridge(
         production=production,
         operational_state=persistence.operational_state,
         run_registry=persistence.run_registry,
         identity_policy=HaoMCPIdentityPolicy(settings.expected_hao_subject),
+        parent_tasks=parent_tasks,
     )
     bridge = (
         ObservableMCPControlBridge(base_bridge, telemetry)
