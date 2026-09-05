@@ -90,6 +90,66 @@ class TaskPolicyProvider(Protocol):
     def get(self, task: str) -> TaskPolicy: ...
 
 
+class SemanticAuthorityReader(Protocol):
+    """Direct read contract for canonical semantic Authority, never projection."""
+
+    def read_snapshot(self, task: str) -> AuthoritySnapshot | None: ...
+
+    def read_task_policy(self, task: str) -> TaskPolicy | None: ...
+
+
+class HaoSemanticAuthorityAdapter(TaskPolicyProvider):
+    """Fail-closed adapter over a canonical Hao semantic Authority reader.
+
+    Projection references may be returned as display metadata on the snapshot,
+    but never participate in its authoritative fingerprint.
+    """
+
+    def __init__(self, reader: SemanticAuthorityReader) -> None:
+        self._reader = reader
+
+    @staticmethod
+    def _validate_snapshot(snapshot: AuthoritySnapshot, task: str) -> AuthoritySnapshot:
+        if snapshot.task.strip() != task.strip():
+            raise PermissionError("AUTHORITY_TASK_MISMATCH")
+        if snapshot.operational_version < 1:
+            raise PermissionError("AUTHORITY_OPERATIONAL_VERSION_INVALID")
+        if not snapshot.mode.strip() or not snapshot.authority_refs or not snapshot.authority_versions:
+            raise PermissionError("AUTHORITY_SNAPSHOT_INCOMPLETE")
+        if len(snapshot.authority_refs) != len(snapshot.authority_versions):
+            raise PermissionError("AUTHORITY_VERSION_SET_MISMATCH")
+        if any(not item.strip() for item in snapshot.authority_refs + snapshot.authority_versions):
+            raise PermissionError("AUTHORITY_SNAPSHOT_INCOMPLETE")
+        return snapshot
+
+    def snapshot(self, task: str) -> AuthoritySnapshot:
+        key = task.strip()
+        if not key:
+            raise ValueError("TASK_REQUIRED")
+        snapshot = self._reader.read_snapshot(key)
+        if snapshot is None:
+            raise PermissionError("SEMANTIC_AUTHORITY_UNAVAILABLE")
+        return self._validate_snapshot(snapshot, key)
+
+    def readback(self, admitted: AuthoritySnapshot) -> AuthoritySnapshot:
+        current = self.snapshot(admitted.task)
+        admitted.require_fresh(current)
+        return current
+
+    def get(self, task: str) -> TaskPolicy:
+        key = task.strip()
+        if not key:
+            raise ValueError("TASK_REQUIRED")
+        policy = self._reader.read_task_policy(key)
+        if policy is None:
+            raise PermissionError("TASK_POLICY_NOT_FOUND_IN_SEMANTIC_AUTHORITY")
+        if policy.task.strip() != key:
+            raise PermissionError("TASK_POLICY_AUTHORITY_MISMATCH")
+        if not policy.authority_sources or not policy.acceptance_criteria or not policy.required_gates:
+            raise PermissionError("TASK_POLICY_AUTHORITY_INCOMPLETE")
+        return policy
+
+
 class ConfiguredTaskPolicyProvider:
     def __init__(self, raw_json: str) -> None:
         self._policies = _parse_task_policies(raw_json)
