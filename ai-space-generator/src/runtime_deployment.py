@@ -36,10 +36,12 @@ from .parent_task_production import (
 )
 from .postgres_persistence import build_postgres_persistence
 from .production_execution import ProductionExecutionService
+from .provider_reconciliation import TrustedDriveReconciliationInspector
 from .reconciliation_persistence import (
     PostgresReconciliationStore,
     ReconciliationAwareBroker,
 )
+from .reconciliation_retry import PostgresReconciliationRetryStore
 from .runtime_config import RuntimeRole, RuntimeSettings
 from .runtime_lifecycle import RuntimeLifecycle, ShutdownSignalController
 from .runtime_migrations import verify_postgres_schema
@@ -160,6 +162,14 @@ def load_task_policies(values: dict[str, str]) -> tuple[ConfiguredTaskPolicySpec
     return tuple(specs)
 
 
+def _dependency_slots(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("HAO_PARENT_TASK_DEPENDENCIES_LIST_REQUIRED")
+    return tuple(str(value).strip() for value in raw if str(value).strip())
+
+
 def load_parent_task_plans(values: dict[str, str]) -> ParentTaskPlanCatalog:
     raw = _json_env(values, "HAO_PARENT_TASK_PLANS_JSON")
     if not isinstance(raw, list):
@@ -185,6 +195,7 @@ def load_parent_task_plans(values: dict[str, str]) -> ParentTaskPlanCatalog:
                     authorization_target=str(
                         child.get("authorization_target", "")
                     ).strip(),
+                    depends_on_slots=_dependency_slots(child.get("depends_on_slots", [])),
                 )
             )
         plans.append(
@@ -306,11 +317,21 @@ async def build_api_app(values: dict[str, str]) -> Any:
     specs = load_task_policies(values)
     parent_plans = load_parent_task_plans(values)
     google_client = GoogleWorkspaceSheetsClient()
+    resolver = ConfiguredSheetsCommandResolver(targets)
     persistence = build_postgres_persistence(
         settings.database_url,
         initialize_schema=False,
     )
     reconciliation = PostgresReconciliationStore(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    reconciliation_inspector = TrustedDriveReconciliationInspector(
+        resolver=resolver,
+        client=google_client,
+        store=reconciliation,
+    )
+    reconciliation_retry_store = PostgresReconciliationRetryStore(
         settings.database_url,
         initialize_schema=False,
     )
@@ -350,6 +371,8 @@ async def build_api_app(values: dict[str, str]) -> Any:
         identity_policy=HaoMCPIdentityPolicy(settings.expected_hao_subject),
         parent_tasks=parent_tasks,
         reconciliation_store=reconciliation,
+        reconciliation_inspector=reconciliation_inspector,
+        reconciliation_retry_store=reconciliation_retry_store,
     )
     bridge = (
         ObservableMCPControlBridge(base_bridge, telemetry)
@@ -428,7 +451,8 @@ async def build_api_app(values: dict[str, str]) -> Any:
     async def lifespan(app: Any):
         del app
         try:
-            yield
+            async with mcp.session_manager.run():
+                yield
         finally:
             lifecycle.begin_shutdown()
             if telemetry is not None:
