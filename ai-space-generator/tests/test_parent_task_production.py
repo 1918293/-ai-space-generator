@@ -84,7 +84,6 @@ class FakeProduction:
 
     async def submit(self, state, request):
         self.submit_calls += 1
-        action_id = f"{request.run_id}:A0001:{request.intent.binding_id}"
         record = ExecutionRecord(
             run_id=request.run_id,
             task=state.task,
@@ -187,6 +186,34 @@ def test_transient_awaiting_hao_is_projected_not_frozen_as_child_outcome(tmp_pat
     refreshed = asyncio.run(scenario())
     assert refreshed.phase == ParentTaskPhase.AWAITING_HAO
     assert refreshed.child_outcomes == ()
+
+
+def test_unsynced_child_requires_reconciliation_without_finalize_or_replay(tmp_path):
+    async def scenario():
+        runtime, _, production, _ = service(tmp_path)
+        runtime.start(state(), plan_id="formal.two-step", task_run_id="TASK-UNSYNCED")
+        await runtime.submit_child(
+            state(), task_run_id="TASK-UNSYNCED", slot_id="write"
+        )
+        production.handles["TASK-UNSYNCED:C001"].record = ExecutionRecord(
+            run_id="TASK-UNSYNCED:C001",
+            task=state().task,
+            mode=Mode.EXP,
+            goal_valid=True,
+            acceptance_criteria=("child",),
+            phase=RunPhase.UNSYNCED,
+            failure_code="UNKNOWN_EFFECT_REQUIRES_RECONCILIATION",
+        )
+        before_submit_calls = production.submit_calls
+        refreshed = await runtime.refresh(state(), task_run_id="TASK-UNSYNCED")
+        return refreshed, production, before_submit_calls
+
+    refreshed, production, before_submit_calls = asyncio.run(scenario())
+    assert refreshed.phase == ParentTaskPhase.RECONCILIATION_REQUIRED
+    assert refreshed.failure_code == "CHILD_RECONCILIATION_REQUIRED"
+    assert refreshed.child_outcomes == ()
+    assert production.finalize_calls == 0
+    assert production.submit_calls == before_submit_calls
 
 
 def test_parent_closes_only_after_every_required_child_is_closed_and_authoritative(tmp_path):
