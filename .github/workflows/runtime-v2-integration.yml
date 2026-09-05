@@ -5,6 +5,7 @@ on:
     branches:
       - exp/runtime-v2-integration-current
       - exp/runtime-v2-deployment-preflight-fixes
+      - exp/runtime-v2-role-scoped-secrets
   workflow_dispatch:
 
 permissions:
