@@ -26,6 +26,15 @@ from src.production_execution import (
     ProductionExecutionResult,
     ProductionSubmissionResult,
 )
+from src.reconciliation import (
+    ReconciliationCase,
+    ReconciliationDisposition,
+    ReconciliationEvidence,
+    ReconciliationEvidenceKind,
+    ReconciliationKind,
+    ReconciliationPhase,
+    add_reconciliation_evidence,
+)
 
 
 class Handle:
@@ -50,7 +59,7 @@ class FakeProduction:
             authorization_scope = "SEND_EXTERNAL:" + request.intent.authorization_target
             phase = RunPhase.AWAITING_HAO
         action = ActionProposal(
-            action_id=workflow_id + ":A0001",
+            action_id=workflow_id + ":A0001:" + request.intent.binding_id,
             archetype=ActionArchetype.PUBLISH if authorization_scope else ActionArchetype.READ,
             externality=(
                 ActionExternality.EXTERNAL_REVERSIBLE
@@ -151,7 +160,24 @@ class FakeParentTasks:
         )
 
 
-def setup_bridge(tmp_path, *, with_parent_tasks=False):
+class FakeReconciliationStore:
+    def __init__(self):
+        self.cases = {}
+
+    def get(self, case_id):
+        return self.cases.get(case_id)
+
+    def save(self, case):
+        self.cases[case.case_id] = case
+        return case
+
+
+def setup_bridge(
+    tmp_path,
+    *,
+    with_parent_tasks=False,
+    reconciliation_store=None,
+):
     state_store = SQLiteOperationalStateStore(str(tmp_path / "state.sqlite"))
     state_store.initialize(mode=Mode.EXP, task="MCP controlled task")
     production = FakeProduction()
@@ -161,6 +187,7 @@ def setup_bridge(tmp_path, *, with_parent_tasks=False):
         run_registry=SQLiteMCPRunRegistry(str(tmp_path / "mcp-runs.sqlite")),
         identity_policy=HaoMCPIdentityPolicy("hao-subject"),
         parent_tasks=FakeParentTasks(production) if with_parent_tasks else None,
+        reconciliation_store=reconciliation_store,
     )
     return bridge, production
 
@@ -247,8 +274,6 @@ def test_authorization_requires_human_confirmation_and_exact_runtime_scope(tmp_p
             )
         assert production.signals == []
 
-        # hao:approve is the complete advertised capability. A successful signal
-        # must not fail its response by secretly requiring hao:read afterwards.
         status = await bridge.authorize_after_human_confirmation(
             hao("hao:approve"),
             workflow_id=view.workflow_id,
@@ -302,6 +327,120 @@ def test_parent_child_registers_shared_workflow_and_reuses_existing_authorizatio
                 "",
             )
         ]
+
+    asyncio.run(scenario())
+
+
+def test_reconciliation_is_owner_bound_evidence_gated_and_retry_requires_changed_delta(tmp_path):
+    reconciliation = FakeReconciliationStore()
+    bridge, production = setup_bridge(
+        tmp_path,
+        reconciliation_store=reconciliation,
+    )
+
+    async def scenario():
+        original = await bridge.submit(
+            hao("hao:execute"),
+            requested_capability="external_message",
+            binding_id="message.send",
+            expected_state_delta="old expected state",
+            authorization_target="recipient-1",
+        )
+        original_record = production.records[original.workflow_id]
+        production.records[original.workflow_id] = replace(
+            original_record,
+            phase=RunPhase.UNSYNCED,
+            failure_code="UNKNOWN_EFFECT_REQUIRES_RECONCILIATION",
+        )
+        case = ReconciliationCase(
+            case_id="RECON-MCP-1",
+            run_id=original.workflow_id,
+            action_id=original_record.action.action_id,
+            kind=ReconciliationKind.UNKNOWN_EFFECT,
+            effect_may_have_occurred=True,
+        )
+        reconciliation.save(case)
+
+        inspected = bridge.reconciliation_inspect(
+            hao("hao:read"), case_id=case.case_id
+        )
+        assert inspected.phase == ReconciliationPhase.OPEN.value
+        assert inspected.effect_may_have_occurred is True
+
+        with pytest.raises(ValueError, match="RECONCILIATION_NOT_RESOLVED"):
+            await bridge.reconciliation_retry_with_delta(
+                hao("hao:execute"),
+                case_id=case.case_id,
+                expected_state_delta="new expected state",
+            )
+
+        with pytest.raises(PermissionError, match="HUMAN_CONFIRMATION_REQUIRED"):
+            bridge.reconciliation_resolve_after_human_confirmation(
+                hao("hao:approve"),
+                case_id=case.case_id,
+                disposition="ADOPT_VERIFIED_STATE",
+                human_confirmed=False,
+            )
+
+        insufficient = bridge.reconciliation_resolve_after_human_confirmation(
+            hao("hao:approve"),
+            case_id=case.case_id,
+            disposition="ADOPT_VERIFIED_STATE",
+            human_confirmed=True,
+        )
+        assert insufficient.phase == ReconciliationPhase.OPEN.value
+        assert insufficient.resolution_code == "ADOPTION_REQUIRES_VERIFIED_READBACK"
+
+        verified = reconciliation.get(case.case_id)
+        verified = add_reconciliation_evidence(
+            verified,
+            ReconciliationEvidence(
+                "READBACK-1",
+                ReconciliationEvidenceKind.STATE_READBACK,
+                True,
+                "trusted-provider-readback",
+            ),
+        )
+        verified = add_reconciliation_evidence(
+            verified,
+            ReconciliationEvidence(
+                "VERIFY-1",
+                ReconciliationEvidenceKind.VERIFICATION_PASS,
+                True,
+                "runtime-verifier",
+            ),
+        )
+        reconciliation.save(verified)
+
+        resolved = bridge.reconciliation_resolve_after_human_confirmation(
+            hao("hao:approve"),
+            case_id=case.case_id,
+            disposition=ReconciliationDisposition.ADOPT_VERIFIED_STATE.value,
+            human_confirmed=True,
+        )
+        assert resolved.phase == ReconciliationPhase.RESOLVED.value
+        assert resolved.disposition == ReconciliationDisposition.ADOPT_VERIFIED_STATE.value
+
+        with pytest.raises(ValueError, match="RECONCILIATION_RETRY_REQUIRES_CHANGED_DELTA"):
+            await bridge.reconciliation_retry_with_delta(
+                hao("hao:execute"),
+                case_id=case.case_id,
+                expected_state_delta="old expected state",
+            )
+
+        retried = await bridge.reconciliation_retry_with_delta(
+            hao("hao:execute"),
+            case_id=case.case_id,
+            expected_state_delta="new expected state",
+            authorization_target="recipient-2",
+        )
+        retried_record = production.records[retried.workflow_id]
+        assert retried.workflow_id != original.workflow_id
+        assert retried.phase == RunPhase.AWAITING_HAO.value
+        assert retried_record.action.capability == original_record.action.capability
+        assert retried_record.action.action_id.endswith(":message.send")
+        assert retried_record.action.expected_state_delta == "new expected state"
+        assert retried.authorization_scope == "SEND_EXTERNAL:recipient-2"
 
     asyncio.run(scenario())
 
