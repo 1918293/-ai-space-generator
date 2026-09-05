@@ -12,6 +12,11 @@ class ObservableMCPControlBridge:
         self._bridge = bridge
         self._telemetry = telemetry
 
+    def __getattr__(self, name: str) -> Any:
+        # Keep newly added control-plane methods reachable through the telemetry
+        # decorator instead of silently creating a second, non-observed bridge.
+        return getattr(self._bridge, name)
+
     def operational_context(self, principal: Any) -> dict[str, object]:
         return self._bridge.operational_context(principal)
 
