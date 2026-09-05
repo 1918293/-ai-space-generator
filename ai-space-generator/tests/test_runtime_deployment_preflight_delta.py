@@ -203,8 +203,8 @@ def test_production_env_example_tracks_schema_bootstrap_and_secret_rotation_cont
     body = env_path.read_text(encoding="utf-8")
     assert f"HAO_DATABASE_SCHEMA_VERSION={CURRENT_RUNTIME_SCHEMA_VERSION}" in body
     assert "HAO_INITIAL_MODE=EXP" in body
-    assert "HAO_INITIAL_TASK=<deployment-owned-initial-task>" in body
-    assert "HAO_ATTESTATION_PREVIOUS_KEYS_JSON=<secret-manager-injected-json-or-empty-object>" in body
-    assert '"HAO_ATTESTATION_PREVIOUS_KEYS_JSON":"projects/<project>/secrets/completion-previous-keys/versions/<n>"' in body
-    assert "HAO_DATABASE_URL=postgresql://<runtime-user>@<cloud-sql>/runtime" in body
-    assert "password-bearing HAO_DATABASE_URL" in body
+    assert "HAO_INITIAL_TASK=<deployment-seeded-task>" in body
+    assert "HAO_ATTESTATION_PREVIOUS_KEYS_JSON={}" in body
+    assert "add HAO_ATTESTATION_PREVIOUS_KEYS_JSON to the numeric binding map" in body
+    assert "HAO_DATABASE_URL=postgresql://<database-user>@<cloud-sql>/runtime" in body
+    assert "If a password is embedded in HAO_DATABASE_URL" in body
