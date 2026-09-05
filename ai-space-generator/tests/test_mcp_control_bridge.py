@@ -1,8 +1,11 @@
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+from src.action_catalog import ModelActionIntent
+from src.control_gateway import ModelIngressRequest
 from src.execution_control import (
     ActionArchetype,
     ActionExternality,
@@ -98,7 +101,57 @@ class FakeProduction:
         )
 
 
-def setup_bridge(tmp_path):
+class FakeParentTasks:
+    def __init__(self, production):
+        self.production = production
+
+    def start(self, state, *, plan_id):
+        assert plan_id == "parent.send"
+        assert state.task == "MCP controlled task"
+        return SimpleNamespace(
+            task_run_id="TASK-PARENT-1",
+            phase=SimpleNamespace(value="OPEN"),
+            child_slots=(SimpleNamespace(slot_id="send"),),
+        )
+
+    async def submit_child(
+        self,
+        state,
+        *,
+        task_run_id,
+        slot_id,
+        expected_state_delta="",
+        arguments=None,
+    ):
+        assert task_run_id == "TASK-PARENT-1"
+        assert slot_id == "send"
+        run_id = task_run_id + ":C001"
+        submission = await self.production.submit(
+            state,
+            ModelIngressRequest(
+                run_id=run_id,
+                sequence=1,
+                intent=ModelActionIntent(
+                    intent_id="INTENT-PARENT-1",
+                    requested_capability="external_message",
+                    binding_id="message.send",
+                    expected_state_delta=expected_state_delta,
+                    authorization_target="recipient-parent",
+                    arguments=tuple((str(k), str(v)) for k, v in (arguments or {}).items()),
+                ),
+            ),
+        )
+        return SimpleNamespace(
+            task_run_id=task_run_id,
+            slot_id=slot_id,
+            workflow_id=submission.pending.handle.workflow_id,
+            action_id=run_id + ":A0001:message.send",
+            accepted=True,
+            code=submission.code,
+        )
+
+
+def setup_bridge(tmp_path, *, with_parent_tasks=False):
     state_store = SQLiteOperationalStateStore(str(tmp_path / "state.sqlite"))
     state_store.initialize(mode=Mode.EXP, task="MCP controlled task")
     production = FakeProduction()
@@ -107,6 +160,7 @@ def setup_bridge(tmp_path):
         operational_state=state_store,
         run_registry=SQLiteMCPRunRegistry(str(tmp_path / "mcp-runs.sqlite")),
         identity_policy=HaoMCPIdentityPolicy("hao-subject"),
+        parent_tasks=FakeParentTasks(production) if with_parent_tasks else None,
     )
     return bridge, production
 
@@ -175,7 +229,7 @@ def test_authorization_requires_human_confirmation_and_exact_runtime_scope(tmp_p
 
         with pytest.raises(PermissionError, match="HUMAN_CONFIRMATION_REQUIRED"):
             await bridge.authorize_after_human_confirmation(
-                hao("hao:approve", "hao:read"),
+                hao("hao:approve"),
                 workflow_id=view.workflow_id,
                 scope=view.authorization_scope,
                 approved=True,
@@ -185,7 +239,7 @@ def test_authorization_requires_human_confirmation_and_exact_runtime_scope(tmp_p
 
         with pytest.raises(PermissionError, match="AUTHORIZATION_SCOPE_MISMATCH"):
             await bridge.authorize_after_human_confirmation(
-                hao("hao:approve", "hao:read"),
+                hao("hao:approve"),
                 workflow_id=view.workflow_id,
                 scope="SEND_EXTERNAL:someone-else",
                 approved=True,
@@ -193,8 +247,10 @@ def test_authorization_requires_human_confirmation_and_exact_runtime_scope(tmp_p
             )
         assert production.signals == []
 
+        # hao:approve is the complete advertised capability. A successful signal
+        # must not fail its response by secretly requiring hao:read afterwards.
         status = await bridge.authorize_after_human_confirmation(
-            hao("hao:approve", "hao:read"),
+            hao("hao:approve"),
             workflow_id=view.workflow_id,
             scope=view.authorization_scope,
             approved=True,
@@ -203,6 +259,49 @@ def test_authorization_requires_human_confirmation_and_exact_runtime_scope(tmp_p
         )
         assert len(production.signals) == 1
         assert status.phase == RunPhase.CLOSED.value
+
+    asyncio.run(scenario())
+
+
+def test_parent_child_registers_shared_workflow_and_reuses_existing_authorization_path(tmp_path):
+    bridge, production = setup_bridge(tmp_path, with_parent_tasks=True)
+
+    async def scenario():
+        opened = bridge.parent_start(
+            hao("hao:execute"),
+            plan_id="parent.send",
+        )
+        assert opened.task_run_id == "TASK-PARENT-1"
+        assert opened.phase == "OPEN"
+        assert opened.child_slots == ("send",)
+
+        child = await bridge.parent_submit_child(
+            hao("hao:execute"),
+            task_run_id=opened.task_run_id,
+            slot_id="send",
+            expected_state_delta="send one parent-controlled message",
+        )
+        assert child.accepted is True
+        assert child.workflow_id == "TASK-PARENT-1:C001"
+        assert child.phase == RunPhase.AWAITING_HAO.value
+        assert child.authorization_scope == "SEND_EXTERNAL:recipient-parent"
+
+        status = await bridge.authorize_after_human_confirmation(
+            hao("hao:approve"),
+            workflow_id=child.workflow_id,
+            scope=child.authorization_scope,
+            approved=True,
+            human_confirmed=True,
+        )
+        assert status.phase == RunPhase.CLOSED.value
+        assert production.signals == [
+            (
+                "TASK-PARENT-1:C001",
+                "SEND_EXTERNAL:recipient-parent",
+                True,
+                "",
+            )
+        ]
 
     asyncio.run(scenario())
 
