@@ -13,13 +13,13 @@ variables {
   deployment_id           = "test-deployment"
   temporal_worker_version = "test-worker-v1"
 
-  public_mcp_url      = "https://runtime.example.invalid/mcp"
-  mcp_allowed_hosts   = "runtime.example.invalid"
-  oauth_issuer_url    = "https://issuer.example.invalid/"
-  oauth_jwks_url      = "https://issuer.example.invalid/.well-known/jwks.json"
+  public_mcp_url       = "https://runtime.example.invalid/mcp"
+  mcp_allowed_hosts    = "runtime.example.invalid"
+  oauth_issuer_url     = "https://issuer.example.invalid/"
+  oauth_jwks_url       = "https://issuer.example.invalid/.well-known/jwks.json"
   expected_hao_subject = "test-hao-subject"
-  attestation_key_id    = "test-key-1"
-  initial_task           = "Terraform Cloud SQL edition contract test"
+  attestation_key_id   = "test-key-1"
+  initial_task         = "Terraform Cloud SQL edition contract test"
 
   sheets_targets_json    = "{}"
   task_policies_json     = "{}"
@@ -38,7 +38,7 @@ variables {
   cloud_sql_availability_type = "ZONAL"
 
   enable_runtime_workloads = false
-  allow_public_mcp_invoker  = false
+  allow_public_mcp_invoker = false
 }
 
 run "enterprise_custom_tier_allowed" {
