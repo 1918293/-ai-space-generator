@@ -49,6 +49,11 @@ class ToolResult(BaseModel):
     action_id: str = ""
     child_slots: list[str] = Field(default_factory=list)
     failure_code: str = ""
+    case_id: str = ""
+    reconciliation_kind: str = ""
+    disposition: str = ""
+    effect_may_have_occurred: bool = False
+    reconciliation_evidence: list[str] = Field(default_factory=list)
 
 
 async def _confirm_authorization(
@@ -76,6 +81,20 @@ async def _confirm_parent_acceptance(
         (
             f"Confirm Hao System parent-task decision: {decision} task {task_run_id}. "
             "This records Hao's explicit task-level acceptance after required child outcomes."
+        ),
+        ApprovalConfirmation,
+    )
+
+
+async def _confirm_reconciliation_resolution(
+    case_id: str,
+    disposition: str,
+) -> ApprovalConfirmation | Elicit[ApprovalConfirmation]:
+    return Elicit(
+        (
+            f"Confirm Hao System reconciliation decision for case {case_id}: "
+            f"'{disposition}'. The runtime will apply this only if existing trusted evidence "
+            "satisfies the requested disposition."
         ),
         ApprovalConfirmation,
     )
@@ -128,7 +147,8 @@ def build_mcp_control_server(
             "non-authoritative and accepted only when the runtime ActionBinding allowlists them. "
             "Consequential approval must use hao_control_authorize and human elicitation. "
             "Multi-action work must use deployment-owned parent plans rather than inventing "
-            "bindings or bypassing child control workflows."
+            "bindings or bypassing child control workflows. UNKNOWN_EFFECT ambiguity must use "
+            "reconciliation; it must never be hidden by blindly replaying the prior side effect."
         ),
     )
 
@@ -460,6 +480,131 @@ def build_mcp_control_server(
                 task_run_id=view.task_run_id,
                 phase=view.phase,
                 failure_code=view.failure_code,
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        title="Inspect Hao reconciliation case",
+        description=(
+            "Read one durable reconciliation case owned by the authenticated Hao run, including "
+            "ambiguity kind, trusted evidence already stored, disposition and resolution state."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        meta=_oauth_meta(SCOPE_READ),
+    )
+    def hao_reconciliation_inspect(case_id: str) -> ToolResult:
+        try:
+            view = bridge.reconciliation_inspect(principal(), case_id=case_id)
+            return ToolResult(
+                ok=True,
+                code=view.resolution_code or "RECONCILIATION_CASE",
+                case_id=view.case_id,
+                workflow_id=view.run_id,
+                action_id=view.action_id,
+                reconciliation_kind=view.kind,
+                phase=view.phase,
+                disposition=view.disposition,
+                effect_may_have_occurred=view.effect_may_have_occurred,
+                reconciliation_evidence=list(view.evidence),
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        title="Resolve Hao reconciliation case",
+        description=(
+            "Apply a reconciliation disposition only against trusted evidence already present in "
+            "the durable case. This tool cannot upload or manufacture verification evidence and "
+            "requires Hao human confirmation."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        meta=_oauth_meta(SCOPE_APPROVE),
+    )
+    async def hao_reconciliation_resolve(
+        case_id: str,
+        disposition: str,
+        confirmation: Annotated[
+            ElicitationResult[ApprovalConfirmation],
+            Resolve(_confirm_reconciliation_resolution),
+        ],
+    ) -> ToolResult:
+        if not isinstance(confirmation, AcceptedElicitation) or not confirmation.data.confirm:
+            return ToolResult(
+                ok=False,
+                code="HUMAN_CONFIRMATION_DECLINED",
+                case_id=case_id,
+            )
+        try:
+            view = bridge.reconciliation_resolve_after_human_confirmation(
+                principal(),
+                case_id=case_id,
+                disposition=disposition,
+                human_confirmed=True,
+            )
+            return ToolResult(
+                ok=view.phase != "OPEN",
+                code=view.resolution_code or "RECONCILIATION_UPDATED",
+                case_id=view.case_id,
+                workflow_id=view.run_id,
+                action_id=view.action_id,
+                reconciliation_kind=view.kind,
+                phase=view.phase,
+                disposition=view.disposition,
+                effect_may_have_occurred=view.effect_may_have_occurred,
+                reconciliation_evidence=list(view.evidence),
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        title="Retry reconciled Hao action with changed delta",
+        description=(
+            "Create a new controlled run only after the ambiguity case is safely RESOLVED by verified "
+            "adoption or verified compensation. The runtime reuses the original trusted capability "
+            "and binding, requires a changed expected-state delta, and never replays the old run."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=True,
+        ),
+        meta=_oauth_meta(SCOPE_EXECUTE),
+    )
+    async def hao_reconciliation_retry_with_delta(
+        case_id: str,
+        expected_state_delta: str,
+        authorization_target: str = "",
+        action_arguments: dict[str, str] | None = None,
+    ) -> ToolResult:
+        try:
+            view = await bridge.reconciliation_retry_with_delta(
+                principal(),
+                case_id=case_id,
+                expected_state_delta=expected_state_delta,
+                authorization_target=authorization_target,
+                arguments=action_arguments,
+            )
+            return ToolResult(
+                ok=bool(view.workflow_id),
+                code=view.code,
+                workflow_id=view.workflow_id,
+                mode=view.mode,
+                task=view.task,
+                phase=view.phase,
+                authorization_scope=view.authorization_scope,
+                case_id=case_id,
             )
         except (PermissionError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
