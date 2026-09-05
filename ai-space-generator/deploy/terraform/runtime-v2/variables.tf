@@ -206,6 +206,16 @@ variable "previous_attestation_keys_secret_version" {
   }
 }
 
+variable "cloud_sql_edition" {
+  type        = string
+  description = "Explicit Cloud SQL edition. Required because PostgreSQL 16+ otherwise defaults to Enterprise Plus."
+
+  validation {
+    condition     = contains(["ENTERPRISE", "ENTERPRISE_PLUS"], var.cloud_sql_edition)
+    error_message = "cloud_sql_edition must be ENTERPRISE or ENTERPRISE_PLUS."
+  }
+}
+
 variable "cloud_sql_tier" {
   type        = string
   description = "Explicit Cloud SQL machine tier. No default because this is cost-sensitive."

@@ -48,6 +48,19 @@ Before Runtime workloads may be enabled, an explicitly authorized bootstrap must
 
 `enable_runtime_workloads` defaults to `false`, allowing the infrastructure definition to represent base resources without pretending secret/database-user bootstrap already exists.
 
+## Cloud SQL edition and tier contract
+
+`cloud_sql_edition` is an explicit required input. This is deliberate: with PostgreSQL 16+ an omitted edition can resolve to Enterprise Plus, while Enterprise shared-core and `db-custom-*` tiers are not valid Enterprise Plus tiers.
+
+The configuration therefore:
+
+- permits only `ENTERPRISE` or `ENTERPRISE_PLUS` as the edition value;
+- writes the chosen edition explicitly into the Cloud SQL instance settings;
+- blocks `ENTERPRISE_PLUS` combined with `db-custom-*`, `db-f1-micro`, or `db-g1-small` before resource operations;
+- leaves the exact machine tier and `ZONAL` versus `REGIONAL` availability explicit because those are cost/reliability deployment decisions.
+
+The repository's Terraform tests use mocked Google providers, so the valid/invalid edition-tier contract can be exercised with `terraform test` without GCP credentials or infrastructure creation.
+
 ## Database authentication choice
 
 The first candidate models the database connection as a **Secret Manager-backed password-bearing PostgreSQL URL**, because that path is already enforced by the current Runtime.
@@ -62,7 +75,7 @@ Cloud SQL IAM DB authentication / connector / proxy is **not** silently assumed.
 
 The collector receives the non-secret upstream endpoint as `OTEL_EXPORTER_OTLP_ENDPOINT`; backend authentication remains an external deployment decision.
 
-## Static verification only
+## Static and mocked verification only
 
 Allowed in the isolated candidate:
 
@@ -70,7 +83,10 @@ Allowed in the isolated candidate:
 terraform fmt -check -recursive
 terraform init -backend=false
 terraform validate
+terraform test
 ```
+
+`terraform test` uses mock providers for this configuration and must not require real Google Cloud credentials.
 
 Not allowed without explicit Hao authorization:
 

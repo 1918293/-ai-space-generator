@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - exp/runtime-v2-infrastructure-terraform-candidate
+      - exp/runtime-v2-cloud-sql-edition-preflight
       - exp/execution-control-plane-v1
   workflow_dispatch:
 
@@ -28,3 +29,5 @@ jobs:
         run: terraform init -backend=false -input=false
       - name: Terraform validate
         run: terraform validate -no-color
+      - name: Terraform mocked tests
+        run: terraform test -no-color

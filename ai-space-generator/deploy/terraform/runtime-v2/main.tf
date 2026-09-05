@@ -260,6 +260,7 @@ resource "google_sql_database_instance" "runtime" {
 
   settings {
     tier              = var.cloud_sql_tier
+    edition           = var.cloud_sql_edition
     availability_type = var.cloud_sql_availability_type
 
     backup_configuration {
@@ -276,6 +277,17 @@ resource "google_sql_database_instance" "runtime" {
 
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition = !(
+        var.cloud_sql_edition == "ENTERPRISE_PLUS" &&
+        (
+          startswith(var.cloud_sql_tier, "db-custom-") ||
+          contains(["db-f1-micro", "db-g1-small"], var.cloud_sql_tier)
+        )
+      )
+      error_message = "Cloud SQL ENTERPRISE_PLUS cannot use Enterprise shared-core or db-custom tiers. Select ENTERPRISE for db-custom/db-f1/db-g1 tiers or choose an Enterprise Plus-compatible predefined tier."
+    }
   }
 
   depends_on = [
