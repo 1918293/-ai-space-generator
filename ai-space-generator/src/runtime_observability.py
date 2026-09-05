@@ -24,6 +24,8 @@ class RuntimeTelemetry:
     failures: Any
     authoritative_completions: Any
     reconciliation_cases: Any
+    trace_provider: Any | None = None
+    meter_provider: Any | None = None
 
     @contextmanager
     def span(
@@ -68,10 +70,9 @@ class RuntimeTelemetry:
         self.run_events.add(1, metric_attributes)
 
         if failure_stage or failure_code:
-            failure_attributes = dict(metric_attributes)
-            if failure_code:
-                failure_attributes["hao.failure.code"] = failure_code
-            self.failures.add(1, failure_attributes)
+            # Failure codes can contain provider/runtime-specific detail and are
+            # therefore trace-only. Metrics retain bounded failure stage labels.
+            self.failures.add(1, dict(metric_attributes))
 
         trace_attributes = dict(metric_attributes)
         if run_id:
@@ -95,18 +96,25 @@ class RuntimeTelemetry:
         error_code: str = "",
     ) -> None:
         metric_attributes = {"hao.reconciliation.kind": kind}
-        if error_code:
-            metric_attributes["hao.failure.code"] = error_code
         self.reconciliation_cases.add(1, metric_attributes)
 
         trace_attributes = dict(metric_attributes)
         if run_id:
             trace_attributes["hao.run.id"] = run_id
+        if error_code:
+            trace_attributes["hao.failure.code"] = error_code
         with self.tracer.start_as_current_span(
             "hao.runtime.reconciliation_opened",
             attributes=trace_attributes,
         ):
             pass
+
+    def shutdown(self) -> None:
+        """Flush and stop exporters without emitting application payloads."""
+        if self.meter_provider is not None:
+            self.meter_provider.shutdown()
+        if self.trace_provider is not None:
+            self.trace_provider.shutdown()
 
 
 def configure_runtime_telemetry(
@@ -117,9 +125,10 @@ def configure_runtime_telemetry(
 ) -> RuntimeTelemetry:
     """Initialize production OTLP/HTTP traces + metrics without logging payloads.
 
-    High-cardinality run IDs belong only on spans. Metrics intentionally use
-    bounded operational labels and never include action arguments, Google data,
-    OAuth tokens, signing material, or other secret/content payloads.
+    High-cardinality run IDs and failure codes belong only on spans. Metrics
+    intentionally use bounded operational labels and never include action
+    arguments, Google data, OAuth tokens, signing material, or other
+    secret/content payloads.
     """
     from opentelemetry import metrics, trace
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
@@ -166,7 +175,7 @@ def configure_runtime_telemetry(
         failures=meter.create_counter(
             "hao.runtime.failures",
             unit="{failure}",
-            description="Typed Runtime v2 failures by stage/code.",
+            description="Typed Runtime v2 failures by bounded stage dimensions.",
         ),
         authoritative_completions=meter.create_counter(
             "hao.runtime.authoritative_completions",
@@ -178,4 +187,6 @@ def configure_runtime_telemetry(
             unit="{case}",
             description="Reconciliation cases opened by typed ambiguity.",
         ),
+        trace_provider=trace_provider,
+        meter_provider=meter_provider,
     )
