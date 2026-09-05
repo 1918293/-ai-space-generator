@@ -246,8 +246,13 @@ def verify_postgres_schema(
     connect_factory: ConnectionFactory | None = None,
     verify_tables: bool = True,
 ) -> int:
-    """Fail closed unless the database is exactly at the runtime's expected schema."""
+    """Fail closed unless config, binary and database share one exact schema version."""
     _database_url(database_url)
+    if expected_version != CURRENT_RUNTIME_SCHEMA_VERSION:
+        raise RuntimeError(
+            "RUNTIME_BINARY_SCHEMA_VERSION_MISMATCH:"
+            f"{expected_version}!={CURRENT_RUNTIME_SCHEMA_VERSION}"
+        )
     connect = connect_factory or _default_connect_factory(database_url)
     conn = connect()
     try:
