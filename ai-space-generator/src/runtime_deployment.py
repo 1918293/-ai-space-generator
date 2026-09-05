@@ -38,6 +38,10 @@ from .runtime_observability_bridge import (
     ObservableReconciliationBroker,
 )
 from .runtime_policy import ConfiguredTaskPolicySpec, GoogleAuthorityTaskPolicyProvider
+from .stable_finalization import (
+    PostgresFinalizationIssueStore,
+    StableFinalizationProductionService,
+)
 from .temporal_client import TemporalWorkflowStarter
 from .temporal_control import ExecutionActivities, HaoExecutionControlWorkflow
 
@@ -230,11 +234,14 @@ async def build_api_app(values: dict[str, str]) -> Any:
         temporal_client,
         task_queue=settings.temporal_task_queue,
     )
-    production = ProductionExecutionService(
-        gateway=gateway,
-        starter=starter,
-        attestor=CompletionAttestor(settings.attestation_secret.encode("utf-8")),
-        completion_store=persistence.completion,
+    production = StableFinalizationProductionService(
+        ProductionExecutionService(
+            gateway=gateway,
+            starter=starter,
+            attestor=CompletionAttestor(settings.attestation_secret.encode("utf-8")),
+            completion_store=persistence.completion,
+        ),
+        PostgresFinalizationIssueStore(settings.database_url),
     )
     base_bridge = MCPControlBridge(
         production=production,
