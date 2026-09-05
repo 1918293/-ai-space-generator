@@ -61,8 +61,8 @@ def test_migration_uses_serializable_transaction_and_advisory_lock():
     )
     assert result.from_version == 0
     assert result.to_version == CURRENT_RUNTIME_SCHEMA_VERSION
-    assert result.applied_versions == (1,)
-    assert conn.version == 1
+    assert result.applied_versions == tuple(range(1, CURRENT_RUNTIME_SCHEMA_VERSION + 1))
+    assert conn.version == CURRENT_RUNTIME_SCHEMA_VERSION
     assert (
         "SELECT pg_advisory_xact_lock(%s)",
         (MIGRATION_ADVISORY_LOCK_ID,),
@@ -73,47 +73,61 @@ def test_migration_uses_serializable_transaction_and_advisory_lock():
 
 
 def test_migration_is_idempotent_when_target_version_already_applied():
-    conn = FakePostgresConnection(initial_version=1)
+    conn = FakePostgresConnection(initial_version=CURRENT_RUNTIME_SCHEMA_VERSION)
     result = run_postgres_migrations(
         "postgresql://runtime/test",
         connect_factory=factory(conn),
     )
     assert result.applied_versions == ()
+    assert result.from_version == CURRENT_RUNTIME_SCHEMA_VERSION
+    assert result.to_version == CURRENT_RUNTIME_SCHEMA_VERSION
+
+
+def test_migration_upgrades_prior_schema_one_to_current():
+    conn = FakePostgresConnection(initial_version=1)
+    result = run_postgres_migrations(
+        "postgresql://runtime/test",
+        connect_factory=factory(conn),
+    )
     assert result.from_version == 1
-    assert result.to_version == 1
+    assert result.to_version == CURRENT_RUNTIME_SCHEMA_VERSION
+    assert result.applied_versions == tuple(range(2, CURRENT_RUNTIME_SCHEMA_VERSION + 1))
 
 
 def test_runtime_refuses_database_newer_than_code():
-    conn = FakePostgresConnection(initial_version=2)
+    conn = FakePostgresConnection(initial_version=CURRENT_RUNTIME_SCHEMA_VERSION + 1)
     with pytest.raises(RuntimeError, match="DATABASE_SCHEMA_NEWER_THAN_RUNTIME"):
         run_postgres_migrations(
             "postgresql://runtime/test",
-            target_version=1,
+            target_version=CURRENT_RUNTIME_SCHEMA_VERSION,
             connect_factory=factory(conn),
         )
     assert any(call[0] == "ROLLBACK" for call in conn.calls)
 
 
 def test_schema_readiness_requires_exact_version_and_every_runtime_table():
-    conn = FakePostgresConnection(initial_version=1)
+    conn = FakePostgresConnection(initial_version=CURRENT_RUNTIME_SCHEMA_VERSION)
     assert verify_postgres_schema(
         "postgresql://runtime/test",
-        expected_version=1,
+        expected_version=CURRENT_RUNTIME_SCHEMA_VERSION,
         connect_factory=factory(conn),
-    ) == 1
+    ) == CURRENT_RUNTIME_SCHEMA_VERSION
 
-    mismatch = FakePostgresConnection(initial_version=0)
+    mismatch = FakePostgresConnection(initial_version=CURRENT_RUNTIME_SCHEMA_VERSION - 1)
     with pytest.raises(RuntimeError, match="RUNTIME_SCHEMA_VERSION_MISMATCH"):
         verify_postgres_schema(
             "postgresql://runtime/test",
-            expected_version=1,
+            expected_version=CURRENT_RUNTIME_SCHEMA_VERSION,
             connect_factory=factory(mismatch),
         )
 
-    missing = FakePostgresConnection(initial_version=1, missing_table="parent_tasks")
+    missing = FakePostgresConnection(
+        initial_version=CURRENT_RUNTIME_SCHEMA_VERSION,
+        missing_table="parent_tasks",
+    )
     with pytest.raises(RuntimeError, match="RUNTIME_SCHEMA_TABLE_MISSING:parent_tasks"):
         verify_postgres_schema(
             "postgresql://runtime/test",
-            expected_version=1,
+            expected_version=CURRENT_RUNTIME_SCHEMA_VERSION,
             connect_factory=factory(missing),
         )
