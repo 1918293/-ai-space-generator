@@ -8,3 +8,4 @@ google-api-python-client==2.200.0
 uvicorn==0.52.4
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.44.0
+pytest-asyncio==1.4.0
