@@ -1,0 +1,94 @@
+name: Runtime v2 GCP WIF Preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: runtime-v2-gcp-wif-preflight
+  cancel-in-progress: false
+
+jobs:
+  auth-backend-preflight:
+    if: github.ref == 'refs/heads/exp/execution-control-plane-v1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ai-space-generator/deploy/terraform/runtime-v2
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_PREFIX: ${{ vars.TF_STATE_PREFIX }}
+    steps:
+      - name: Checkout exact workflow ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Fail closed on deployment identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            GCP_PROJECT_ID
+            GCP_WIF_PROVIDER
+            GCP_DEPLOY_SERVICE_ACCOUNT
+            TF_STATE_BUCKET
+            TF_STATE_PREFIX
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required GitHub Actions variable: ${name}" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "${TF_STATE_PREFIX}" != "hao-runtime-v2/production" ]]; then
+            echo "TF_STATE_PREFIX must equal hao-runtime-v2/production" >&2
+            exit 1
+          fi
+
+          if [[ ! "${GCP_WIF_PROVIDER}" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[^/]+/providers/[^/]+$ ]]; then
+            echo "GCP_WIF_PROVIDER is not a full Workload Identity Provider resource name" >&2
+            exit 1
+          fi
+
+          expected_suffix="@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+          if [[ "${GCP_DEPLOY_SERVICE_ACCOUNT}" != *"${expected_suffix}" ]]; then
+            echo "Deployment service account does not belong to GCP_PROJECT_ID" >&2
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud with GitHub OIDC
+        id: google-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+
+      - name: Initialize protected GCS backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform init \
+            -reconfigure \
+            -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="prefix=${TF_STATE_PREFIX}"
+
+      - name: Validate Runtime v2 Terraform configuration
+        run: terraform validate -no-color
