@@ -17,6 +17,7 @@ from .reconciliation import (
     ReconciliationPhase,
     apply_reconciliation,
 )
+from .reconciliation_retry import retry_request_fingerprint
 
 
 SCOPE_READ = "hao:read"
@@ -227,6 +228,14 @@ def _binding_from_action_id(action_id: str) -> str:
     return match.group(1).strip()
 
 
+def _authorization_target_from_scope(scope: str) -> str:
+    scope = scope.strip()
+    if not scope:
+        return ""
+    parts = scope.split(":", 1)
+    return parts[1].strip() if len(parts) == 2 else ""
+
+
 class MCPControlBridge:
     """Stateless authenticated bridge from MCP tools into the Runtime v2 control plane."""
 
@@ -240,6 +249,8 @@ class MCPControlBridge:
         telemetry: RuntimeTelemetrySink | None = None,
         parent_tasks: Any | None = None,
         reconciliation_store: Any | None = None,
+        reconciliation_inspector: Any | None = None,
+        reconciliation_retry_store: Any | None = None,
     ) -> None:
         self._production = production
         self._operational_state = operational_state
@@ -248,6 +259,8 @@ class MCPControlBridge:
         self._telemetry = telemetry
         self._parent_tasks = parent_tasks
         self._reconciliation_store = reconciliation_store
+        self._reconciliation_inspector = reconciliation_inspector
+        self._reconciliation_retry_store = reconciliation_retry_store
 
     def _record(
         self,
@@ -276,6 +289,16 @@ class MCPControlBridge:
         if self._reconciliation_store is None:
             raise ValueError("RECONCILIATION_RUNTIME_NOT_CONFIGURED")
         return self._reconciliation_store
+
+    def _require_reconciliation_inspector(self) -> Any:
+        if self._reconciliation_inspector is None:
+            raise ValueError("RECONCILIATION_INSPECTOR_NOT_CONFIGURED")
+        return self._reconciliation_inspector
+
+    def _require_reconciliation_retry_store(self) -> Any:
+        if self._reconciliation_retry_store is None:
+            raise ValueError("RECONCILIATION_RETRY_STORE_NOT_CONFIGURED")
+        return self._reconciliation_retry_store
 
     @staticmethod
     def _reconciliation_view(case: Any) -> MCPReconciliationView:
@@ -367,20 +390,15 @@ class MCPControlBridge:
             operational_version=state.version,
         )
         current = await self._production.current_state(submission.pending)
-        if current is None:
-            phase = RunPhase.RESOLVED.value
-            authorization_scope = ""
-            provider = ""
-            failure_stage = ""
-            failure_code = ""
-        else:
-            phase = current.phase.value
-            authorization_scope = (
-                current.action.authorization_scope if current.action is not None else ""
-            )
-            provider = current.action.provider if current.action is not None else ""
-            failure_stage = current.failure_stage.value if current.failure_stage else ""
-            failure_code = current.failure_code
+        phase = RunPhase.RESOLVED.value if current is None else current.phase.value
+        authorization_scope = (
+            current.action.authorization_scope
+            if current is not None and current.action is not None
+            else ""
+        )
+        provider = current.action.provider if current is not None and current.action is not None else ""
+        failure_stage = current.failure_stage.value if current is not None and current.failure_stage else ""
+        failure_code = current.failure_code if current is not None else ""
         self._record(
             "submitted",
             phase=phase,
@@ -444,11 +462,7 @@ class MCPControlBridge:
         )
 
     async def status(self, principal: MCPPrincipal, *, workflow_id: str) -> MCPStatusView:
-        pending = await self._pending_for(
-            principal,
-            workflow_id,
-            required_scope=SCOPE_READ,
-        )
+        pending = await self._pending_for(principal, workflow_id, required_scope=SCOPE_READ)
         return await self._status_from_pending(workflow_id, pending)
 
     async def authorize_after_human_confirmation(
@@ -463,11 +477,7 @@ class MCPControlBridge:
     ) -> MCPStatusView:
         if not human_confirmed:
             raise PermissionError("HUMAN_CONFIRMATION_REQUIRED")
-        pending = await self._pending_for(
-            principal,
-            workflow_id,
-            required_scope=SCOPE_APPROVE,
-        )
+        pending = await self._pending_for(principal, workflow_id, required_scope=SCOPE_APPROVE)
         current = await self._production.current_state(pending)
         if current is None or current.phase != RunPhase.AWAITING_HAO or current.action is None:
             raise ValueError("RUN_NOT_AWAITING_HAO_AUTHORIZATION")
@@ -488,11 +498,7 @@ class MCPControlBridge:
         return await self._status_from_pending(workflow_id, pending)
 
     async def finalize(self, principal: MCPPrincipal, *, workflow_id: str) -> MCPFinalizeView:
-        pending = await self._pending_for(
-            principal,
-            workflow_id,
-            required_scope=SCOPE_EXECUTE,
-        )
+        pending = await self._pending_for(principal, workflow_id, required_scope=SCOPE_EXECUTE)
         current = await self._production.current_state(pending)
         if current is None:
             self._record(
@@ -516,12 +522,7 @@ class MCPControlBridge:
                 failure_stage="COMPLETION",
                 failure_code=code,
             )
-            return MCPFinalizeView(
-                workflow_id,
-                False,
-                code,
-                current.phase.value,
-            )
+            return MCPFinalizeView(workflow_id, False, code, current.phase.value)
         result = await self._production.finalize(
             pending,
             issued_at=datetime.now(timezone.utc).isoformat(),
@@ -530,11 +531,7 @@ class MCPControlBridge:
         self._record(
             "finalized",
             phase=phase,
-            provider=(
-                result.record.action.provider
-                if result.record is not None and result.record.action is not None
-                else ""
-            ),
+            provider=(result.record.action.provider if result.record is not None and result.record.action is not None else ""),
             failure_code="" if result.authoritative else result.code,
             failure_stage="" if result.authoritative else "COMPLETION",
         )
@@ -582,7 +579,6 @@ class MCPControlBridge:
                 code=submission.code,
                 phase=RunPhase.BLOCKED.value,
             )
-
         registration = self._run_registry.register(
             workflow_id=submission.workflow_id,
             owner_subject=principal.subject,
@@ -640,9 +636,7 @@ class MCPControlBridge:
         parent_tasks = self._require_parent_tasks()
         state = self._operational_state.get()
         record = await parent_tasks.refresh(state, task_run_id=task_run_id)
-        if record.phase.value != "AWAITING_HAO" or len(record.child_outcomes) < len(
-            record.required_action_ids
-        ):
+        if record.phase.value != "AWAITING_HAO" or len(record.child_outcomes) < len(record.required_action_ids):
             raise ValueError("PARENT_TASK_NOT_AWAITING_HAO_ACCEPTANCE")
         accepted_record = parent_tasks.record_hao_acceptance(
             task_run_id=task_run_id,
@@ -667,6 +661,30 @@ class MCPControlBridge:
         )
         return self._reconciliation_view(case)
 
+    async def reconciliation_inspect_with_trusted_readback(
+        self,
+        principal: MCPPrincipal,
+        *,
+        case_id: str,
+    ) -> MCPReconciliationView:
+        case, registration = self._owned_reconciliation_case(
+            principal,
+            case_id=case_id,
+            required_scope=SCOPE_READ,
+        )
+        inspector = self._require_reconciliation_inspector()
+        pending = await self._production.resume(
+            registration.workflow_id,
+            operational_version=registration.operational_version,
+        )
+        current = await self._production.current_state(pending)
+        if current is None or current.action is None:
+            raise ValueError("RECONCILIATION_ORIGINAL_ACTION_UNAVAILABLE")
+        if current.action.action_id != case.action_id:
+            raise ValueError("RECONCILIATION_ACTION_IDENTITY_MISMATCH")
+        inspection = await inspector.inspect(case_id=case.case_id, proposal=current.action)
+        return self._reconciliation_view(inspection.case)
+
     def reconciliation_resolve_after_human_confirmation(
         self,
         principal: MCPPrincipal,
@@ -682,10 +700,7 @@ class MCPControlBridge:
             case_id=case_id,
             required_scope=SCOPE_APPROVE,
         )
-        if case.phase in {
-            ReconciliationPhase.RESOLVED,
-            ReconciliationPhase.PERMANENT_UNRESOLVED,
-        }:
+        if case.phase in {ReconciliationPhase.RESOLVED, ReconciliationPhase.PERMANENT_UNRESOLVED}:
             raise ValueError("RECONCILIATION_CASE_TERMINAL")
         try:
             requested = ReconciliationDisposition(disposition.strip().upper())
@@ -731,11 +746,114 @@ class MCPControlBridge:
         if not new_delta or new_delta == current.action.expected_state_delta.strip():
             raise ValueError("RECONCILIATION_RETRY_REQUIRES_CHANGED_DELTA")
 
-        return await self.submit(
-            principal,
+        trusted_target = _authorization_target_from_scope(current.action.authorization_scope)
+        if authorization_target.strip() and authorization_target.strip() != trusted_target:
+            raise PermissionError("RECONCILIATION_AUTHORIZATION_TARGET_MISMATCH")
+        fingerprint = retry_request_fingerprint(
+            case=case,
+            expected_state_delta=new_delta,
+            authorization_target=trusted_target,
+            arguments=arguments,
+        )
+        reservation = self._require_reconciliation_retry_store().reserve(
+            case=case,
+            owner_ref=principal.subject,
+            request_fingerprint=fingerprint,
+        )
+        state = self._operational_state.get()
+
+        if not reservation.created:
+            try:
+                owned = self._run_registry.require_owned(
+                    workflow_id=reservation.retry_run_id,
+                    owner_subject=principal.subject,
+                )
+            except PermissionError as exc:
+                if str(exc) != "CONTROLLED_RUN_NOT_FOUND":
+                    raise
+            else:
+                retry_pending = await self._production.resume(
+                    owned.workflow_id,
+                    operational_version=owned.operational_version,
+                )
+                retry_current = await self._production.current_state(retry_pending)
+                return MCPSubmissionView(
+                    workflow_id=owned.workflow_id,
+                    code="RECONCILIATION_RETRY_ALREADY_SUBMITTED",
+                    mode=state.mode.value if retry_current is None else retry_current.mode.value,
+                    task=state.task if retry_current is None else retry_current.task,
+                    phase=RunPhase.RESOLVED.value if retry_current is None else retry_current.phase.value,
+                    authorization_scope=(
+                        retry_current.action.authorization_scope
+                        if retry_current is not None and retry_current.action is not None
+                        else ""
+                    ),
+                )
+
+        intent = ModelActionIntent(
+            intent_id="INTENT-RECON-" + fingerprint[:24],
             requested_capability=current.action.capability,
             binding_id=_binding_from_action_id(current.action.action_id),
             expected_state_delta=new_delta,
-            authorization_target=authorization_target,
-            arguments=arguments,
+            authorization_target=trusted_target,
+            arguments=_argument_pairs(arguments),
+        )
+        request = ModelIngressRequest(
+            run_id=reservation.retry_run_id,
+            sequence=1,
+            intent=intent,
+        )
+        try:
+            submission = await self._production.submit(state, request)
+        except Exception:
+            if reservation.created:
+                raise
+            retry_pending = await self._production.resume(
+                reservation.retry_run_id,
+                operational_version=state.version,
+            )
+            retry_current = await self._production.current_state(retry_pending)
+            self._run_registry.register(
+                workflow_id=reservation.retry_run_id,
+                owner_subject=principal.subject,
+                operational_version=state.version,
+            )
+            return MCPSubmissionView(
+                workflow_id=reservation.retry_run_id,
+                code="RECONCILIATION_RETRY_ATTACHED",
+                mode=state.mode.value if retry_current is None else retry_current.mode.value,
+                task=state.task if retry_current is None else retry_current.task,
+                phase=RunPhase.RESOLVED.value if retry_current is None else retry_current.phase.value,
+                authorization_scope=(
+                    retry_current.action.authorization_scope
+                    if retry_current is not None and retry_current.action is not None
+                    else ""
+                ),
+            )
+
+        if not submission.accepted or submission.pending is None:
+            return MCPSubmissionView(
+                workflow_id="",
+                code=submission.code,
+                mode=state.mode.value,
+                task=state.task,
+                phase=RunPhase.BLOCKED.value,
+            )
+        self._run_registry.register(
+            workflow_id=submission.pending.handle.workflow_id,
+            owner_subject=principal.subject,
+            operational_version=state.version,
+        )
+        retry_current = await self._production.current_state(submission.pending)
+        return MCPSubmissionView(
+            workflow_id=submission.pending.handle.workflow_id,
+            code="RECONCILIATION_RETRY_SUBMITTED",
+            mode=state.mode.value if retry_current is None else retry_current.mode.value,
+            task=state.task if retry_current is None else retry_current.task,
+            phase=RunPhase.RESOLVED.value if retry_current is None else retry_current.phase.value,
+            authorization_scope=(
+                retry_current.action.authorization_scope
+                if retry_current is not None and retry_current.action is not None
+                else ""
+            ),
         )
