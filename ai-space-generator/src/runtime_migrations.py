@@ -1,0 +1,425 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+ConnectionFactory = Callable[[], Any]
+CURRENT_RUNTIME_SCHEMA_VERSION = 4
+CURRENT_RUNTIME_STORAGE_COMPATIBILITY_EPOCH = 1
+MIGRATION_ADVISORY_LOCK_ID = 0x48414F52  # "HAOR"
+RUNTIME_APPLICATION_ROLE = "hao_runtime_app"
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    from_version: int
+    to_version: int
+    applied_versions: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class StorageCompatibility:
+    physical_version: int
+    compatibility_epoch: int
+
+
+_MIGRATION_1 = (
+    """
+    CREATE TABLE IF NOT EXISTS operational_state (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        mode TEXT NOT NULL,
+        task TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        last_event_id TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS operational_events (
+        event_id TEXT PRIMARY KEY,
+        actor TEXT NOT NULL,
+        command_text TEXT NOT NULL,
+        resulting_version INTEGER NOT NULL,
+        applied INTEGER NOT NULL,
+        code TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS idempotency_records (
+        key TEXT PRIMARY KEY,
+        action_fingerprint TEXT NOT NULL,
+        state TEXT NOT NULL,
+        receipt_id TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        error_code TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS authoritative_completions (
+        run_id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        operational_version INTEGER NOT NULL,
+        authority_snapshot_fingerprint TEXT NOT NULL,
+        evidence_digest TEXT NOT NULL,
+        issued_at TEXT NOT NULL,
+        signature TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mcp_control_runs (
+        workflow_id TEXT PRIMARY KEY,
+        owner_subject TEXT NOT NULL,
+        operational_version INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS finalization_issue_times (
+        workflow_id TEXT PRIMARY KEY,
+        issued_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reconciliation_cases (
+        case_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        action_id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        effect_may_have_occurred INTEGER NOT NULL,
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        phase TEXT NOT NULL,
+        disposition TEXT NOT NULL DEFAULT '',
+        resolution_code TEXT NOT NULL DEFAULT '',
+        trigger_error_code TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS parent_tasks (
+        task_run_id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        admitted_operational_version INTEGER NOT NULL,
+        required_action_ids_json TEXT NOT NULL,
+        required_gate_ids_json TEXT NOT NULL,
+        hao_acceptance_required INTEGER NOT NULL,
+        authority_snapshot_fingerprint TEXT NOT NULL DEFAULT '',
+        child_outcomes_json TEXT NOT NULL DEFAULT '[]',
+        passed_gate_ids_json TEXT NOT NULL DEFAULT '[]',
+        hao_accepted INTEGER NOT NULL DEFAULT 0,
+        phase TEXT NOT NULL,
+        failure_code TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS parent_task_children (
+        task_run_id TEXT NOT NULL,
+        slot_index INTEGER NOT NULL,
+        slot_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL,
+        action_id TEXT NOT NULL UNIQUE,
+        workflow_id TEXT NOT NULL DEFAULT '',
+        operational_version INTEGER NOT NULL DEFAULT 0,
+        finalized INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(task_run_id, slot_index)
+    )
+    """,
+)
+
+_MIGRATION_2 = (
+    "ALTER TABLE parent_tasks ADD COLUMN IF NOT EXISTS row_revision INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE parent_task_children ADD COLUMN IF NOT EXISTS depends_on_slots_json TEXT NOT NULL DEFAULT '[]'",
+    """
+    CREATE TABLE IF NOT EXISTS reconciliation_retry_reservations (
+        case_id TEXT PRIMARY KEY,
+        owner_ref TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        retry_run_id TEXT NOT NULL UNIQUE
+    )
+    """,
+)
+
+_MIGRATION_3 = (
+    "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT ''",
+)
+
+# Additive EXPAND migration: decision provenance becomes independently queryable
+# from durable completion state while remaining in compatibility epoch 1. Older
+# pinned workers that do not know these columns remain schema-compatible.
+_MIGRATION_4 = (
+    "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS policy_fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS decision_id TEXT NOT NULL DEFAULT ''",
+)
+
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: _MIGRATION_1,
+    2: _MIGRATION_2,
+    3: _MIGRATION_3,
+    4: _MIGRATION_4,
+}
+
+# Physical migrations and compatibility epochs intentionally advance independently.
+# Additive/expand migrations may increase the physical version without changing the
+# epoch. A destructive/contract migration must advance the epoch only after every
+# non-drained worker version has declared support for the new epoch.
+MIGRATION_COMPATIBILITY_EPOCH: dict[int, int] = {
+    1: 1,
+    2: 1,
+    3: 1,
+    4: 1,
+}
+
+_REQUIRED_TABLES = (
+    "operational_state",
+    "operational_events",
+    "idempotency_records",
+    "authoritative_completions",
+    "mcp_control_runs",
+    "finalization_issue_times",
+    "reconciliation_cases",
+    "reconciliation_retry_reservations",
+    "parent_tasks",
+    "parent_task_children",
+)
+
+
+def _default_connect_factory(database_url: str) -> ConnectionFactory:
+    def connect() -> Any:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("PSYCOPG_REQUIRED_FOR_RUNTIME_MIGRATIONS") from exc
+        return psycopg.connect(database_url, autocommit=True, row_factory=dict_row)
+
+    return connect
+
+
+def _database_url(value: str) -> str:
+    value = value.strip()
+    if not value.startswith(("postgresql://", "postgres://")):
+        raise ValueError("POSTGRES_DATABASE_URL_REQUIRED")
+    return value
+
+
+def _scalar(row: Any, key: str, index: int = 0) -> Any:
+    try:
+        return row[key]
+    except (TypeError, KeyError, IndexError):
+        return row[index]
+
+
+def _current_version(conn: Any) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(version), 0) AS version FROM runtime_schema_migrations"
+    ).fetchone()
+    return int(_scalar(row, "version")) if row is not None else 0
+
+
+def compatibility_epoch_for_version(version: int) -> int:
+    if version < 1:
+        raise ValueError("STORAGE_PHYSICAL_VERSION_MUST_BE_POSITIVE")
+    try:
+        return MIGRATION_COMPATIBILITY_EPOCH[version]
+    except KeyError as exc:
+        raise RuntimeError(f"UNKNOWN_STORAGE_COMPATIBILITY_EPOCH:{version}") from exc
+
+
+def _ensure_runtime_application_role(conn: Any) -> None:
+    """Keep long-lived Runtime credentials on DML-only privileges, not migration authority."""
+    conn.execute(
+        f"""
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{RUNTIME_APPLICATION_ROLE}') THEN
+            CREATE ROLE {RUNTIME_APPLICATION_ROLE} NOLOGIN;
+          END IF;
+        END
+        $$
+        """
+    )
+    conn.execute(f"GRANT CONNECT ON DATABASE runtime TO {RUNTIME_APPLICATION_ROLE}")
+    conn.execute(f"GRANT USAGE ON SCHEMA public TO {RUNTIME_APPLICATION_ROLE}")
+    conn.execute(
+        f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {RUNTIME_APPLICATION_ROLE}"
+    )
+    conn.execute(
+        f"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {RUNTIME_APPLICATION_ROLE}"
+    )
+    conn.execute(
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {RUNTIME_APPLICATION_ROLE}"
+    )
+    conn.execute(
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {RUNTIME_APPLICATION_ROLE}"
+    )
+
+
+def run_postgres_migrations(
+    database_url: str,
+    *,
+    target_version: int = CURRENT_RUNTIME_SCHEMA_VERSION,
+    release_id: str = "",
+    connect_factory: ConnectionFactory | None = None,
+    enforce_advisory_lock: bool = True,
+) -> MigrationResult:
+    """Apply ordered Runtime v2 migrations under one serializable advisory lock."""
+    _database_url(database_url)
+    if target_version < 1 or target_version > CURRENT_RUNTIME_SCHEMA_VERSION:
+        raise ValueError("UNSUPPORTED_RUNTIME_SCHEMA_VERSION")
+    connect = connect_factory or _default_connect_factory(database_url)
+    conn = connect()
+    try:
+        conn.execute("BEGIN ISOLATION LEVEL SERIALIZABLE")
+        if enforce_advisory_lock:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_ADVISORY_LOCK_ID,))
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_schema_migrations (
+                version INTEGER PRIMARY KEY,
+                release_id TEXT NOT NULL DEFAULT '',
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        before = _current_version(conn)
+        if before > target_version:
+            raise RuntimeError("DATABASE_SCHEMA_NEWER_THAN_RUNTIME")
+        applied: list[int] = []
+        for version in range(before + 1, target_version + 1):
+            statements = MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"MISSING_MIGRATION:{version}")
+            compatibility_epoch_for_version(version)
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                """
+                INSERT INTO runtime_schema_migrations(version, release_id)
+                VALUES (%s, %s)
+                """,
+                (version, release_id.strip()),
+            )
+            applied.append(version)
+        _ensure_runtime_application_role(conn)
+        conn.execute("COMMIT")
+        return MigrationResult(before, target_version, tuple(applied))
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def verify_postgres_schema(
+    database_url: str,
+    *,
+    expected_version: int | None = None,
+    minimum_version: int | None = None,
+    supported_compatibility_epochs: tuple[int, ...] | None = None,
+    connect_factory: ConnectionFactory | None = None,
+    verify_tables: bool = True,
+) -> int:
+    """Fail closed unless the database satisfies the binary storage contract.
+
+    `expected_version` preserves the previous exact-version contract for callers
+    that intentionally require it (migration verification and legacy tests).
+    Runtime API/Worker startup should use `minimum_version` plus an explicit set
+    of supported compatibility epochs so additive expand migrations can coexist
+    with pinned older workers while destructive contract migrations still fail
+    closed.
+    """
+    _database_url(database_url)
+    if expected_version is not None and expected_version != CURRENT_RUNTIME_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"RUNTIME_BINARY_SCHEMA_VERSION_MISMATCH:{expected_version}!={CURRENT_RUNTIME_SCHEMA_VERSION}"
+        )
+    if expected_version is not None and (
+        minimum_version is not None or supported_compatibility_epochs is not None
+    ):
+        raise ValueError("STORAGE_VERIFICATION_MODE_CONFLICT")
+    if expected_version is None:
+        if minimum_version is None or not supported_compatibility_epochs:
+            raise ValueError("STORAGE_COMPATIBILITY_CONTRACT_REQUIRED")
+        if minimum_version < 1:
+            raise ValueError("STORAGE_MINIMUM_VERSION_MUST_BE_POSITIVE")
+        if any(epoch < 1 for epoch in supported_compatibility_epochs):
+            raise ValueError("STORAGE_COMPATIBILITY_EPOCH_MUST_BE_POSITIVE")
+    elif expected_version < 1:
+        raise ValueError("STORAGE_EXPECTED_VERSION_MUST_BE_POSITIVE")
+
+    connect = connect_factory or _default_connect_factory(database_url)
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM runtime_schema_migrations"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("RUNTIME_SCHEMA_MIGRATIONS_MISSING")
+        current = int(_scalar(row, "version"))
+        if expected_version is not None:
+            if current != expected_version:
+                raise RuntimeError(
+                    f"RUNTIME_SCHEMA_VERSION_MISMATCH:{current}!={expected_version}"
+                )
+        else:
+            assert minimum_version is not None
+            assert supported_compatibility_epochs is not None
+            if current < minimum_version:
+                raise RuntimeError(
+                    f"RUNTIME_SCHEMA_TOO_OLD:{current}<{minimum_version}"
+                )
+            current_epoch = compatibility_epoch_for_version(current)
+            if current_epoch not in supported_compatibility_epochs:
+                supported = ",".join(str(value) for value in supported_compatibility_epochs)
+                raise RuntimeError(
+                    "RUNTIME_STORAGE_COMPATIBILITY_EPOCH_MISMATCH:"
+                    f"{current_epoch} not in [{supported}]"
+                )
+        if verify_tables:
+            for table in _REQUIRED_TABLES:
+                row = conn.execute("SELECT to_regclass(%s) AS table_name", (table,)).fetchone()
+                if row is None or not _scalar(row, "table_name"):
+                    raise RuntimeError(f"RUNTIME_SCHEMA_TABLE_MISSING:{table}")
+        return current
+    finally:
+        conn.close()
+
+
+def current_storage_compatibility() -> StorageCompatibility:
+    return StorageCompatibility(
+        physical_version=CURRENT_RUNTIME_SCHEMA_VERSION,
+        compatibility_epoch=compatibility_epoch_for_version(CURRENT_RUNTIME_SCHEMA_VERSION),
+    )
+
+
+def main() -> None:
+    database_url = os.environ.get("HAO_DATABASE_URL", "")
+    release_id = os.environ.get("HAO_RELEASE_ID", "")
+    raw_version = os.environ.get(
+        "HAO_DATABASE_SCHEMA_VERSION", str(CURRENT_RUNTIME_SCHEMA_VERSION)
+    )
+    try:
+        target_version = int(raw_version)
+    except ValueError as exc:
+        raise ValueError("INVALID_INTEGER_CONFIG:HAO_DATABASE_SCHEMA_VERSION") from exc
+    result = run_postgres_migrations(
+        database_url,
+        target_version=target_version,
+        release_id=release_id,
+    )
+    verified = verify_postgres_schema(database_url, expected_version=result.to_version)
+    compatibility = current_storage_compatibility()
+    print(
+        f"HAO_RUNTIME_MIGRATION_VERIFIED from={result.from_version} to={result.to_version} "
+        f"applied={','.join(str(value) for value in result.applied_versions)} schema={verified} "
+        f"storage_epoch={compatibility.compatibility_epoch}"
+    )
+
+
+if __name__ == "__main__":
+    main()

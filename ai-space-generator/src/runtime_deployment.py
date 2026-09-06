@@ -1,0 +1,609 @@
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
+import json
+import os
+from typing import Any
+
+from .action_catalog import ActionBinding, ActionCatalog
+from .authoritative_completion import CompletionAttestor
+from .control_gateway import ControlPlaneGateway
+from .execution_control import ActionArchetype, ActionExternality, Mode
+from .google_drive_control import (
+    ControlledGoogleDriveProvider,
+    GoogleDriveAuthorityGuard,
+    GoogleDriveOutcomeVerifier,
+)
+from .google_workspace_adapter import (
+    AuthorityFileSource,
+    ConfiguredSheetsCommandResolver,
+    GoogleWorkspaceSheetsClient,
+    SheetsMutationTarget,
+)
+from .idempotent_broker import IdempotentAsyncBroker
+from .mcp_control_bridge import HaoMCPIdentityPolicy, MCPControlBridge
+from .mcp_control_server import SCOPE_ACCESS, build_mcp_control_server
+from .mcp_http import build_mcp_http_app
+from .oauth_verifier import JWKSAccessTokenVerifier
+from .parent_task_production import (
+    ParentChildPlan,
+    ParentTaskPlan,
+    ParentTaskPlanCatalog,
+    PostgresParentTaskStore,
+    ProductionParentTaskService,
+)
+from .postgres_persistence import build_postgres_persistence
+from .production_execution import ProductionExecutionService
+from .provider_reconciliation import TrustedDriveReconciliationInspector
+from .reconciliation_persistence import (
+    PostgresReconciliationStore,
+    ReconciliationAwareBroker,
+)
+from .reconciliation_retry import PostgresReconciliationRetryStore
+from .runtime_config import RuntimeRole, RuntimeSettings
+from .runtime_lifecycle import RuntimeLifecycle, ShutdownSignalController
+from .runtime_migrations import verify_postgres_schema
+from .runtime_observability import configure_runtime_telemetry
+from .runtime_observability_bridge import (
+    ObservableMCPControlBridge,
+    ObservableReconciliationBroker,
+)
+from .runtime_policy import ConfiguredTaskPolicySpec, GoogleAuthorityTaskPolicyProvider
+from .stable_finalization import (
+    PostgresFinalizationIssueStore,
+    StableFinalizationProductionService,
+)
+from .temporal_client import TemporalWorkflowStarter
+from .temporal_control import ExecutionActivities, HaoExecutionControlWorkflow
+
+
+FORMAL_SHEETS_ASSURANCE_TAGS = (
+    "FORMAL_HAO_PERSISTENCE",
+    "EXACT_CONFIGURED_TARGET",
+    "DIRECT_STATE_READBACK",
+)
+TEMPORAL_DEPLOYMENT_NAME = "hao-runtime-v2"
+
+
+def _json_env(values: dict[str, str], key: str) -> object:
+    raw = str(values.get(key, "")).strip()
+    if not raw:
+        raise ValueError(f"MISSING_CONFIG:{key}")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"INVALID_JSON_CONFIG:{key}") from exc
+
+
+def _authority_sources(raw: object) -> tuple[AuthorityFileSource, ...]:
+    if not isinstance(raw, list):
+        raise ValueError("AUTHORITY_SOURCES_LIST_REQUIRED")
+    result: list[AuthorityFileSource] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("AUTHORITY_SOURCE_OBJECT_REQUIRED")
+        ref = str(item.get("ref", "")).strip()
+        file_id = str(item.get("file_id", "")).strip()
+        if not ref or not file_id:
+            raise ValueError("AUTHORITY_SOURCE_FIELDS_REQUIRED")
+        result.append(AuthorityFileSource(ref, file_id))
+    if not result:
+        raise ValueError("AUTHORITY_SOURCES_REQUIRED")
+    return tuple(result)
+
+
+def load_sheets_targets(values: dict[str, str]) -> tuple[SheetsMutationTarget, ...]:
+    raw = _json_env(values, "HAO_SHEETS_TARGETS_JSON")
+    if not isinstance(raw, list):
+        raise ValueError("HAO_SHEETS_TARGETS_LIST_REQUIRED")
+    targets: list[SheetsMutationTarget] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("HAO_SHEETS_TARGET_OBJECT_REQUIRED")
+        targets.append(
+            SheetsMutationTarget(
+                binding_id=str(item.get("binding_id", "")).strip(),
+                spreadsheet_id=str(item.get("spreadsheet_id", "")).strip(),
+                range_a1=str(item.get("range_a1", "")).strip(),
+                value_input_option=str(item.get("value_input_option", "RAW")).strip(),
+                authority_sources=_authority_sources(item.get("authority_sources", [])),
+                mutation_mode=str(item.get("mutation_mode", "fixed_range")).strip(),
+                sheet_id=(
+                    int(item["sheet_id"]) if item.get("sheet_id") is not None else None
+                ),
+                unique_key_column=str(item.get("unique_key_column", "")).strip(),
+            )
+        )
+    if not targets:
+        raise ValueError("HAO_SHEETS_TARGETS_REQUIRED")
+    return tuple(targets)
+
+
+def load_task_policies(values: dict[str, str]) -> tuple[ConfiguredTaskPolicySpec, ...]:
+    raw = _json_env(values, "HAO_TASK_POLICIES_JSON")
+    if not isinstance(raw, list):
+        raise ValueError("HAO_TASK_POLICIES_LIST_REQUIRED")
+    specs: list[ConfiguredTaskPolicySpec] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("HAO_TASK_POLICY_OBJECT_REQUIRED")
+        acceptance = tuple(
+            str(value).strip()
+            for value in item.get("acceptance_criteria", [])
+            if str(value).strip()
+        )
+        gates = {
+            str(value).strip()
+            for value in item.get("required_acceptance_gate_ids", [])
+            if str(value).strip()
+        }
+        gates.add("DRIVE_EXPECTED_STATE_MATCH")
+        required_tags = {
+            str(value).strip().upper()
+            for value in item.get("required_action_tags", [])
+            if str(value).strip()
+        }
+        required_tags.update(FORMAL_SHEETS_ASSURANCE_TAGS)
+        forbidden_tags = tuple(
+            str(value).strip().upper()
+            for value in item.get("forbidden_action_tags", [])
+            if str(value).strip()
+        )
+        specs.append(
+            ConfiguredTaskPolicySpec(
+                task=str(item.get("task", "")).strip(),
+                acceptance_criteria=acceptance,
+                authority_sources=_authority_sources(item.get("authority_sources", [])),
+                required_acceptance_gate_ids=tuple(sorted(gates)),
+                hao_acceptance_required=bool(item.get("hao_acceptance_required", False)),
+                required_action_tags=tuple(sorted(required_tags)),
+                forbidden_action_tags=forbidden_tags,
+            )
+        )
+    if not specs:
+        raise ValueError("HAO_TASK_POLICIES_REQUIRED")
+    return tuple(specs)
+
+
+def _dependency_slots(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("HAO_PARENT_TASK_DEPENDENCIES_LIST_REQUIRED")
+    return tuple(str(value).strip() for value in raw if str(value).strip())
+
+
+def load_parent_task_plans(values: dict[str, str]) -> ParentTaskPlanCatalog:
+    raw = _json_env(values, "HAO_PARENT_TASK_PLANS_JSON")
+    if not isinstance(raw, list):
+        raise ValueError("HAO_PARENT_TASK_PLANS_LIST_REQUIRED")
+    plans: list[ParentTaskPlan] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("HAO_PARENT_TASK_PLAN_OBJECT_REQUIRED")
+        raw_children = item.get("children", [])
+        if not isinstance(raw_children, list):
+            raise ValueError("HAO_PARENT_TASK_CHILDREN_LIST_REQUIRED")
+        children: list[ParentChildPlan] = []
+        for child in raw_children:
+            if not isinstance(child, dict):
+                raise ValueError("HAO_PARENT_TASK_CHILD_OBJECT_REQUIRED")
+            children.append(
+                ParentChildPlan(
+                    slot_id=str(child.get("slot_id", "")).strip(),
+                    requested_capability=str(
+                        child.get("requested_capability", "")
+                    ).strip(),
+                    binding_id=str(child.get("binding_id", "")).strip(),
+                    authorization_target=str(
+                        child.get("authorization_target", "")
+                    ).strip(),
+                    depends_on_slots=_dependency_slots(child.get("depends_on_slots", [])),
+                )
+            )
+        plans.append(
+            ParentTaskPlan(
+                plan_id=str(item.get("plan_id", "")).strip(),
+                task=str(item.get("task", "")).strip(),
+                children=tuple(children),
+                required_gate_ids=tuple(
+                    str(value).strip()
+                    for value in item.get("required_gate_ids", [])
+                    if str(value).strip()
+                ),
+                hao_acceptance_required=bool(
+                    item.get("hao_acceptance_required", False)
+                ),
+            )
+        )
+    if not plans:
+        raise ValueError("HAO_PARENT_TASK_PLANS_REQUIRED")
+    return ParentTaskPlanCatalog(plans)
+
+
+def action_catalog_for_targets(targets: tuple[SheetsMutationTarget, ...]) -> ActionCatalog:
+    return ActionCatalog(
+        ActionBinding(
+            binding_id=target.binding_id,
+            capability="formal_persistence",
+            provider="google-drive",
+            action_name="update_cells",
+            archetype=ActionArchetype.MUTATE,
+            externality=ActionExternality.PRIVATE_REVERSIBLE,
+            assurance_tags=FORMAL_SHEETS_ASSURANCE_TAGS,
+            authorization_scope_prefix="HAO_DRIVE_WRITE",
+            rollback_available=True,
+            allowed_argument_keys=("values_json",),
+            required_argument_keys=("values_json",),
+        )
+        for target in targets
+    )
+
+
+async def connect_temporal(settings: RuntimeSettings) -> Any:
+    from temporalio.client import Client
+
+    kwargs: dict[str, Any] = {"namespace": settings.temporal_namespace}
+    if settings.temporal_api_key:
+        kwargs["api_key"] = settings.temporal_api_key
+        kwargs["tls"] = True
+    return await Client.connect(settings.temporal_endpoint, **kwargs)
+
+
+def _initialize_operational_state(
+    persistence: Any,
+    values: dict[str, str],
+) -> None:
+    try:
+        persistence.operational_state.get()
+        return
+    except ValueError as exc:
+        if str(exc) != "OPERATIONAL_STATE_NOT_INITIALIZED":
+            raise
+    mode_raw = str(values.get("HAO_INITIAL_MODE", "")).strip().upper()
+    task = str(values.get("HAO_INITIAL_TASK", "")).strip()
+    if not mode_raw or not task:
+        raise ValueError("HAO_INITIAL_MODE_AND_TASK_REQUIRED")
+    persistence.operational_state.initialize(mode=Mode(mode_raw), task=task)
+
+
+def _oauth_settings(settings: RuntimeSettings) -> Any:
+    from mcp.server.auth.settings import AuthSettings
+    from pydantic import AnyHttpUrl
+
+    return AuthSettings(
+        issuer_url=AnyHttpUrl(settings.oauth_issuer_url),
+        resource_server_url=AnyHttpUrl(settings.oauth_resource_url),
+        required_scopes=[SCOPE_ACCESS],
+    )
+
+
+def _telemetry(settings: RuntimeSettings) -> Any | None:
+    if not settings.otel_endpoint:
+        return None
+    return configure_runtime_telemetry(
+        endpoint=settings.otel_endpoint,
+        role=settings.role.value,
+        region=settings.region,
+        environment=settings.environment.value,
+        release_id=settings.release_id,
+        deployment_id=settings.deployment_id,
+    )
+
+
+def _verify_schema(settings: RuntimeSettings) -> int:
+    return verify_postgres_schema(
+        settings.database_url,
+        minimum_version=settings.database_min_schema_version,
+        supported_compatibility_epochs=settings.storage_compatibility_epochs,
+    )
+
+
+def _runtime_identity_payload(settings: RuntimeSettings) -> dict[str, Any]:
+    return {
+        "role": settings.role.value,
+        "release_id": settings.release_id,
+        "deployment_id": settings.deployment_id,
+        "shared_compatibility_identity": settings.deployment_identity_fingerprint,
+        "role_identity": settings.role_identity_fingerprint,
+        "schema_version": settings.database_schema_version,
+        "schema_min_version": settings.database_min_schema_version,
+        "storage_compatibility_epochs": list(settings.storage_compatibility_epochs),
+        "temporal_worker_version": settings.temporal_worker_version,
+    }
+
+
+def _completion_attestor(settings: RuntimeSettings) -> CompletionAttestor:
+    return CompletionAttestor(
+        settings.attestation_secret.encode("utf-8"),
+        key_id=settings.attestation_key_id,
+        verification_keys={
+            key_id: secret.encode("utf-8")
+            for key_id, secret in settings.attestation_previous_keys
+        },
+    )
+
+
+async def build_api_app(values: dict[str, str]) -> Any:
+    settings = RuntimeSettings.from_mapping(values)
+    if settings.role != RuntimeRole.API:
+        raise ValueError("API_ROLE_REQUIRED")
+
+    _verify_schema(settings)
+    telemetry = _telemetry(settings)
+    targets = load_sheets_targets(values)
+    specs = load_task_policies(values)
+    parent_plans = load_parent_task_plans(values)
+    google_client = GoogleWorkspaceSheetsClient()
+    resolver = ConfiguredSheetsCommandResolver(targets)
+    persistence = build_postgres_persistence(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    reconciliation = PostgresReconciliationStore(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    reconciliation_inspector = TrustedDriveReconciliationInspector(
+        resolver=resolver,
+        client=google_client,
+        store=reconciliation,
+    )
+    reconciliation_retry_store = PostgresReconciliationRetryStore(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    _initialize_operational_state(persistence, values)
+
+    policy = GoogleAuthorityTaskPolicyProvider(google_client, specs)
+    gateway = ControlPlaneGateway(action_catalog_for_targets(targets), policy)
+    temporal_client = await connect_temporal(settings)
+    starter = TemporalWorkflowStarter(
+        temporal_client,
+        task_queue=settings.temporal_task_queue,
+    )
+    production = StableFinalizationProductionService(
+        ProductionExecutionService(
+            gateway=gateway,
+            starter=starter,
+            attestor=_completion_attestor(settings),
+            completion_store=persistence.completion,
+        ),
+        PostgresFinalizationIssueStore(
+            settings.database_url,
+            initialize_schema=False,
+        ),
+    )
+    parent_tasks = ProductionParentTaskService(
+        production=production,
+        store=PostgresParentTaskStore(
+            settings.database_url,
+            initialize_schema=False,
+        ),
+        plans=parent_plans,
+    )
+    base_bridge = MCPControlBridge(
+        production=production,
+        operational_state=persistence.operational_state,
+        run_registry=persistence.run_registry,
+        identity_policy=HaoMCPIdentityPolicy(settings.expected_hao_subject),
+        parent_tasks=parent_tasks,
+        reconciliation_store=reconciliation,
+        reconciliation_inspector=reconciliation_inspector,
+        reconciliation_retry_store=reconciliation_retry_store,
+    )
+    bridge = (
+        ObservableMCPControlBridge(base_bridge, telemetry)
+        if telemetry is not None
+        else base_bridge
+    )
+    verifier = JWKSAccessTokenVerifier(
+        issuer=settings.oauth_issuer_url,
+        audience=settings.oauth_audience,
+        jwks_url=settings.oauth_jwks_url,
+    )
+    mcp = build_mcp_control_server(
+        bridge,
+        token_verifier=verifier,
+        auth_settings=_oauth_settings(settings),
+        request_state_keys=settings.request_state_key_bytes,
+        request_state_audience=settings.mcp_request_state_audience,
+    )
+    mcp_app = build_mcp_http_app(
+        mcp,
+        allowed_hosts=settings.mcp_allowed_hosts,
+        allowed_origins=settings.mcp_allowed_origins,
+    )
+
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Mount, Route
+
+    lifecycle = RuntimeLifecycle()
+    lifecycle.mark_started()
+
+    async def livez(request: Any) -> JSONResponse:
+        del request
+        return JSONResponse({"status": "live", **_runtime_identity_payload(settings)})
+
+    async def startupz(request: Any) -> JSONResponse:
+        del request
+        status = 200 if lifecycle.startup_ready else 503
+        return JSONResponse(
+            {
+                "status": "started" if status == 200 else "starting",
+                **_runtime_identity_payload(settings),
+            },
+            status_code=status,
+        )
+
+    async def readyz(request: Any) -> JSONResponse:
+        del request
+        if not lifecycle.traffic_ready:
+            return JSONResponse(
+                {"status": "draining", **_runtime_identity_payload(settings)},
+                status_code=503,
+            )
+        try:
+            _verify_schema(settings)
+            state = persistence.operational_state.get()
+            return JSONResponse(
+                {
+                    "status": "ready",
+                    "mode": state.mode.value,
+                    "operational_version": state.version,
+                    **_runtime_identity_payload(settings),
+                }
+            )
+        except Exception as exc:
+            return JSONResponse(
+                {
+                    "status": "not_ready",
+                    "error": type(exc).__name__,
+                    **_runtime_identity_payload(settings),
+                },
+                status_code=503,
+            )
+
+    @asynccontextmanager
+    async def lifespan(app: Any):
+        del app
+        try:
+            async with mcp.session_manager.run():
+                yield
+        finally:
+            lifecycle.begin_shutdown()
+            if telemetry is not None:
+                telemetry.shutdown(
+                    timeout_millis=min(
+                        settings.graceful_shutdown_seconds * 1000,
+                        1000,
+                    )
+                )
+
+    return Starlette(
+        routes=[
+            Route("/livez", livez, methods=["GET"]),
+            Route("/startupz", startupz, methods=["GET"]),
+            Route("/readyz", readyz, methods=["GET"]),
+            Route("/healthz", readyz, methods=["GET"]),
+            Mount("/", app=mcp_app),
+        ],
+        lifespan=lifespan,
+    )
+
+
+async def run_worker(values: dict[str, str]) -> None:
+    settings = RuntimeSettings.from_mapping(values)
+    if settings.role != RuntimeRole.WORKER:
+        raise ValueError("WORKER_ROLE_REQUIRED")
+    if settings.worker_instance_count < 1:
+        raise ValueError("WORKER_INSTANCE_COUNT_MUST_BE_NON_ZERO")
+
+    _verify_schema(settings)
+    telemetry = _telemetry(settings)
+    targets = load_sheets_targets(values)
+    google_client = GoogleWorkspaceSheetsClient()
+    persistence = build_postgres_persistence(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    reconciliation = PostgresReconciliationStore(
+        settings.database_url,
+        initialize_schema=False,
+    )
+    resolver = ConfiguredSheetsCommandResolver(targets)
+    raw_provider = ControlledGoogleDriveProvider(resolver, google_client)
+    idempotent = IdempotentAsyncBroker(
+        raw_provider,
+        persistence.idempotency,
+        uniqueness_key_resolver=resolver.logical_append_uniqueness_key,
+    )
+    reconciliation_broker = ReconciliationAwareBroker(idempotent, reconciliation)
+    broker = (
+        ObservableReconciliationBroker(reconciliation_broker, reconciliation, telemetry)
+        if telemetry is not None
+        else reconciliation_broker
+    )
+    verifier = GoogleDriveOutcomeVerifier(resolver, google_client)
+    authority_guard = GoogleDriveAuthorityGuard(resolver, google_client)
+    activities = ExecutionActivities(
+        broker=broker,
+        verifier=verifier,
+        authority_guard=authority_guard,
+    )
+    temporal_client = await connect_temporal(settings)
+
+    from temporalio.common import VersioningBehavior, WorkerDeploymentVersion
+    from temporalio.worker import Worker, WorkerDeploymentConfig
+
+    worker = Worker(
+        temporal_client,
+        task_queue=settings.temporal_task_queue,
+        workflows=[HaoExecutionControlWorkflow],
+        activities=[
+            activities.preflight_authority,
+            activities.execute_tool,
+            activities.verify_outcome,
+        ],
+        identity=f"{settings.deployment_id}/{settings.temporal_worker_version}",
+        graceful_shutdown_timeout=timedelta(
+            seconds=max(1, settings.graceful_shutdown_seconds - 2)
+        ),
+        deployment_config=WorkerDeploymentConfig(
+            version=WorkerDeploymentVersion(
+                deployment_name=TEMPORAL_DEPLOYMENT_NAME,
+                build_id=settings.temporal_worker_version,
+            ),
+            use_worker_versioning=True,
+            default_versioning_behavior=VersioningBehavior.PINNED,
+        ),
+    )
+
+    loop = asyncio.get_running_loop()
+    shutdown = ShutdownSignalController()
+    shutdown.install(loop)
+
+    try:
+        async with worker:
+            await shutdown.event.wait()
+    finally:
+        shutdown.remove(loop)
+        if telemetry is not None:
+            telemetry.shutdown(
+                timeout_millis=min(
+                    settings.graceful_shutdown_seconds * 1000,
+                    1000,
+                )
+            )
+
+
+async def _main_async(values: dict[str, str]) -> None:
+    settings = RuntimeSettings.from_mapping(values)
+    if settings.role == RuntimeRole.WORKER:
+        await run_worker(values)
+        return
+
+    app = await build_api_app(values)
+    import uvicorn
+
+    port = int(str(values.get("PORT", "8080")))
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        timeout_graceful_shutdown=settings.graceful_shutdown_seconds,
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
+def main() -> None:
+    asyncio.run(_main_async(dict(os.environ)))
+
+
+if __name__ == "__main__":
+    main()
