@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   runtime-promotion-gate:
     name: runtime-promotion-gate
@@ -26,6 +30,8 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ai-space-generator/requirements-control.txt
       - name: Install Runtime v2 dependencies
         run: python -m pip install --upgrade pytest -r requirements-control.txt
       - name: Run complete Runtime v2 regression surface
@@ -46,6 +52,8 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ai-space-generator/requirements.txt
       - name: Install legacy application dependencies
         run: python -m pip install --upgrade pytest -r requirements.txt
       - name: Run legacy application regression surface
