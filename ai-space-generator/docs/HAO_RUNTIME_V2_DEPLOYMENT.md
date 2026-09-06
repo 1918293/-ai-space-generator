@@ -2,7 +2,9 @@
 
 ## Status
 
-This document selects the current production architecture target for Runtime v2. It is an EXP deployment decision, not evidence that any cloud resource, account, DNS name, OAuth tenant, database, or Temporal Cloud namespace has been provisioned.
+This document defines the current Runtime v2 production architecture target and deployment contract. It is an EXP engineering decision, not evidence that any GCP resource, billing relationship, DNS name, OAuth tenant, Cloud SQL database, Temporal Cloud namespace, provider credential, or production workload has been provisioned.
+
+Engineering PASS, Deployment PASS, Natural-use PASS, and System PASS remain separate evidence classes.
 
 ## 1. Selected topology
 
@@ -11,7 +13,7 @@ ChatGPT / approved clients
         |
         | HTTPS + OAuth 2.1 bearer token
         v
-Cloud Run Service — asia-east1 (Taiwan)
+Cloud Run Service — asia-east1
 Hao Runtime API / Streamable HTTP MCP
         |
         +--------------------+
@@ -19,227 +21,265 @@ Hao Runtime API / Streamable HTTP MCP
         v                    v
 Cloud SQL PostgreSQL     Temporal Cloud Namespace
 asia-east1               Namespace Endpoint + API key
-        ^                    |
-        |                    v
-        |              Cloud Run Worker Pool
-        |              asia-east1
-        |              Hao Temporal Worker
-        |                    |
-        +----------+---------+
-                   |
-                   v
-             Tool Broker
-                   |
-                   v
-        Controlled Provider Adapters
-        Drive / GitHub / later providers
-
-Secrets: Google Secret Manager
-Observability: OpenTelemetry-compatible traces/metrics/events
-Semantic Authority: existing Hao System canonical stores
-Projection: Handoff / XMemo / graphs / summaries / chat UI
-Authorization Server: standards-compliant external OAuth provider; Auth0 is the current implementation candidate, subject to end-to-end ChatGPT/MCP OAuth compatibility validation before production commitment.
+                             |
+                             | PINNED Worker Versioning
+                             v
+                   0..N active Worker Versions
+                   one Cloud Run Worker Pool
+                   per Temporal Worker Build ID
+                             |
+                             v
+                         Tool Broker
+                             |
+                             v
+                  Controlled Provider Adapters
 ```
 
-## 2. Why GCP asia-east1
+Secrets: Google Secret Manager  
+Observability: OpenTelemetry-compatible traces/metrics/events  
+Semantic Authority: existing Hao System canonical stores  
+Projection: Handoff / PR body / graphs / summaries / chat UI  
+Authorization Server: standards-compliant external OAuth provider; Auth0 remains a candidate pending real client E2E evidence.
 
-Runtime v2 should keep the API process, background worker, and transactional application state in one primary region unless a future HA decision intentionally changes that topology.
+## 2. Region and infrastructure Authority
 
-Current default region: `asia-east1` (Taiwan).
+Current primary region: `asia-east1` (Taiwan).
 
-Reasons:
+Runtime API, Worker compute, and Cloud SQL should remain co-located in the primary region unless a later HA/DR decision explicitly changes that topology. Region is a deployment decision, not an application invariant.
 
-- closest current Google Cloud region to the primary operator;
-- Cloud Run supports `asia-east1`;
-- Cloud Run Worker Pools support `asia-east1`;
-- Cloud SQL for PostgreSQL supports `asia-east1`;
-- co-location reduces unnecessary cross-region latency and egress between Runtime API, worker, and database.
+Authority separation:
 
-This is a deployment decision, not an application invariant. Runtime code must not reject a future disaster-recovery or migration region merely because today's primary is Taiwan.
+- Terraform owns GCP compute/infrastructure existence and configuration.
+- Temporal owns durable workflow routing and Worker Version lifecycle.
+- Runtime v2 owns execution/admission/completion semantics.
+- Hao canonical stores remain semantic Authority.
+- Provider receipt plus direct readback remains external-effect evidence.
 
-## 3. Runtime API: Cloud Run Service
+Do not introduce a second overlapping deployment authority without an explicit authority migration.
 
-The MCP/API ingress is an HTTP workload and belongs on a Cloud Run Service.
+## 3. Runtime API — Cloud Run Service
 
-Responsibilities:
+The API is the HTTP ingress and owns:
 
 - `/mcp` Streamable HTTP endpoint;
 - OAuth resource-server middleware;
 - exact Host/Origin transport security;
 - runtime context/status APIs;
 - controlled-run submission/finalization;
-- deployment-owned parent-task control surface;
-- owner-bound reconciliation inspect/resolve/retry-with-changed-delta control surface;
+- parent-task and reconciliation control surfaces;
 - health/readiness endpoints;
-- no provider side effect outside the broker boundary.
+- no consequential provider effect outside the Tool Broker boundary.
 
 Requirements:
 
 - stable HTTPS public hostname;
-- explicit MCP `allowed_hosts`; no wildcard disablement of DNS-rebinding protection;
+- explicit MCP Host allowlist and DNS-rebinding protection;
 - production configuration validated at startup;
-- application service identity with only the permissions needed by Runtime API;
-- secrets injected from Secret Manager, never committed to GitHub.
+- role-scoped service identity and Secret Manager access;
+- no secret values committed to GitHub.
 
-Cloud Run startup/liveness/readiness probes are generally available. Runtime still treats startup-success itself as a safe-to-serve boundary and keeps `/readyz` as an explicit schema/operational-state readback and canary signal rather than relying on one platform probe as the only admission control.
+API startup/readiness must include Runtime storage compatibility and operational-state checks. Platform health is not a substitute for Runtime admission/readback.
 
-## 4. Durable worker: Cloud Run Worker Pool
+## 4. Durable Worker — Temporal PINNED rainbow on Cloud Run Worker Pools
 
-Temporal workers are continuous non-HTTP pull workers. Cloud Run Worker Pool is therefore the selected baseline rather than a request-driven Cloud Run Service or scheduled Job.
+Temporal workers are continuous pull workers. Cloud Run Worker Pool remains the selected compute baseline.
 
-The worker runs:
+Runtime v2 uses Temporal Worker Versioning with immutable Worker Build IDs and `PINNED` default versioning behavior. PINNED workflows may outlive a deployment, including workflows waiting arbitrarily long for Hao authorization. Therefore production must support **rainbow coexistence** instead of assuming only one old/new worker pair.
 
-- Runtime v2 Temporal workflows;
-- tool-broker activities;
-- Authority preflight/readback activities;
-- verification and reconciliation activities.
+Current engineering model:
 
-Cloud Run Worker Pools are generally available. They do not provide a native request-driven autoscaler, although an external control plane can adjust instance count. Initial production therefore uses an explicitly managed fixed non-zero worker count. Any later external autoscaling must be separately accepted and must preserve Temporal versioning, idempotency, reconciliation, shutdown, and minimum-availability invariants.
+- `0..N` Worker Versions may exist simultaneously;
+- each Temporal Worker Build ID owns one deterministic Cloud Run Worker Pool;
+- Terraform owns pool existence and manual instance count;
+- Temporal owns Current/Ramping routing;
+- a newly created candidate may exist with zero compute before activation;
+- an old Worker Version must not be removed while pinned workflows can still route to it;
+- after direct Temporal readback proves a version safely Drained, its pool may first be scaled to `0` and retained before later deletion;
+- deletion must never be inferred only from Terraform input removal.
 
-Temporal's newer Serverless Workers integration remains a separate future option and must not become an initial production dependency without its own Hao Runtime acceptance evidence.
+This deliberately avoids having two independent traffic percentages — Cloud Run revision splitting and Temporal workflow routing — for Worker rollout.
 
-## 5. Durable application state: Cloud SQL PostgreSQL
+### Worker health layers
 
-SQLite remains useful for reference tests but is not the production multi-process state store.
+Worker health must be separated into two layers:
 
-PostgreSQL owns application/runtime records that must survive process replacement and be transactionally consistent, including the production equivalents of:
+1. **Cloud Run startup/liveness** — local process/runtime health only. Liveness must detect unrecoverable local failure such as a dead process/event-loop failure; it must not fail merely because Temporal Cloud is temporarily unreachable.
+2. **Temporal rollout admission** — direct server readback that the expected Worker Build ID has pollers for all expected task queues before ramp/current promotion.
 
-- operational state/events;
-- MCP workflow ownership bindings;
-- authoritative completion records, including the signing `key_id` that minted each completion receipt;
-- stable finalization issuance reservations needed for response-loss/restart idempotency;
-- durable broker idempotency/effect state;
-- reconciliation records and retry reservations;
-- parent task/application state not already owned by Temporal workflow history.
+Do not use missing-poller override flags as the normal rollout path.
 
-Runtime v2 now has explicit ordered migrations through engineering schema **v3**:
+Temporal Serverless Workers / Kubernetes Worker Controller remain outside the initial baseline; they may be evaluated later only if they materially reduce operational cost without creating a second compute authority.
 
-- v1 establishes the durable Runtime tables;
-- v2 adds parent-task row revision/dependency state and reconciliation retry reservations;
-- v3 adds durable completion signing `key_id`.
+## 5. Durable application state — Cloud SQL PostgreSQL
 
-Production API and worker fail closed unless the configured database schema exactly matches the binary-supported version. This engineering implementation is not evidence that a real Cloud SQL instance has been created or migrated; the first authorized real migration, concurrency validation, backup/PITR evidence, and restore drill remain Deployment gates.
+SQLite remains a reference/test store only. PostgreSQL owns Runtime records that require durable multi-process transactional semantics, including operational state/events, workflow ownership, authoritative completion, stable finalization, broker idempotency/effect state, reconciliation, and parent-task state not already owned by Temporal history.
 
-## 6. Workflow durability: Temporal Cloud
+Runtime v2 currently has ordered physical migrations through engineering schema v3:
 
-Selected baseline: managed Temporal Cloud rather than operating a self-hosted Temporal cluster.
+- v1: base durable Runtime tables;
+- v2: parent-task row revision/dependency state and reconciliation retry reservations;
+- v3: durable completion signing `key_id`.
 
-Reasons:
+### Storage compatibility contract
 
-- Runtime v2 requires durable waits, restart/resume, signals, and workflow history;
-- self-hosting Temporal would introduce a second reliability platform that Hao System itself would have to operate;
-- the managed service reduces operational burden while preserving the required workflow semantics.
+Physical migration version and application compatibility are intentionally separate.
 
-Connection policy:
+Each Runtime binary declares:
 
-- use the Namespace Endpoint rather than hardcoding a regional endpoint;
-- store API key in Secret Manager;
-- rotate credentials without code changes;
-- do not use Temporal Activity automatic retries for consequential broker actions unless Runtime v2 has explicitly classified the operation retry-safe;
-- retain Runtime v2 idempotency/`UNKNOWN_EFFECT` semantics even when Temporal itself is healthy.
+- a minimum supported physical schema version; and
+- an explicit set of supported storage compatibility epochs.
 
-Worker code uses Temporal deployment versioning with an immutable worker build ID and `PINNED` default versioning behavior. Real namespace routing/version promotion remains an external deployment-plane action.
+Rules:
 
-## 7. Secret ownership
+- additive **EXPAND** migrations may advance physical schema version without advancing compatibility epoch;
+- older and newer PINNED Worker Versions may coexist when both support the current compatibility epoch;
+- Runtime startup fails closed if the database is below its minimum physical version or the current compatibility epoch is unsupported;
+- migration verification itself remains exact and fail-closed;
+- a destructive **CONTRACT** migration may advance compatibility epoch only after direct Temporal readback proves every incompatible older Worker Version is safely Drained/non-serving;
+- do not weaken this to “accept any newer schema”. Compatibility must remain explicit.
+
+This contract prevents a long-lived pinned workflow from becoming permanently stuck merely because the physical database schema advanced during its wait.
+
+Real Cloud SQL migration, concurrency evidence, backup/PITR evidence, and isolated restore drill remain Deployment gates.
+
+## 6. Runtime identity model
+
+Do not treat every API and Worker release field as one cross-role identity.
+
+Runtime v2 separates three identities:
+
+### Shared Runtime Compatibility Identity
+
+Contains only values that must genuinely agree across compatible API/Worker processes, including:
+
+- environment and region;
+- durable database identity;
+- storage compatibility contract/epoch;
+- Temporal endpoint/namespace/task queue;
+- shared deployment-owned provider/Authority configuration fingerprints where applicable.
+
+### API Release Identity
+
+Contains API-specific release properties, including:
+
+- API release/deployment identity;
+- public MCP URL and Host/Origin policy;
+- OAuth resource-server configuration;
+- completion-attestation generation/key identity;
+- API-specific secret/config bindings.
+
+### Worker Version Identity
+
+Contains Worker-version-specific properties, including:
+
+- Temporal Worker Deployment/Build ID;
+- immutable worker image digest;
+- Worker release identity;
+- version-specific capacity and storage compatibility declaration.
+
+A new API release must be able to coexist with an older compatible pinned Worker Version. Worker Build ID therefore must not be an API/Worker shared equality invariant.
+
+## 7. Temporal rollout admission
+
+A normal Worker rollout sequence is:
+
+1. materialize candidate Worker compute without deleting older versions;
+2. start candidate capacity;
+3. direct-read Temporal Worker Version and expected task queues;
+4. require pollers on every expected task queue;
+5. only then set/ramp the candidate version;
+6. verify workflow/activity health and Runtime evidence;
+7. promote Current only after admission evidence passes;
+8. retain prior version while it is Active/Draining;
+9. require repeated direct Drained evidence before scale-to-zero/retirement;
+10. preserve rollback/recovery path for pinned workflows.
+
+Deployment automation should use a single authorized Temporal routing manager identity so competing writers cannot independently change Current/Ramping state.
+
+## 8. Secret ownership
 
 Selected baseline: Google Secret Manager.
 
-Secrets include at least:
-
-- current completion-attestation signing secret/key material;
-- bounded previous completion verification-key map when a rollback/in-flight compatibility window requires it;
-- Temporal Cloud API key;
-- MCP request-state sealing keys;
-- OAuth verifier/JWKS or introspection credentials when needed;
-- database credential or password-bearing URL where workload identity/passwordless access is not used;
-- provider credentials that cannot use workload identity.
-
-Requirements:
+Production requirements:
 
 - no secret values in source control;
-- production service identity receives only Secret Accessor permissions for the secrets it needs;
-- secret-backed configuration is bound to immutable numeric Secret Manager versions rather than moving aliases;
+- service identities receive only role-required Secret Accessor permissions;
+- secret-backed configuration binds immutable numeric Secret Manager versions, not moving aliases;
 - completion signing keys carry explicit key IDs;
-- current completion `key_id` is cryptographically bound into the signed receipt and durably persisted with authoritative completion state;
-- previous completion keys are verification-only and accepted only while explicitly present in the bounded previous-key map; removal is the Runtime-level revocation boundary;
-- startup fails if required secrets or conditional secret bindings are unavailable.
+- previous completion keys are verification-only and remain bounded/revocable;
+- password-bearing database URLs require immutable secret binding;
+- startup fails closed if required secrets or bindings are unavailable.
 
-`HAO_DATABASE_URL` only becomes a required Secret Manager binding when the URL itself embeds a password. Runtime does not pretend that automatic IAM database authentication or another Cloud SQL connector is already wired merely because the code accepts a PostgreSQL URL.
+`HAO_DATABASE_URL` need not be secret-bound when it contains no password; Runtime must not pretend passwordless/IAM DB auth is wired unless deployment evidence proves it.
 
-## 8. OAuth / identity decision
+## 9. OAuth / Hao identity
 
 Runtime MCP is an OAuth Resource Server, not an Authorization Server.
 
-Current architecture:
+Scopes remain layered:
 
-```text
-Authorization Server
-    -> authenticates Hao
-    -> issues token for Runtime v2 resource/audience
-    -> scopes
-       hao:access
-       hao:read
-       hao:execute
-       hao:approve
+- `hao:access` — global MCP access;
+- `hao:read` — per-tool read permission;
+- `hao:execute` — per-tool execution permission;
+- `hao:approve` — per-tool approval permission.
 
-Runtime MCP Resource Server
-    -> verifies signature/introspection
-    -> validates issuer
-    -> validates resource/audience
-    -> validates expiry
-    -> validates global hao:access
-    -> maps subject
-    -> application policy verifies exact Hao subject
-    -> each tool verifies its own read/execute/approve scope
-```
+OAuth identity is not consequential-action approval. Hao-origin authorization must remain bound to the exact current run/action scope and current trusted policy/Authority context.
 
-Important separation:
+The actual ChatGPT/private custom-MCP consumer capability is a separate Natural-use gate and must be tested on the real account/surface; infrastructure deployment success must not be treated as proof of consumer ingress compatibility.
 
-- `hao:access` is the only global MCP middleware scope.
-- `hao:read`, `hao:execute`, and `hao:approve` are per-tool application permissions.
-- A read token must not require or imply `hao:approve`.
-- An approve-only operation must not change durable state and then fail its response merely because a hidden `hao:read` check was added afterward.
-- OAuth identity is not itself a consequential-action approval; exact action approval remains a Hao-origin human confirmation bound to current run scope.
-- Parent-task Hao acceptance and reconciliation dispositions also require human confirmation at their own control boundaries.
+## 10. Decision provenance and completion traceability
 
-Auth0 is currently the leading implementation candidate because it supports custom API audiences and scopes and standard OAuth authorization flows. It is not yet production-selected until the actual ChatGPT/private MCP connection completes end-to-end with the required client registration/authorization behavior. Runtime interfaces remain provider-neutral so a standards-compatible IdP can replace it without changing execution semantics.
+Runtime-owned decision provenance is part of the deployment contract.
 
-## 9. Production configuration identity
+Current engineering Phase A mints runtime-owned `policy_fingerprint` and `decision_id` from trusted policy, Authority snapshot, run/action, Mode/TASK, operational version, and trusted resolution context. Model/caller input does not own these fields.
 
-API and worker must load the same deployment identity, including:
+Remaining Phase B requirement:
 
-- environment;
-- runtime role;
-- region;
-- release/deployment identity;
-- current database schema version;
-- public MCP resource URL;
-- explicit MCP Host/Origin allowlists;
-- PostgreSQL URL identity;
-- Temporal endpoint/namespace/task queue/worker version;
-- OAuth issuer/resource/audience;
-- expected Hao subject;
-- current attestation key ID;
-- observability endpoint;
-- deployment-owned provider target catalog through `HAO_SHEETS_TARGETS_JSON`;
-- trusted task policies and Authority source bindings through `HAO_TASK_POLICIES_JSON`;
-- deployment-owned multi-action parent plans through `HAO_PARENT_TASK_PLANS_JSON`.
+- admission result, provider execution/verification, observability events, authoritative completion attestation, and durable completion persistence must remain traceable to the same runtime-owned decision identity;
+- caller/model must not be able to forge or replace that identity;
+- migration must be backward-compatible and preserve existing durable completion semantics.
 
-A brand-new database with no `operational_state` row additionally requires deployment-owned `HAO_INITIAL_MODE` and `HAO_INITIAL_TASK` to seed first boot. They do not override existing durable state on restart.
+Phase A Engineering PASS is not full Decision Provenance completion until Phase B evidence exists.
 
-The three JSON application contracts are not model-authored instructions. For the currently implemented Google Sheets controlled path:
+## 11. Terraform / GitHub deployment security
 
-- `HAO_SHEETS_TARGETS_JSON` owns the exact binding ID, spreadsheet ID, A1 range, write option, and Authority file sources;
-- `HAO_TASK_POLICIES_JSON` owns TASK acceptance criteria, Authority sources, required gates, Hao-acceptance requirement, and required/forbidden action assurance tags;
-- `HAO_PARENT_TASK_PLANS_JSON` owns parent `plan_id`, exact TASK identity, child slot IDs, requested capabilities, trusted binding IDs, authorization targets, parent gates, and parent Hao-acceptance requirement.
+Selected deployment direction remains GitHub Actions OIDC -> Google Workload Identity Federation -> short-lived Google credentials -> Terraform.
 
-Secret-binding rules are conditional where appropriate:
+The bootstrap currently proves repository/owner/ref-scoped WIF engineering, but production credential admission still requires further hardening:
 
-- `HAO_TEMPORAL_API_KEY`, `HAO_ATTESTATION_SECRET`, and `HAO_MCP_REQUEST_STATE_KEYS` are always secret-bound in production;
-- a non-empty `HAO_ATTESTATION_PREVIOUS_KEYS_JSON` is secret-bound as one versioned previous-key verification map;
-- a password-bearing `HAO_DATABASE_URL` is secret-bound as one immutable versioned value.
+- privileged service-account impersonation must be constrained by exact trusted workflow identity and, for apply, an approved GitHub Environment or equivalent protected approval boundary;
+- a shell branch check is not sufficient as the only credential-level control;
+- PLAN and APPLY authorization should be separable even when they reuse one WIF pool/provider;
+- no long-lived Google service-account key by default.
 
-Critical invariants:
+### Saved-plan protocol
+
+Real Terraform plan/apply remains an open deployment-plane carrier. The intended protocol is:
+
+1. credentialed `terraform plan -out=<saved-plan>` against the exact protected backend;
+2. compute plan digest and bind Git SHA, target identity, tool/provider lock identity, and plan-run ID;
+3. store the binary plan in protected private storage, not a public GitHub artifact;
+4. expose only sanitized review output;
+5. bind Hao approval to the exact plan manifest/digest;
+6. APPLY downloads the exact saved object generation, re-verifies digest/context, and runs `terraform apply <saved-plan>`;
+7. provider direct readback follows apply;
+8. bounded lifecycle cleanup removes stale plan objects.
+
+Saved Terraform plans and machine-readable plan output may contain sensitive values and must not be published as ordinary public Actions artifacts.
+
+## 12. Deployment-owned application contracts
+
+The model must not author deployment-owned target/safety configuration.
+
+Current controlled Google Sheets path uses:
+
+- `HAO_SHEETS_TARGETS_JSON` — exact binding ID, spreadsheet ID, A1 range, write option, Authority sources;
+- `HAO_TASK_POLICIES_JSON` — TASK acceptance criteria, Authority sources, gates, Hao-acceptance and assurance-tag rules;
+- `HAO_PARENT_TASK_PLANS_JSON` — parent plan, TASK identity, child slots, capabilities, trusted bindings, authorization targets, parent gates.
+
+A brand-new database additionally requires deployment-owned first-boot Mode/TASK values. They must not overwrite existing durable state on restart.
+
+Critical shared invariants include:
 
 ```text
 OAuth resource == public MCP URL
@@ -247,102 +287,85 @@ OAuth audience == public MCP URL
 public MCP hostname in explicit Host allowlist
 production public/auth URLs use HTTPS
 production persistence is PostgreSQL
-configured schema version == binary-supported schema version
-required secrets exist and signing secret meets minimum strength
-current completion key id is non-empty and bound to signed/durable completion identity
-previous completion keys are verification-only and explicitly retained/revoked
-password-bearing database URL has an immutable secret binding
-provider target / task policy / parent plan config exists and parses successfully
-parent plan TASK == current runtime TASK at parent start
-model cannot author target spreadsheet/range or parent child capability/binding
-API and worker use the same database identity
-API and worker use compatible provider target configuration for the controlled provider path
+storage physical version >= binary minimum
+current storage compatibility epoch is explicitly supported
+required secrets/bindings exist
+current completion key id is non-empty and durable
+provider target / task policy / parent plan config parses successfully
+parent plan TASK == current Runtime TASK at parent start
+model cannot author runtime-owned target/binding/decision identity
+API and Worker share only true compatibility invariants
+Worker Build ID remains Worker-version-specific
+Temporal promotion requires expected poller/task-queue evidence
 ```
 
-Missing or malformed required deployment-owned configuration is a startup failure, not a warning. A configuration failure must not be repaired by allowing the model to supply runtime-owned target, binding, Authority, safety, or completion fields.
+Malformed required configuration is a startup/admission failure, not a warning.
 
-## 10. What is deliberately not selected
+## 13. Deliberately not selected
 
-### Not selected: self-hosted Temporal
+- self-hosted Temporal as the initial baseline;
+- SQLite as production state;
+- disabling MCP DNS-rebinding protection;
+- one all-powerful OAuth token;
+- model-supplied reconciliation evidence or blind replay of `UNKNOWN_EFFECT`;
+- experimental Temporal Serverless Workers as an initial dependency;
+- Cloud Deploy or another overlapping deployment authority without explicit migration;
+- automatic deletion of old Worker Pools solely because a Terraform input disappeared;
+- indefinite legacy/native critical execution.
 
-Reason: creates avoidable platform-operational responsibility for a system whose purpose is to improve reliability.
+## 14. Deployment gates before real traffic
 
-### Not selected: SQLite production state
+Production is not ready until all applicable gates pass with direct evidence:
 
-Reason: reference/single-process semantics are insufficient for API/worker multi-process deployment and long-lived authoritative state.
+1. Runtime production config/startup validation.
+2. Real Streamable HTTP Host/Origin security.
+3. Real OAuth positive/negative E2E and exact Hao subject/scope checks.
+4. Cloud SQL migration/concurrency plus backup/PITR and isolated restore drill.
+5. Storage expand/contract compatibility evidence across multiple pinned Worker Versions.
+6. Temporal restart/resume/signal/version-routing and expected-poller/task-queue evidence.
+7. Worker local startup/liveness evidence independent from Temporal connectivity.
+8. Completion signing key rotation/replay/revocation evidence.
+9. Decision Provenance Phase B end-to-end completion traceability.
+10. OpenTelemetry correlation without model payload/expected-state leakage.
+11. First real Authority adapter and first real provider mutation adapter with receipt/readback/idempotency/reconciliation.
+12. No uncontrolled/native result can update authoritative completion.
+13. Natural-use evidence demonstrates lower correction/recovery burden than the legacy path.
 
-### Not selected: disabling MCP DNS-rebinding protection
+## 15. Current execution status
 
-Reason: a real hostname is not justification for removing the boundary; exact Host allowlisting is available.
+Implemented and engineering-verified in the EXP lineage includes:
 
-### Not selected: all-powerful OAuth token
+- Runtime v2 core execution/admission/completion contracts;
+- Streamable HTTP MCP and OAuth resource-server boundary;
+- durable PostgreSQL migration baseline through physical schema v3;
+- explicit storage compatibility contract for multi-version PINNED coexistence;
+- split shared/API/Worker identity model;
+- Temporal PINNED Worker Versioning assembly;
+- `0..N` Worker Build-ID keyed Cloud Run Worker Pool Terraform model with scale-zero retention;
+- deterministic Temporal rollout policy gates for capacity/poller/task-queue/Drained conditions;
+- provider receipt/readback/idempotency/`UNKNOWN_EFFECT` reconciliation boundaries;
+- parent-task durable coordination and restart semantics;
+- Decision Provenance Phase A;
+- OpenTelemetry-compatible Runtime events;
+- role-scoped production secret/config validation;
+- dual Runtime v2 and legacy regression gates;
+- Terraform fmt/init/validate/mocked-test engineering gates.
 
-Reason: global read+execute+approve scopes collapse the authorization layers. Runtime uses base access + per-tool scopes instead.
+Still not proven/executed:
 
-### Not selected: model-supplied reconciliation evidence or blind replay
-
-Reason: `UNKNOWN_EFFECT` means the prior side effect may already have occurred. Reconciliation resolution may use only trusted evidence already present in the durable case. Retry-with-delta is allowed only after a retry-safe verified resolution, must change the expected-state delta, creates a new controlled run, and still goes through normal authorization and verification.
-
-### Not selected: Temporal Serverless Workers as initial production dependency
-
-Reason: the selected baseline already uses ordinary Cloud Run Worker Pools and Temporal worker versioning. A newer serverless integration may be reconsidered only after it demonstrates material operational value and receives its own Hao Runtime acceptance evidence; it is not needed to close the current deployment gates.
-
-### Not selected: indefinite legacy/native critical execution
-
-Reason: Runtime v2 exists to replace that authority model. Native/direct effects remain non-authoritative for controlled scope and must ultimately lose critical-path authority.
-
-## 11. Deployment gates before real traffic
-
-A production environment is not ready until all are true:
-
-1. Runtime config startup validation PASS, including all required deployment-owned target/policy/parent-plan contracts and first-boot state contract where applicable.
-2. Streamable HTTP Host/Origin security PASS on the real hostname.
-3. OAuth negative and positive E2E PASS against the real Authorization Server.
-4. Wrong subject / missing per-tool scope tests PASS.
-5. Cloud SQL migrations and transactional concurrency tests PASS, including completion key-ID persistence, stable-finalization, parent-task, workflow-ownership, idempotency, and reconciliation records.
-6. Cloud SQL backup/PITR evidence plus a real isolated restore drill meet the configured RPO/RTO.
-7. Temporal worker restart/resume/signal/version-routing tests PASS against the target namespace.
-8. completion signing key rotation/replay/revocation tests PASS with the actual secret-version rollout/readback.
-9. OpenTelemetry traces correlate MCP request -> parent/child workflow where applicable -> activity -> provider receipt -> verification -> reconciliation/finalization -> completion without recording model payloads or expected-state contents.
-10. first real Authority adapter PASS.
-11. first real provider mutation adapter PASS with receipt/readback/idempotency/reconciliation.
-12. no uncontrolled/native result can update authoritative completion.
-13. natural-use controlled task evidence shows lower correction/recovery burden than the legacy path.
-
-## 12. Current execution status
-
-Designed / implemented in the EXP engineering lineage:
-
-- Runtime v2 core contracts;
-- Temporal workflow prototype and pinned worker-versioning assembly;
-- MCP server/bridge and explicit HTTP transport allowlist;
-- OAuth scope separation, exact subject policy, and post-approval response behavior that does not add a hidden read scope;
-- deployment-owned provider target, trusted task policy, and parent-task plan configuration contracts;
-- completion attestation plus stable finalization issuance reservation wired into the shared API production path for response-loss/restart retries;
-- key-ID-aware completion attestation/verification and durable completion persistence, including bounded previous-key verification/revocation semantics in the deployment-preflight candidate;
-- ordered PostgreSQL engineering migrations through schema v3, including completion `key_id` persistence;
-- first-boot `HAO_INITIAL_MODE`/`HAO_INITIAL_TASK` deployment contract and conditional password-bearing database URL secret-binding guard;
-- parent multi-action task coordinator using the same controlled child `ProductionExecutionService` path, shared workflow ownership registry, existing authorization path, restart-safe Postgres state, and `UNSYNCED` reconciliation boundary;
-- owner-bound reconciliation inspect/resolve/retry-with-changed-delta MCP controls over the existing durable reconciliation store, with no model-supplied verification evidence and no blind replay of `UNKNOWN_EFFECT`;
-- OpenTelemetry-compatible events for direct controlled runs, parent-task controls, reconciliation controls, provider outcomes, and authoritative completion, with regression coverage preventing model payload/delta leakage;
-- dual Runtime v2 and legacy application CI gates for engineering regression coverage.
-
-The isolated deployment-preflight candidate has passed the full Runtime engineering test surface, production-entrypoint compilation, runtime-container build, and legacy regression before this document sync. Any document/code change after that evidence requires a new exact-head gate before promotion.
-
-Not executed yet:
-
-- GCP project/resource provisioning;
-- Artifact Registry/image publication or deployment;
-- Cloud Run Service or Worker Pool deployment;
-- Cloud SQL instance/schema migration, backup/PITR configuration, or restore drill;
-- Secret Manager secret creation/value/version rotation/revocation;
-- Temporal Cloud production namespace or routing changes;
-- real Auth0/other IdP configuration;
-- DNS/TLS hostname;
-- real Workspace service-account file sharing/permission setup for canonical Authority targets;
-- real Drive/GitHub broker adapter production cutover;
+- exact GCP target project selection/readback and authenticated provider control surface;
+- GCS/WIF/deployer bootstrap apply;
+- credentialed real-project Terraform plan/apply;
+- workflow/environment-level WIF privilege hardening;
+- Artifact Registry publication and actual Cloud Run/Worker Pool deployment;
+- real Worker local health probe deployment evidence;
+- Cloud SQL production migration/PITR/restore drill;
+- Secret Manager production values/rotation;
+- Temporal Cloud namespace/routing mutations and live multi-version drain evidence;
+- real OAuth IdP configuration and actual ChatGPT consumer ingress;
+- Decision Provenance Phase B;
+- real Workspace/GitHub provider cutover;
 - natural-use production traffic;
-- legacy critical-path decommission;
-- PR merge or production cutover.
+- PR merge, production cutover, and legacy critical-path decommission.
 
-No item in the second list may be described as completed until direct deployment/readback evidence exists. CI PASS is Engineering PASS only; it is not Deployment PASS, Natural-use PASS, or System PASS.
+No item in the second list may be described as completed without direct provider/deployment/readback evidence. CI PASS is Engineering PASS only.
