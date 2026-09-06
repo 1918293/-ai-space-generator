@@ -473,7 +473,7 @@ resource "google_cloud_run_v2_job" "migration" {
 
         env {
           name  = "HAO_DATABASE_SCHEMA_VERSION"
-          value = "3"
+          value = "4"
         }
 
         resources {
