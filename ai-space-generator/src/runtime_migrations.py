@@ -335,8 +335,14 @@ def verify_postgres_schema(
             raise ValueError("STORAGE_MINIMUM_VERSION_MUST_BE_POSITIVE")
         if any(epoch < 1 for epoch in supported_compatibility_epochs):
             raise ValueError("STORAGE_COMPATIBILITY_EPOCH_MUST_BE_POSITIVE")
-    elif expected_version < 1:
-        raise ValueError("STORAGE_EXPECTED_VERSION_MUST_BE_POSITIVE")
+    else:
+        if expected_version < 1:
+            raise ValueError("STORAGE_EXPECTED_VERSION_MUST_BE_POSITIVE")
+        if expected_version != CURRENT_RUNTIME_SCHEMA_VERSION:
+            raise RuntimeError(
+                "RUNTIME_BINARY_SCHEMA_VERSION_MISMATCH:"
+                f"{expected_version}!={CURRENT_RUNTIME_SCHEMA_VERSION}"
+            )
 
     connect = connect_factory or _default_connect_factory(database_url)
     conn = connect()
