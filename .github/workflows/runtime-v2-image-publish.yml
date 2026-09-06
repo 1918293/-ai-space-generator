@@ -1,0 +1,103 @@
+name: Runtime v2 Image Publish
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: runtime-v2-image-publish
+  cancel-in-progress: false
+
+jobs:
+  publish-runtime-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      GCP_REGION: asia-east1
+      ARTIFACT_REPOSITORY: hao-runtime-v2-containers
+      IMAGE_NAME: hao-runtime-v2
+    steps:
+      - name: Fail closed on shared EXP ref and deployment identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/exp/execution-control-plane-v1" ]]; then
+            echo "Image publication is restricted to refs/heads/exp/execution-control-plane-v1" >&2
+            exit 1
+          fi
+          for name in GCP_PROJECT_ID GCP_WIF_PROVIDER GCP_DEPLOY_SERVICE_ACCOUNT; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required GitHub Actions variable: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Checkout exact workflow ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Authenticate with GitHub OIDC
+        id: google-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Build, push, and read back immutable Runtime digest
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          REGISTRY="${GCP_REGION}-docker.pkg.dev"
+          IMAGE_BASE="${REGISTRY}/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+          IMAGE_TAG="${IMAGE_BASE}:${GITHUB_SHA}"
+
+          printf '%s' "${ACCESS_TOKEN}" | docker login -u oauth2accesstoken --password-stdin "https://${REGISTRY}"
+          docker build -f ai-space-generator/Dockerfile.runtime -t "${IMAGE_TAG}" ai-space-generator
+          docker push "${IMAGE_TAG}"
+
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE_TAG}" | awk '/^Digest:/ {print $2; exit}')"
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Artifact Registry digest readback failed" >&2
+            exit 1
+          fi
+          IMMUTABLE_REF="${IMAGE_BASE}@${DIGEST}"
+
+          python - "${IMAGE_TAG}" "${DIGEST}" "${IMMUTABLE_REF}" <<'PY'
+          import json
+          import os
+          import sys
+
+          image_tag, digest, immutable_ref = sys.argv[1:]
+          payload = {
+              "project_id": os.environ["GCP_PROJECT_ID"],
+              "region": os.environ["GCP_REGION"],
+              "repository": os.environ["ARTIFACT_REPOSITORY"],
+              "image_name": os.environ["IMAGE_NAME"],
+              "git_sha": os.environ["GITHUB_SHA"],
+              "tag": image_tag,
+              "digest": digest,
+              "immutable_ref": immutable_ref,
+          }
+          with open("runtime-image-digest.json", "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+          cat runtime-image-digest.json >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Preserve exact image digest handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-v2-image-digest-${{ github.sha }}
+          path: runtime-image-digest.json
+          if-no-files-found: error
