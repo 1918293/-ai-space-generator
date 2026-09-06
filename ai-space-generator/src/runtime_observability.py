@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterator
 
+from .execution_control import EvidenceKind, ExecutionRecord
+
 
 def otlp_http_signal_endpoints(endpoint: str) -> tuple[str, str]:
     """Resolve one configured OTLP/HTTP endpoint into trace + metric endpoints."""
@@ -88,6 +90,67 @@ class RuntimeTelemetry:
         ):
             pass
 
+    def record_decision_event(
+        self,
+        event: str,
+        record: ExecutionRecord,
+        *,
+        admission_code: str = "",
+        completion_code: str = "",
+        authoritative: bool | None = None,
+    ) -> None:
+        """Emit trace-only Decision Provenance without increasing metric cardinality.
+
+        Decision IDs, policy fingerprints and run IDs are intentionally excluded
+        from counters. Evidence is represented only as fixed-kind PASS counts;
+        receipt IDs, provider payloads, model arguments and source content never
+        enter telemetry through this API.
+        """
+        decision_id = record.decision_id.strip()
+        policy_fingerprint = record.policy_fingerprint.strip()
+        if not decision_id or not policy_fingerprint:
+            # Observability must not change execution semantics for historical
+            # workflows created before the provenance contract existed.
+            return
+
+        attributes: dict[str, Any] = {
+            "hao.run.id": record.run_id,
+            "hao.decision.id": decision_id,
+            "hao.policy.fingerprint": policy_fingerprint,
+            "hao.run.phase": record.phase.value,
+        }
+        action = record.action
+        if action is not None and action.provider.strip():
+            attributes["hao.provider"] = action.provider.strip()
+
+        scoped_passes = tuple(
+            receipt
+            for receipt in record.evidence
+            if receipt.passed
+            and (
+                action is None
+                or not receipt.claim_scope.strip()
+                or receipt.claim_scope.strip() == action.action_id
+            )
+        )
+        for kind in EvidenceKind:
+            attributes[f"hao.evidence.{kind.value.lower()}.count"] = sum(
+                1 for receipt in scoped_passes if receipt.kind == kind
+            )
+
+        if admission_code.strip():
+            attributes["hao.admission.code"] = admission_code.strip()
+        if completion_code.strip():
+            attributes["hao.completion.code"] = completion_code.strip()
+        if authoritative is not None:
+            attributes["hao.completion.authoritative"] = authoritative
+
+        with self.tracer.start_as_current_span(
+            f"hao.runtime.decision.{event}",
+            attributes=attributes,
+        ):
+            pass
+
     def record_authoritative_completion(self) -> None:
         self.authoritative_completions.add(1)
 
@@ -144,8 +207,8 @@ def configure_runtime_telemetry(
 
     No model prompts, model outputs, action arguments, expected-state deltas,
     provider payloads, OAuth tokens, signing material, subject identifiers, or
-    secret values are accepted by this API. High-cardinality run IDs are span
-    attributes only, never metric labels.
+    secret values are accepted by this API. High-cardinality run/decision IDs
+    and policy fingerprints are span attributes only, never metric labels.
     """
     from opentelemetry import metrics, trace
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
