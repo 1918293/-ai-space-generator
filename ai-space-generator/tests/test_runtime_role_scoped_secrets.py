@@ -19,6 +19,8 @@ def _common_values(role: str) -> dict[str, str]:
         "HAO_MCP_REQUEST_STATE_AUDIENCE": "hao-system-control",
         "HAO_DATABASE_URL": "postgresql://runtime@db.internal/runtime",
         "HAO_DATABASE_SCHEMA_VERSION": str(CURRENT_RUNTIME_SCHEMA_VERSION),
+        "HAO_DATABASE_MIN_SCHEMA_VERSION": str(CURRENT_RUNTIME_SCHEMA_VERSION),
+        "HAO_STORAGE_COMPATIBILITY_EPOCHS": "1",
         "HAO_DATABASE_RPO_SECONDS": "300",
         "HAO_DATABASE_RTO_SECONDS": "3600",
         "HAO_TEMPORAL_ENDPOINT": "hao-runtime.tmprl.cloud:7233",
