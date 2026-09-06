@@ -22,6 +22,8 @@ class ExecutionAttestation:
     issued_at: str
     signature: str
     key_id: str = ""
+    policy_fingerprint: str = ""
+    decision_id: str = ""
 
 
 def evidence_digest(record: ExecutionRecord) -> str:
@@ -50,6 +52,8 @@ def _payload_dict(
 ) -> dict[str, object]:
     if record.action is None:
         raise ValueError("ATTESTATION_REQUIRES_ACTION")
+    if bool(record.policy_fingerprint) != bool(record.decision_id):
+        raise ValueError("DECISION_PROVENANCE_INCOMPLETE")
     payload: dict[str, object] = {
         "run_id": record.run_id,
         "action_id": record.action.action_id,
@@ -60,11 +64,14 @@ def _payload_dict(
         "evidence_digest": evidence_digest(record),
         "issued_at": issued_at,
     }
-    # Preserve verification compatibility for pre-key-id engineering receipts.
-    # Production Runtime v2 always supplies a non-empty key id and therefore
-    # cryptographically binds that identity into the signed payload.
+    # Preserve verification compatibility for pre-key-id / pre-decision-provenance
+    # engineering receipts. New controlled production records carry both runtime-
+    # owned provenance fields and therefore bind them into the signed payload.
     if key_id:
         payload["key_id"] = key_id
+    if record.policy_fingerprint:
+        payload["policy_fingerprint"] = record.policy_fingerprint
+        payload["decision_id"] = record.decision_id
     return payload
 
 
@@ -158,16 +165,23 @@ class CompletionAttestor:
         verification_secret = self._verification_keys.get(attestation.key_id)
         if verification_secret is None:
             return False
-        expected_payload = _payload_dict(
-            record,
-            operational_version=operational_version,
-            issued_at=attestation.issued_at,
-            key_id=attestation.key_id,
-        )
+        try:
+            expected_payload = _payload_dict(
+                record,
+                operational_version=operational_version,
+                issued_at=attestation.issued_at,
+                key_id=attestation.key_id,
+            )
+        except ValueError:
+            return False
         supplied_payload = asdict(attestation)
         supplied_signature = supplied_payload.pop("signature")
         if not attestation.key_id:
             supplied_payload.pop("key_id", None)
+        if not attestation.policy_fingerprint:
+            supplied_payload.pop("policy_fingerprint", None)
+        if not attestation.decision_id:
+            supplied_payload.pop("decision_id", None)
         if supplied_payload != expected_payload:
             return False
         expected_signature = self._sign_payload(expected_payload, verification_secret)
@@ -215,7 +229,9 @@ class SQLiteAuthoritativeCompletionStore:
                     evidence_digest TEXT NOT NULL,
                     issued_at TEXT NOT NULL,
                     signature TEXT NOT NULL,
-                    key_id TEXT NOT NULL DEFAULT ''
+                    key_id TEXT NOT NULL DEFAULT '',
+                    policy_fingerprint TEXT NOT NULL DEFAULT '',
+                    decision_id TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -223,11 +239,12 @@ class SQLiteAuthoritativeCompletionStore:
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(authoritative_completions)")
             }
-            if "key_id" not in columns:
-                conn.execute(
-                    "ALTER TABLE authoritative_completions "
-                    "ADD COLUMN key_id TEXT NOT NULL DEFAULT ''"
-                )
+            for column in ("key_id", "policy_fingerprint", "decision_id"):
+                if column not in columns:
+                    conn.execute(
+                        f"ALTER TABLE authoritative_completions "
+                        f"ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    )
 
     def commit(
         self,
@@ -265,8 +282,8 @@ class SQLiteAuthoritativeCompletionStore:
                 INSERT INTO authoritative_completions(
                     run_id, action_id, task, mode, operational_version,
                     authority_snapshot_fingerprint, evidence_digest, issued_at,
-                    key_id, signature
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    key_id, policy_fingerprint, decision_id, signature
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attestation.run_id,
@@ -278,6 +295,8 @@ class SQLiteAuthoritativeCompletionStore:
                     attestation.evidence_digest,
                     attestation.issued_at,
                     attestation.key_id,
+                    attestation.policy_fingerprint,
+                    attestation.decision_id,
                     attestation.signature,
                 ),
             )
