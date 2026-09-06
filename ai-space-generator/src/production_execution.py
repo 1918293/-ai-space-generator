@@ -31,6 +31,18 @@ class DurableWorkflowStarter(Protocol):
     async def attach(self, workflow_id: str) -> ControlledWorkflowHandle: ...
 
 
+class DecisionTelemetrySink(Protocol):
+    def record_decision_event(
+        self,
+        event: str,
+        record: ExecutionRecord,
+        *,
+        admission_code: str = "",
+        completion_code: str = "",
+        authoritative: bool | None = None,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class PendingControlledRun:
     handle: ControlledWorkflowHandle
@@ -100,11 +112,32 @@ class ProductionExecutionService:
         starter: DurableWorkflowStarter,
         attestor: CompletionAttestor,
         completion_store: AuthoritativeCompletionStore,
+        telemetry: DecisionTelemetrySink | None = None,
     ) -> None:
         self._gateway = gateway
         self._starter = starter
         self._attestor = attestor
         self._completion_store = completion_store
+        self._telemetry = telemetry
+
+    def _record_decision_event(
+        self,
+        event: str,
+        record: ExecutionRecord,
+        *,
+        admission_code: str = "",
+        completion_code: str = "",
+        authoritative: bool | None = None,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        self._telemetry.record_decision_event(
+            event,
+            record,
+            admission_code=admission_code,
+            completion_code=completion_code,
+            authoritative=authoritative,
+        )
 
     async def submit(
         self,
@@ -165,11 +198,29 @@ class ProductionExecutionService:
     ) -> ProductionExecutionResult:
         durable_result = await pending.handle.result()
         record = durable_result.record
+
+        # These are outcome observations of the durable workflow, emitted outside
+        # Temporal workflow code so tracing cannot affect replay determinism.
+        self._record_decision_event(
+            "admission",
+            record,
+            admission_code=durable_result.admission.code,
+        )
+        self._record_decision_event("provider_readback", record)
+        self._record_decision_event("verification", record)
+
         if record.phase != RunPhase.CLOSED:
+            code = "CONTROLLED_RUN_NOT_CLOSED:" + record.phase.value
+            self._record_decision_event(
+                "finalization",
+                record,
+                completion_code=code,
+                authoritative=False,
+            )
             return ProductionExecutionResult(
                 record,
                 False,
-                "CONTROLLED_RUN_NOT_CLOSED:" + record.phase.value,
+                code,
             )
 
         attestation = self._attestor.issue(
@@ -182,6 +233,12 @@ class ProductionExecutionService:
             record,
             operational_version=pending.operational_version,
             attestor=self._attestor,
+        )
+        self._record_decision_event(
+            "finalization",
+            record,
+            completion_code=commit.code,
+            authoritative=commit.committed,
         )
         if not commit.committed:
             return ProductionExecutionResult(
