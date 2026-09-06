@@ -301,6 +301,24 @@ variable "worker_instance_count" {
   }
 }
 
+variable "initial_runtime_release" {
+  type        = bool
+  description = "Explicit first-workload-release gate. True is allowed only before exact stable API/Worker revisions have been pinned."
+  default     = false
+}
+
+variable "api_stable_revision" {
+  type        = string
+  description = "Exact previously verified API revision kept at 100% while a later candidate starts at 0%. Null only for the explicitly gated first workload release."
+  default     = null
+}
+
+variable "worker_stable_revision" {
+  type        = string
+  description = "Exact previously verified Worker Pool revision kept at 100% while a later candidate starts at 0%. Null only for the explicitly gated first workload release."
+  default     = null
+}
+
 variable "enable_runtime_workloads" {
   type        = bool
   description = "False by default. Set true only after authorized secret-version and DB-user bootstrap is complete."

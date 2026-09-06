@@ -1,3 +1,18 @@
+locals {
+  runtime_revision_suffix   = substr(sha256(var.release_id), 0, 12)
+  api_candidate_revision    = "${var.name_prefix}-api-${local.runtime_revision_suffix}"
+  worker_candidate_revision = "${var.name_prefix}-worker-${local.runtime_revision_suffix}"
+  rollout_contract_valid = var.initial_runtime_release ? (
+    var.api_stable_revision == null && var.worker_stable_revision == null
+    ) : (
+    var.api_stable_revision != null && var.worker_stable_revision != null
+  )
+  stable_revision_names_valid = (
+    (var.api_stable_revision == null ? true : startswith(var.api_stable_revision, "${var.name_prefix}-api-")) &&
+    (var.worker_stable_revision == null ? true : startswith(var.worker_stable_revision, "${var.name_prefix}-worker-"))
+  )
+}
+
 resource "google_cloud_run_v2_service" "api" {
   count = var.enable_runtime_workloads ? 1 : 0
 
@@ -7,12 +22,28 @@ resource "google_cloud_run_v2_service" "api" {
   ingress             = "INGRESS_TRAFFIC_ALL"
   deletion_protection = true
 
+  lifecycle {
+    precondition {
+      condition     = local.rollout_contract_valid
+      error_message = "First workload release requires initial_runtime_release=true with no stable revisions; every later release must pin exact API and Worker stable revisions."
+    }
+    precondition {
+      condition     = local.stable_revision_names_valid
+      error_message = "Stable revisions must belong to the configured Runtime API/Worker resources."
+    }
+    precondition {
+      condition     = length(local.api_candidate_revision) <= 63 && length(local.worker_candidate_revision) <= 63
+      error_message = "Deterministic Runtime revision names exceed the Cloud Run 63-character limit."
+    }
+  }
+
   scaling {
     min_instance_count = var.api_min_instances
     max_instance_count = var.api_max_instances
   }
 
   template {
+    revision        = local.api_candidate_revision
     service_account = google_service_account.api.email
 
     scaling {
@@ -172,9 +203,31 @@ resource "google_cloud_run_v2_service" "api" {
     }
   }
 
-  traffic {
-    type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
-    percent = 100
+  dynamic "traffic" {
+    for_each = var.api_stable_revision == null ? [1] : []
+    content {
+      type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
+      percent = 100
+    }
+  }
+
+  dynamic "traffic" {
+    for_each = var.api_stable_revision == null ? [] : [var.api_stable_revision]
+    content {
+      type     = "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION"
+      revision = traffic.value
+      percent  = 100
+    }
+  }
+
+  dynamic "traffic" {
+    for_each = var.api_stable_revision != null && var.api_stable_revision != local.api_candidate_revision ? [local.api_candidate_revision] : []
+    content {
+      type     = "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION"
+      revision = traffic.value
+      percent  = 0
+      tag      = "candidate"
+    }
   }
 
   depends_on = [
@@ -208,12 +261,34 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     manual_instance_count = var.worker_instance_count
   }
 
-  instance_splits {
-    type    = "INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST"
-    percent = 100
+  dynamic "instance_splits" {
+    for_each = var.worker_stable_revision == null ? [1] : []
+    content {
+      type    = "INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST"
+      percent = 100
+    }
+  }
+
+  dynamic "instance_splits" {
+    for_each = var.worker_stable_revision == null ? [] : [var.worker_stable_revision]
+    content {
+      type     = "INSTANCE_SPLIT_ALLOCATION_TYPE_REVISION"
+      revision = instance_splits.value
+      percent  = 100
+    }
+  }
+
+  dynamic "instance_splits" {
+    for_each = var.worker_stable_revision != null && var.worker_stable_revision != local.worker_candidate_revision ? [local.worker_candidate_revision] : []
+    content {
+      type     = "INSTANCE_SPLIT_ALLOCATION_TYPE_REVISION"
+      revision = instance_splits.value
+      percent  = 0
+    }
   }
 
   template {
+    revision        = local.worker_candidate_revision
     service_account = google_service_account.worker.email
 
     vpc_access {
