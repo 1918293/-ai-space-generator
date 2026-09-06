@@ -1,15 +1,24 @@
 locals {
-  runtime_revision_suffix   = var.enable_runtime_workloads ? substr(sha256(var.release_id), 0, 12) : null
-  api_candidate_revision    = var.enable_runtime_workloads ? "${var.name_prefix}-api-${local.runtime_revision_suffix}" : null
-  worker_candidate_revision = var.enable_runtime_workloads ? "${var.name_prefix}-worker-${local.runtime_revision_suffix}" : null
+  runtime_revision_suffix = var.enable_runtime_workloads ? substr(sha256(var.release_id), 0, 12) : null
+  api_candidate_revision  = var.enable_runtime_workloads ? "${var.name_prefix}-api-${local.runtime_revision_suffix}" : null
+  worker_candidate_revision = (
+    var.enable_runtime_workloads && !local.worker_rainbow_enabled
+    ? "${var.name_prefix}-worker-${local.runtime_revision_suffix}"
+    : null
+  )
   rollout_contract_valid = var.initial_runtime_release ? (
-    var.api_stable_revision == null && var.worker_stable_revision == null
+    var.api_stable_revision == null &&
+    (local.worker_rainbow_enabled || var.worker_stable_revision == null)
     ) : (
-    var.api_stable_revision != null && var.worker_stable_revision != null
+    var.api_stable_revision != null &&
+    (local.worker_rainbow_enabled || var.worker_stable_revision != null)
   )
   stable_revision_names_valid = (
     (var.api_stable_revision == null ? true : startswith(var.api_stable_revision, "${var.name_prefix}-api-")) &&
-    (var.worker_stable_revision == null ? true : startswith(var.worker_stable_revision, "${var.name_prefix}-worker-"))
+    (
+      local.worker_rainbow_enabled ||
+      (var.worker_stable_revision == null ? true : startswith(var.worker_stable_revision, "${var.name_prefix}-worker-"))
+    )
   )
 }
 
@@ -25,14 +34,17 @@ resource "google_cloud_run_v2_service" "api" {
   lifecycle {
     precondition {
       condition     = local.rollout_contract_valid
-      error_message = "First workload release requires initial_runtime_release=true with no stable revisions; every later release must pin exact API and Worker stable revisions."
+      error_message = "First workload release requires initial_runtime_release=true with no stable API revision; every later release must pin an exact API stable revision. Legacy single-pool Worker mode additionally requires its stable Worker revision; rainbow Worker versions are independently retained by Build ID."
     }
     precondition {
       condition     = local.stable_revision_names_valid
-      error_message = "Stable revisions must belong to the configured Runtime API/Worker resources."
+      error_message = "Stable revisions must belong to the configured Runtime resources."
     }
     precondition {
-      condition     = length(local.api_candidate_revision) <= 63 && length(local.worker_candidate_revision) <= 63
+      condition = (
+        length(local.api_candidate_revision) <= 63 &&
+        (local.worker_candidate_revision == null || length(local.worker_candidate_revision) <= 63)
+      )
       error_message = "Deterministic Runtime revision names exceed the Cloud Run 63-character limit."
     }
   }
@@ -265,9 +277,12 @@ resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
   member   = "allUsers"
 }
 
+# Transitional legacy single-pool Worker path. It is disabled as soon as the
+# explicit 0..N worker_versions map is present; rainbow Worker versions are then
+# materialized exclusively by google_cloud_run_v2_worker_pool.worker_version.
 resource "google_cloud_run_v2_worker_pool" "worker" {
   provider = google-beta
-  count    = var.enable_runtime_workloads ? 1 : 0
+  count    = var.enable_runtime_workloads && !local.worker_rainbow_enabled ? 1 : 0
 
   project             = var.project_id
   name                = "${var.name_prefix}-worker"
