@@ -114,20 +114,28 @@ def _closed_record() -> ExecutionRecord:
     )
 
 
-def test_schema_two_upgrades_only_through_key_id_migration_three():
+def test_schema_two_upgrades_through_key_id_and_additive_provenance_migrations():
     conn = FakeMigrationConnection(initial_version=2)
     result = run_postgres_migrations(
         "postgresql://runtime/test",
-        release_id="runtime-v2-key-rotation",
+        release_id="runtime-v2-decision-provenance",
         connect_factory=lambda: conn,
     )
-    assert CURRENT_RUNTIME_SCHEMA_VERSION == 3
+    assert CURRENT_RUNTIME_SCHEMA_VERSION == 4
     assert result.from_version == 2
-    assert result.to_version == 3
-    assert result.applied_versions == (3,)
+    assert result.to_version == 4
+    assert result.applied_versions == (3, 4)
     migration_sql = [sql for sql, _ in conn.calls]
     assert any(
         "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS key_id" in sql
+        for sql in migration_sql
+    )
+    assert any(
+        "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS policy_fingerprint" in sql
+        for sql in migration_sql
+    )
+    assert any(
+        "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS decision_id" in sql
         for sql in migration_sql
     )
     assert conn.closed is True
@@ -202,6 +210,8 @@ def test_production_env_example_tracks_schema_bootstrap_and_secret_rotation_cont
     env_path = Path(__file__).resolve().parents[1] / "deploy" / "runtime-production.env.example"
     body = env_path.read_text(encoding="utf-8")
     assert f"HAO_DATABASE_SCHEMA_VERSION={CURRENT_RUNTIME_SCHEMA_VERSION}" in body
+    assert f"HAO_DATABASE_MIN_SCHEMA_VERSION={CURRENT_RUNTIME_SCHEMA_VERSION}" in body
+    assert "HAO_STORAGE_COMPATIBILITY_EPOCHS=1" in body
     assert "HAO_INITIAL_MODE=EXP" in body
     assert "HAO_INITIAL_TASK=<deployment-seeded-task>" in body
     assert "HAO_ATTESTATION_PREVIOUS_KEYS_JSON={}" in body
