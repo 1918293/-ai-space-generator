@@ -29,6 +29,16 @@ output "worker_pool_name" {
   value = var.enable_runtime_workloads ? google_cloud_run_v2_worker_pool.worker[0].name : null
 }
 
+output "api_candidate_revision" {
+  description = "Deterministic API revision identity for the current release."
+  value       = local.api_candidate_revision
+}
+
+output "worker_candidate_revision" {
+  description = "Deterministic Worker Pool revision identity for the current release."
+  value       = local.worker_candidate_revision
+}
+
 output "external_bootstrap_required" {
   description = "Explicitly records prerequisites Terraform intentionally does not materialize."
   value = [
