@@ -15,8 +15,8 @@ locals {
     HAO_RUNTIME_REGION               = var.region
     HAO_RELEASE_ID                   = var.release_id
     HAO_DEPLOYMENT_ID                = var.deployment_id
-    HAO_DATABASE_SCHEMA_VERSION      = "3"
-    HAO_DATABASE_MIN_SCHEMA_VERSION  = "3"
+    HAO_DATABASE_SCHEMA_VERSION      = "4"
+    HAO_DATABASE_MIN_SCHEMA_VERSION  = "4"
     HAO_STORAGE_COMPATIBILITY_EPOCHS = "1"
     HAO_DATABASE_RPO_SECONDS         = "300"
     HAO_DATABASE_RTO_SECONDS         = "3600"
