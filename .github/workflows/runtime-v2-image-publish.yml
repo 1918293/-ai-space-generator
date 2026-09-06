@@ -21,7 +21,6 @@ jobs:
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       GCP_REGION: asia-east1
       ARTIFACT_REPOSITORY: hao-runtime-v2-containers
-      IMAGE_NAME: hao-runtime-v2
     steps:
       - name: Fail closed on shared EXP ref and deployment identifiers
         shell: bash
@@ -58,6 +57,7 @@ jobs:
           ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
         run: |
           set -euo pipefail
+          export IMAGE_NAME="hao-runtime-v2"
           REGISTRY="${GCP_REGION}-docker.pkg.dev"
           IMAGE_BASE="${REGISTRY}/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
           IMAGE_TAG="${IMAGE_BASE}:${GITHUB_SHA}"
