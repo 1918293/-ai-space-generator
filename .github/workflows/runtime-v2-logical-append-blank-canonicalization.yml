@@ -11,12 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 2
-      - name: Guard exact parent and source blobs
+          fetch-depth: 0
+      - name: Guard exact shared ancestor and source blobs
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "20b9ba56ca779473940559f9622e0aa549b00633"
+          git merge-base --is-ancestor 20b9ba56ca779473940559f9622e0aa549b00633 HEAD
           test "$(git rev-parse HEAD:ai-space-generator/src/google_workspace_adapter.py)" = "14d8eee4c0a6016569c1515a52612ae8842cf4e0"
           test "$(git rev-parse HEAD:ai-space-generator/tests/test_google_workspace_adapter.py)" = "1287f6e92e8600aa99701f60878dbecb1ce816f9"
       - name: Materialize bounded blank-semantics fix
@@ -26,74 +26,79 @@ jobs:
 
           source = Path("ai-space-generator/src/google_workspace_adapter.py")
           text = source.read_text()
-          old = '''        for item in raw_row:
-            if isinstance(item, bool):
-                row.append(item)
-            elif isinstance(item, (int, float)):
-                row.append(["__sheets_number__", _canonical_sheet_double(item)])
-            else:
-                row.append(item)
-'''
-          new = '''        for item in raw_row:
-            # Sheets ValueRange does not preserve a distinction between an
-            # absent/empty cell and the Python None/empty-string forms used to
-            # express that blank in trusted input. Canonicalize both to the same
-            # provider-state token for logical-append verification only.
-            if item is None or item == "":
-                row.append(None)
-            elif isinstance(item, bool):
-                row.append(item)
-            elif isinstance(item, (int, float)):
-                row.append(["__sheets_number__", _canonical_sheet_double(item)])
-            else:
-                row.append(item)
-'''
+          old = "\n".join((
+              "        for item in raw_row:",
+              "            if isinstance(item, bool):",
+              "                row.append(item)",
+              "            elif isinstance(item, (int, float)):",
+              '                row.append(["__sheets_number__", _canonical_sheet_double(item)])',
+              "            else:",
+              "                row.append(item)",
+              "",
+          ))
+          new = "\n".join((
+              "        for item in raw_row:",
+              "            # Sheets ValueRange does not preserve a distinction between an",
+              "            # absent/empty cell and the Python None/empty-string forms used to",
+              "            # express that blank in trusted input. Canonicalize both to the same",
+              "            # provider-state token for logical-append verification only.",
+              '            if item is None or item == "":',
+              "                row.append(None)",
+              "            elif isinstance(item, bool):",
+              "                row.append(item)",
+              "            elif isinstance(item, (int, float)):",
+              '                row.append(["__sheets_number__", _canonical_sheet_double(item)])',
+              "            else:",
+              "                row.append(item)",
+              "",
+          ))
           if text.count(old) != 1:
               raise SystemExit("source guard failed: expected digest loop exactly once")
           source.write_text(text.replace(old, new, 1))
 
           tests = Path("ai-space-generator/tests/test_google_workspace_adapter.py")
           test_text = tests.read_text()
-          addition = r'''
-
-
-def test_logical_append_readback_digest_normalizes_interior_blank_cells():
-    current_proposal = proposal()
-    current_proposal = type(current_proposal)(
-        **{
-            **current_proposal.__dict__,
-            "arguments": (("values_json", '[["REC-B",null,"tail"]]'),),
-        }
-    )
-    resolver = ConfiguredSheetsCommandResolver(
-        (
-            SheetsMutationTarget(
-                binding_id="drive.formal_cells.update",
-                spreadsheet_id="trusted-sheet",
-                range_a1="01_Intake!A:C",
-                authority_sources=(AuthorityFileSource("AUTH:MAIN", "trusted-sheet"),),
-                mutation_mode="logical_append",
-                sheet_id=123,
-                unique_key_column="A",
-            ),
-        )
-    )
-    command = resolver.resolve(current_proposal)
-    assert command is not None
-
-    client = client_with_fakes()
-    client._sheets.values_api.values = [["REC-B", "", "tail"]]
-    readback = asyncio.run(client.readback(command))
-
-    assert readback.matched is True
-    assert readback.state_digest == command.expected_state_digest
-
-
-def test_fixed_range_digest_still_distinguishes_interior_none_and_empty_string():
-    assert canonical_values_digest([["REC-B", None, "tail"]]) != canonical_values_digest(
-        [["REC-B", "", "tail"]]
-    )
-'''
+          addition = "\n".join((
+              "",
+              "",
+              "def test_logical_append_readback_digest_normalizes_interior_blank_cells():",
+              "    current_proposal = proposal()",
+              "    current_proposal = type(current_proposal)(",
+              "        **{",
+              "            **current_proposal.__dict__,",
+              '            "arguments": (("values_json", \'[["REC-B",null,"tail"]]\'),),',
+              "        }",
+              "    )",
+              "    resolver = ConfiguredSheetsCommandResolver(",
+              "        (",
+              "            SheetsMutationTarget(",
+              '                binding_id="drive.formal_cells.update",',
+              '                spreadsheet_id="trusted-sheet",',
+              '                range_a1="01_Intake!A:C",',
+              '                authority_sources=(AuthorityFileSource("AUTH:MAIN", "trusted-sheet"),),',
+              '                mutation_mode="logical_append",',
+              "                sheet_id=123,",
+              '                unique_key_column="A",',
+              "            ),",
+              "        )",
+              "    )",
+              "    command = resolver.resolve(current_proposal)",
+              "    assert command is not None",
+              "",
+              "    client = client_with_fakes()",
+              '    client._sheets.values_api.values = [["REC-B", "", "tail"]]',
+              "    readback = asyncio.run(client.readback(command))",
+              "",
+              "    assert readback.matched is True",
+              "    assert readback.state_digest == command.expected_state_digest",
+              "",
+              "",
+              "def test_fixed_range_digest_still_distinguishes_interior_none_and_empty_string():",
+              '    assert canonical_values_digest([["REC-B", None, "tail"]]) != canonical_values_digest(',
+              '        [["REC-B", "", "tail"]]',
+              "    )",
+              "",
+          ))
           marker = "def test_fixed_range_digest_semantics_remain_unchanged():"
           if marker not in test_text:
               raise SystemExit("test guard failed: fixed-range digest marker missing")
