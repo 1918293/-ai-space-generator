@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 ConnectionFactory = Callable[[], Any]
 CURRENT_RUNTIME_SCHEMA_VERSION = 3
+CURRENT_RUNTIME_STORAGE_COMPATIBILITY_EPOCH = 1
 MIGRATION_ADVISORY_LOCK_ID = 0x48414F52  # "HAOR"
 RUNTIME_APPLICATION_ROLE = "hao_runtime_app"
 
@@ -16,6 +17,12 @@ class MigrationResult:
     from_version: int
     to_version: int
     applied_versions: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class StorageCompatibility:
+    physical_version: int
+    compatibility_epoch: int
 
 
 _MIGRATION_1 = (
@@ -144,6 +151,16 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     3: _MIGRATION_3,
 }
 
+# Physical migrations and compatibility epochs intentionally advance independently.
+# Additive/expand migrations may increase the physical version without changing the
+# epoch. A destructive/contract migration must advance the epoch only after every
+# non-drained worker version has declared support for the new epoch.
+MIGRATION_COMPATIBILITY_EPOCH: dict[int, int] = {
+    1: 1,
+    2: 1,
+    3: 1,
+}
+
 _REQUIRED_TABLES = (
     "operational_state",
     "operational_events",
@@ -189,6 +206,15 @@ def _current_version(conn: Any) -> int:
         "SELECT COALESCE(MAX(version), 0) AS version FROM runtime_schema_migrations"
     ).fetchone()
     return int(_scalar(row, "version")) if row is not None else 0
+
+
+def compatibility_epoch_for_version(version: int) -> int:
+    if version < 1:
+        raise ValueError("STORAGE_PHYSICAL_VERSION_MUST_BE_POSITIVE")
+    try:
+        return MIGRATION_COMPATIBILITY_EPOCH[version]
+    except KeyError as exc:
+        raise RuntimeError(f"UNKNOWN_STORAGE_COMPATIBILITY_EPOCH:{version}") from exc
 
 
 def _ensure_runtime_application_role(conn: Any) -> None:
@@ -255,6 +281,7 @@ def run_postgres_migrations(
             statements = MIGRATIONS.get(version)
             if statements is None:
                 raise RuntimeError(f"MISSING_MIGRATION:{version}")
+            compatibility_epoch_for_version(version)
             for statement in statements:
                 conn.execute(statement)
             conn.execute(
@@ -281,17 +308,36 @@ def run_postgres_migrations(
 def verify_postgres_schema(
     database_url: str,
     *,
-    expected_version: int = CURRENT_RUNTIME_SCHEMA_VERSION,
+    expected_version: int | None = None,
+    minimum_version: int | None = None,
+    supported_compatibility_epochs: tuple[int, ...] | None = None,
     connect_factory: ConnectionFactory | None = None,
     verify_tables: bool = True,
 ) -> int:
-    """Fail closed unless config, binary and database share one exact schema version."""
+    """Fail closed unless the database satisfies the binary storage contract.
+
+    `expected_version` preserves the previous exact-version contract for callers
+    that intentionally require it (migration verification and legacy tests).
+    Runtime API/Worker startup should use `minimum_version` plus an explicit set
+    of supported compatibility epochs so additive expand migrations can coexist
+    with pinned older workers while destructive contract migrations still fail
+    closed.
+    """
     _database_url(database_url)
-    if expected_version != CURRENT_RUNTIME_SCHEMA_VERSION:
-        raise RuntimeError(
-            "RUNTIME_BINARY_SCHEMA_VERSION_MISMATCH:"
-            f"{expected_version}!={CURRENT_RUNTIME_SCHEMA_VERSION}"
-        )
+    if expected_version is not None and (
+        minimum_version is not None or supported_compatibility_epochs is not None
+    ):
+        raise ValueError("STORAGE_VERIFICATION_MODE_CONFLICT")
+    if expected_version is None:
+        if minimum_version is None or not supported_compatibility_epochs:
+            raise ValueError("STORAGE_COMPATIBILITY_CONTRACT_REQUIRED")
+        if minimum_version < 1:
+            raise ValueError("STORAGE_MINIMUM_VERSION_MUST_BE_POSITIVE")
+        if any(epoch < 1 for epoch in supported_compatibility_epochs):
+            raise ValueError("STORAGE_COMPATIBILITY_EPOCH_MUST_BE_POSITIVE")
+    elif expected_version < 1:
+        raise ValueError("STORAGE_EXPECTED_VERSION_MUST_BE_POSITIVE")
+
     connect = connect_factory or _default_connect_factory(database_url)
     conn = connect()
     try:
@@ -301,10 +347,25 @@ def verify_postgres_schema(
         if row is None:
             raise RuntimeError("RUNTIME_SCHEMA_MIGRATIONS_MISSING")
         current = int(_scalar(row, "version"))
-        if current != expected_version:
-            raise RuntimeError(
-                f"RUNTIME_SCHEMA_VERSION_MISMATCH:{current}!={expected_version}"
-            )
+        if expected_version is not None:
+            if current != expected_version:
+                raise RuntimeError(
+                    f"RUNTIME_SCHEMA_VERSION_MISMATCH:{current}!={expected_version}"
+                )
+        else:
+            assert minimum_version is not None
+            assert supported_compatibility_epochs is not None
+            if current < minimum_version:
+                raise RuntimeError(
+                    f"RUNTIME_SCHEMA_TOO_OLD:{current}<{minimum_version}"
+                )
+            current_epoch = compatibility_epoch_for_version(current)
+            if current_epoch not in supported_compatibility_epochs:
+                supported = ",".join(str(value) for value in supported_compatibility_epochs)
+                raise RuntimeError(
+                    "RUNTIME_STORAGE_COMPATIBILITY_EPOCH_MISMATCH:"
+                    f"{current_epoch} not in [{supported}]"
+                )
         if verify_tables:
             for table in _REQUIRED_TABLES:
                 row = conn.execute("SELECT to_regclass(%s) AS table_name", (table,)).fetchone()
@@ -313,6 +374,13 @@ def verify_postgres_schema(
         return current
     finally:
         conn.close()
+
+
+def current_storage_compatibility() -> StorageCompatibility:
+    return StorageCompatibility(
+        physical_version=CURRENT_RUNTIME_SCHEMA_VERSION,
+        compatibility_epoch=compatibility_epoch_for_version(CURRENT_RUNTIME_SCHEMA_VERSION),
+    )
 
 
 def main() -> None:
@@ -331,9 +399,11 @@ def main() -> None:
         release_id=release_id,
     )
     verified = verify_postgres_schema(database_url, expected_version=result.to_version)
+    compatibility = current_storage_compatibility()
     print(
         f"HAO_RUNTIME_MIGRATION_VERIFIED from={result.from_version} to={result.to_version} "
-        f"applied={','.join(str(value) for value in result.applied_versions)} schema={verified}"
+        f"applied={','.join(str(value) for value in result.applied_versions)} schema={verified} "
+        f"storage_epoch={compatibility.compatibility_epoch}"
     )
 
 
