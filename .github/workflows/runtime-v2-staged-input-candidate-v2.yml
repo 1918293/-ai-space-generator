@@ -22,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Materialize staged-input contract v2
+      - name: Materialize staged-input contract
         shell: bash
         run: |
           set -euo pipefail
@@ -33,10 +33,9 @@ jobs:
           variables_path = root / "variables.tf"
           main_path = root / "main.tf"
           cloud_run_path = root / "cloud_run.tf"
-          outputs_path = root / "outputs.tf"
           test_path = root / "staged_inputs.tftest.hcl"
 
-          optional_when_workloads_disabled = [
+          workload_inputs = [
               "runtime_image", "otel_collector_image", "otel_exporter_otlp_endpoint",
               "release_id", "deployment_id", "temporal_worker_version", "public_mcp_url",
               "mcp_allowed_hosts", "oauth_issuer_url", "oauth_jwks_url", "expected_hao_subject",
@@ -47,7 +46,7 @@ jobs:
           ]
 
           text = variables_path.read_text()
-          for name in optional_when_workloads_disabled:
+          for name in workload_inputs:
               marker = f'variable "{name}" {{'
               start = text.index(marker)
               next_start = text.find('\nvariable "', start + len(marker))
@@ -59,21 +58,23 @@ jobs:
               if type_line not in block:
                   raise SystemExit(f"string type line not found for {name}")
               block = block.replace(type_line, type_line + "  default     = null\n", 1)
-              condition = "condition     = can(regex("
-              if condition in block:
-                  block = block.replace(condition, f"condition     = var.{name} == null || can(regex(", 1)
+              if "condition     = can(regex(" in block:
+                  block = block.replace(
+                      "condition     = can(regex(",
+                      f"condition     = var.{name} == null || can(regex(",
+                      1,
+                  )
               text = text[:start] + block + text[end:]
 
-          old_gate = '''variable "enable_runtime_workloads" {
-            type        = bool
-            description = "False by default. Set true only after authorized secret-version and DB-user bootstrap is complete."
-            default     = false
-          }'''
-          required_refs = "\n".join(f"      var.{name}," for name in optional_when_workloads_disabled)
-          new_gate = f'''variable "enable_runtime_workloads" {{
-            type        = bool
-            description = "False by default. Set true only after authorized secret-version and DB-user bootstrap is complete."
-            default     = false
+          gate_marker = 'variable "enable_runtime_workloads" {'
+          gate_start = text.index(gate_marker)
+          gate_next = text.find('\nvariable "', gate_start + len(gate_marker))
+          gate_end = len(text) if gate_next == -1 else gate_next
+          gate_block = text[gate_start:gate_end]
+          if "validation {" in gate_block:
+              raise SystemExit("enable_runtime_workloads already has validation")
+          required_refs = "\n".join(f"      var.{name}," for name in workload_inputs)
+          validation = f'''
 
             validation {{
               condition = !var.enable_runtime_workloads || nonsensitive(alltrue([
@@ -82,88 +83,45 @@ jobs:
                 ] : try(length(trimspace(value)) > 0, false)
               ]))
               error_message = "enable_runtime_workloads=true requires every Runtime workload/release input; base-infrastructure planning must not fabricate those values."
-            }}
-          }}'''
-          if text.count(old_gate) != 1:
-              raise SystemExit("enable_runtime_workloads block did not match exactly once")
-          variables_path.write_text(text.replace(old_gate, new_gate, 1))
+            }}'''
+          close = gate_block.rfind("}")
+          if close == -1:
+              raise SystemExit("enable_runtime_workloads closing brace not found")
+          gate_block = gate_block[:close] + validation + "\n}" + gate_block[close + 1:]
+          text = text[:gate_start] + gate_block + text[gate_end:]
+          variables_path.write_text(text)
 
           cloud = cloud_run_path.read_text()
-          replacements = {
-              '  runtime_revision_suffix   = substr(sha256(var.release_id), 0, 12)': '  runtime_revision_suffix   = var.enable_runtime_workloads ? substr(sha256(var.release_id), 0, 12) : null',
-              '  api_candidate_revision    = "${var.name_prefix}-api-${local.runtime_revision_suffix}"': '  api_candidate_revision    = var.enable_runtime_workloads ? "${var.name_prefix}-api-${local.runtime_revision_suffix}" : null',
-              '  worker_candidate_revision = "${var.name_prefix}-worker-${local.runtime_revision_suffix}"': '  worker_candidate_revision = var.enable_runtime_workloads ? "${var.name_prefix}-worker-${local.runtime_revision_suffix}" : null',
+          cloud_replacements = {
+              '  runtime_revision_suffix   = substr(sha256(var.release_id), 0, 12)':
+                  '  runtime_revision_suffix   = var.enable_runtime_workloads ? substr(sha256(var.release_id), 0, 12) : null',
+              '  api_candidate_revision    = "${var.name_prefix}-api-${local.runtime_revision_suffix}"':
+                  '  api_candidate_revision    = var.enable_runtime_workloads ? "${var.name_prefix}-api-${local.runtime_revision_suffix}" : null',
+              '  worker_candidate_revision = "${var.name_prefix}-worker-${local.runtime_revision_suffix}"':
+                  '  worker_candidate_revision = var.enable_runtime_workloads ? "${var.name_prefix}-worker-${local.runtime_revision_suffix}" : null',
           }
-          for old, new in replacements.items():
+          for old, new in cloud_replacements.items():
               if cloud.count(old) != 1:
-                  raise SystemExit(f"cloud_run local did not match exactly once: {old}")
+                  raise SystemExit(f"cloud local mismatch: {old}")
               cloud = cloud.replace(old, new, 1)
           cloud_run_path.write_text(cloud)
 
           main = main_path.read_text()
-          old_secret_paths = '''  secret_version_paths = {
-            temporal    = "${google_secret_manager_secret.temporal_api_key.id}/versions/${var.temporal_api_key_version}"
-            database    = "${google_secret_manager_secret.database_url.id}/versions/${var.database_url_secret_version}"
-            attestation = "${google_secret_manager_secret.attestation.id}/versions/${var.attestation_secret_version}"
-            mcp_state   = "${google_secret_manager_secret.mcp_request_state.id}/versions/${var.mcp_request_state_keys_version}"
-          }'''
-          new_secret_paths = '''  secret_version_paths = var.enable_runtime_workloads ? {
-            temporal    = "${google_secret_manager_secret.temporal_api_key.id}/versions/${var.temporal_api_key_version}"
-            database    = "${google_secret_manager_secret.database_url.id}/versions/${var.database_url_secret_version}"
-            attestation = "${google_secret_manager_secret.attestation.id}/versions/${var.attestation_secret_version}"
-            mcp_state   = "${google_secret_manager_secret.mcp_request_state.id}/versions/${var.mcp_request_state_keys_version}"
-          } : {}'''
-          if main.count(old_secret_paths) != 1:
-              raise SystemExit("secret_version_paths block did not match exactly once")
-          main = main.replace(old_secret_paths, new_secret_paths, 1)
-
-          old_api_bindings = '''  api_secret_bindings = merge(
-            {
-              HAO_TEMPORAL_API_KEY       = local.secret_version_paths.temporal
-              HAO_DATABASE_URL           = local.secret_version_paths.database
-              HAO_ATTESTATION_SECRET     = local.secret_version_paths.attestation
-              HAO_MCP_REQUEST_STATE_KEYS = local.secret_version_paths.mcp_state
-            },
-            var.previous_attestation_keys_secret_version == null ? {} : {
-              HAO_ATTESTATION_PREVIOUS_KEYS_JSON = "${google_secret_manager_secret.attestation_previous.id}/versions/${var.previous_attestation_keys_secret_version}"
-            }
-          )'''
-          new_api_bindings = '''  api_secret_bindings = var.enable_runtime_workloads ? merge(
-            {
-              HAO_TEMPORAL_API_KEY       = local.secret_version_paths.temporal
-              HAO_DATABASE_URL           = local.secret_version_paths.database
-              HAO_ATTESTATION_SECRET     = local.secret_version_paths.attestation
-              HAO_MCP_REQUEST_STATE_KEYS = local.secret_version_paths.mcp_state
-            },
-            var.previous_attestation_keys_secret_version == null ? {} : {
-              HAO_ATTESTATION_PREVIOUS_KEYS_JSON = "${google_secret_manager_secret.attestation_previous.id}/versions/${var.previous_attestation_keys_secret_version}"
-            }
-          ) : {}'''
-          if main.count(old_api_bindings) != 1:
-              raise SystemExit("api_secret_bindings block did not match exactly once")
-          main = main.replace(old_api_bindings, new_api_bindings, 1)
-
-          old_worker_bindings = '''  worker_secret_bindings = {
-            HAO_TEMPORAL_API_KEY = local.secret_version_paths.temporal
-            HAO_DATABASE_URL     = local.secret_version_paths.database
-          }'''
-          new_worker_bindings = '''  worker_secret_bindings = var.enable_runtime_workloads ? {
-            HAO_TEMPORAL_API_KEY = local.secret_version_paths.temporal
-            HAO_DATABASE_URL     = local.secret_version_paths.database
-          } : {}'''
-          if main.count(old_worker_bindings) != 1:
-              raise SystemExit("worker_secret_bindings block did not match exactly once")
-          main_path.write_text(main.replace(old_worker_bindings, new_worker_bindings, 1))
-
-          outputs = outputs_path.read_text()
-          for old, new in [
-              ("  value       = local.api_candidate_revision", "  value       = var.enable_runtime_workloads ? local.api_candidate_revision : null"),
-              ("  value       = local.worker_candidate_revision", "  value       = var.enable_runtime_workloads ? local.worker_candidate_revision : null"),
-          ]:
-              if outputs.count(old) != 1:
-                  raise SystemExit(f"output did not match exactly once: {old}")
-              outputs = outputs.replace(old, new, 1)
-          outputs_path.write_text(outputs)
+          secret_lines = {
+              '    temporal    = "${google_secret_manager_secret.temporal_api_key.id}/versions/${var.temporal_api_key_version}"':
+                  '    temporal    = var.enable_runtime_workloads ? "${google_secret_manager_secret.temporal_api_key.id}/versions/${var.temporal_api_key_version}" : null',
+              '    database    = "${google_secret_manager_secret.database_url.id}/versions/${var.database_url_secret_version}"':
+                  '    database    = var.enable_runtime_workloads ? "${google_secret_manager_secret.database_url.id}/versions/${var.database_url_secret_version}" : null',
+              '    attestation = "${google_secret_manager_secret.attestation.id}/versions/${var.attestation_secret_version}"':
+                  '    attestation = var.enable_runtime_workloads ? "${google_secret_manager_secret.attestation.id}/versions/${var.attestation_secret_version}" : null',
+              '    mcp_state   = "${google_secret_manager_secret.mcp_request_state.id}/versions/${var.mcp_request_state_keys_version}"':
+                  '    mcp_state   = var.enable_runtime_workloads ? "${google_secret_manager_secret.mcp_request_state.id}/versions/${var.mcp_request_state_keys_version}" : null',
+          }
+          for old, new in secret_lines.items():
+              if main.count(old) != 1:
+                  raise SystemExit(f"secret path line mismatch: {old}")
+              main = main.replace(old, new, 1)
+          main_path.write_text(main)
 
           test_path.write_text('''mock_provider "google" {}
           mock_provider "google-beta" {}
@@ -223,7 +181,6 @@ jobs:
           expected=(
             "ai-space-generator/deploy/terraform/runtime-v2/cloud_run.tf"
             "ai-space-generator/deploy/terraform/runtime-v2/main.tf"
-            "ai-space-generator/deploy/terraform/runtime-v2/outputs.tf"
             "ai-space-generator/deploy/terraform/runtime-v2/staged_inputs.tftest.hcl"
             "ai-space-generator/deploy/terraform/runtime-v2/variables.tf"
           )
@@ -243,7 +200,6 @@ jobs:
           git add ai-space-generator/deploy/terraform/runtime-v2/variables.tf \
                   ai-space-generator/deploy/terraform/runtime-v2/main.tf \
                   ai-space-generator/deploy/terraform/runtime-v2/cloud_run.tf \
-                  ai-space-generator/deploy/terraform/runtime-v2/outputs.tf \
                   ai-space-generator/deploy/terraform/runtime-v2/staged_inputs.tftest.hcl \
                   .github/workflows/runtime-v2-staged-input-candidate.yml \
                   .github/workflows/runtime-v2-staged-input-candidate-v2.yml
