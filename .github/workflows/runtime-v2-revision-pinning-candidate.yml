@@ -31,6 +31,7 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
+          import re
 
           root = Path("ai-space-generator/deploy/terraform/runtime-v2")
           variables = root / "variables.tf"
@@ -38,9 +39,20 @@ jobs:
           outputs = root / "outputs.tf"
           readme = root / "README.md"
 
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"PATCH_MARKER_{label}_COUNT={count}")
+              return text.replace(old, new, 1)
+
+          def regex_once(text: str, pattern: str, replacement: str, label: str) -> str:
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+              if count != 1:
+                  raise RuntimeError(f"PATCH_REGEX_{label}_COUNT={count}")
+              return updated
+
           text = variables.read_text()
           marker = 'variable "enable_runtime_workloads" {'
-          assert marker in text
           insertion = '''variable "initial_runtime_release" {
             type        = bool
             description = "Explicit first-workload-release gate. True is allowed only before stable API/Worker revisions have been pinned."
@@ -61,14 +73,14 @@ jobs:
 
           '''
           if 'variable "initial_runtime_release" {' not in text:
-              text = text.replace(marker, insertion + marker, 1)
+              text = replace_once(text, marker, insertion + marker, "VARIABLES_INSERT")
           variables.write_text(text)
 
           text = cloud_run.read_text()
           if not text.startswith('locals {\n  runtime_revision_suffix'):
               prefix = '''locals {
-            runtime_revision_suffix = substr(sha256(var.release_id), 0, 12)
-            api_candidate_revision   = "${var.name_prefix}-api-${local.runtime_revision_suffix}"
+            runtime_revision_suffix  = substr(sha256(var.release_id), 0, 12)
+            api_candidate_revision    = "${var.name_prefix}-api-${local.runtime_revision_suffix}"
             worker_candidate_revision = "${var.name_prefix}-worker-${local.runtime_revision_suffix}"
 
             rollout_contract_valid = var.initial_runtime_release ? (
@@ -86,17 +98,15 @@ jobs:
           '''
               text = prefix + text
 
-          api_template = '  template {\n    service_account = google_service_account.api.email'
-          api_replacement = '  template {\n    revision        = local.api_candidate_revision\n    service_account = google_service_account.api.email'
-          assert api_template in text
-          text = text.replace(api_template, api_replacement, 1)
+          text = replace_once(
+              text,
+              '  template {\n    service_account = google_service_account.api.email',
+              '  template {\n    revision        = local.api_candidate_revision\n    service_account = google_service_account.api.email',
+              "API_TEMPLATE",
+          )
 
-          old_traffic = '''  traffic {
-            type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
-            percent = 100
-          }
-          '''
-          new_traffic = '''  dynamic "traffic" {
+          traffic_pattern = r'''^  traffic \{\n\s+type\s*=\s*"TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"\n\s+percent\s*=\s*100\n  \}'''
+          traffic_replacement = '''  dynamic "traffic" {
             for_each = var.api_stable_revision == null ? [1] : []
             content {
               type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
@@ -121,17 +131,14 @@ jobs:
               percent  = 0
               tag      = "candidate"
             }
-          }
-          '''
-          assert old_traffic in text
-          text = text.replace(old_traffic, new_traffic, 1)
+          }'''
+          text = regex_once(text, traffic_pattern, traffic_replacement, "API_TRAFFIC")
 
           api_depends = '''  depends_on = [
             google_project_service.required["run.googleapis.com"],
             google_secret_manager_secret_iam_member.api,
             google_sql_database.runtime,
-          ]
-          '''
+          ]'''
           api_lifecycle = '''  lifecycle {
             precondition {
               condition     = local.rollout_contract_valid
@@ -150,20 +157,17 @@ jobs:
           }
 
           ''' + api_depends
-          assert api_depends in text
-          text = text.replace(api_depends, api_lifecycle, 1)
+          text = replace_once(text, api_depends, api_lifecycle, "API_LIFECYCLE")
 
-          worker_template = '  template {\n    service_account = google_service_account.worker.email'
-          worker_replacement = '  template {\n    revision        = local.worker_candidate_revision\n    service_account = google_service_account.worker.email'
-          assert worker_template in text
-          text = text.replace(worker_template, worker_replacement, 1)
+          text = replace_once(
+              text,
+              '  template {\n    service_account = google_service_account.worker.email',
+              '  template {\n    revision        = local.worker_candidate_revision\n    service_account = google_service_account.worker.email',
+              "WORKER_TEMPLATE",
+          )
 
-          old_split = '''  instance_splits {
-            type    = "INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST"
-            percent = 100
-          }
-          '''
-          new_split = '''  dynamic "instance_splits" {
+          split_pattern = r'''^  instance_splits \{\n\s+type\s*=\s*"INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST"\n\s+percent\s*=\s*100\n  \}'''
+          split_replacement = '''  dynamic "instance_splits" {
             for_each = var.worker_stable_revision == null ? [1] : []
             content {
               type    = "INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST"
@@ -187,15 +191,12 @@ jobs:
               revision = instance_splits.value
               percent  = 0
             }
-          }
-          '''
-          assert old_split in text
-          text = text.replace(old_split, new_split, 1)
+          }'''
+          text = regex_once(text, split_pattern, split_replacement, "WORKER_SPLITS")
           cloud_run.write_text(text)
 
           text = outputs.read_text()
           marker = 'output "external_bootstrap_required" {'
-          assert marker in text
           insertion = '''output "api_candidate_revision" {
             description = "Deterministic API revision identity for the current release."
             value       = local.api_candidate_revision
@@ -208,7 +209,7 @@ jobs:
 
           '''
           if 'output "api_candidate_revision" {' not in text:
-              text = text.replace(marker, insertion + marker, 1)
+              text = replace_once(text, marker, insertion + marker, "OUTPUTS_INSERT")
           text = text.replace(
               '"DNS/TLS and optional public Cloud Run invoker authorization",',
               '"optional custom domain/DNS/TLS and public Cloud Run invoker authorization; the stable run.app URL is valid for the initial candidate",',
@@ -221,7 +222,6 @@ jobs:
               '- Cloud Run v2 API/Worker revisions with deterministic release identity, stable-revision pinning, and 0% candidate allocation after the explicitly gated first workload release',
           )
           marker = '## Deployment bootstrap contract\n'
-          assert marker in text
           rollout = '''## Revision-pinned rollout contract
 
           Terraform must not float production API traffic or Worker Pool instances to every new `LATEST` revision. Revision identity is derived deterministically from `release_id`.
@@ -236,29 +236,25 @@ jobs:
 
           '''
           if '## Revision-pinned rollout contract' not in text:
-              text = text.replace(marker, rollout + marker, 1)
+              text = replace_once(text, marker, rollout + marker, "README_ROLLOUT")
           text = text.replace(
               '5. any DNS/TLS/public-invoker/Workspace permissions explicitly authorized by Hao.',
               '5. optional custom-domain/DNS/TLS, public-invoker, and Workspace permissions explicitly authorized by Hao. The first candidate may use the stable Cloud Run `run.app` HTTPS URL without a custom domain.',
           )
           readme.write_text(text)
 
-          test = root / "cloud_run_rollout.tftest.hcl"
-          test.write_text(r'''mock_provider "google" {}
+          (root / "cloud_run_rollout.tftest.hcl").write_text('''mock_provider "google" {}
           mock_provider "google-beta" {}
 
           variables {
             project_id = "hao-runtime-v2-test"
             region     = "asia-east1"
-
             runtime_image               = "example.invalid/runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000"
             otel_collector_image        = "example.invalid/otel@sha256:1111111111111111111111111111111111111111111111111111111111111111"
             otel_exporter_otlp_endpoint = "https://otel.example.invalid/v1/traces"
-
             release_id              = "test-release"
             deployment_id           = "test-deployment"
             temporal_worker_version = "test-worker-v1"
-
             public_mcp_url       = "https://runtime.example.invalid/mcp"
             mcp_allowed_hosts    = "runtime.example.invalid"
             oauth_issuer_url     = "https://issuer.example.invalid/"
@@ -266,44 +262,33 @@ jobs:
             expected_hao_subject = "test-hao-subject"
             attestation_key_id   = "test-key-1"
             initial_task         = "Cloud Run revision-pinning contract test"
-
             sheets_targets_json    = "{}"
             task_policies_json     = "{}"
             parent_task_plans_json = "{}"
-
             temporal_endpoint  = "test.tmprl.cloud:7233"
             temporal_namespace = "test.namespace"
-
             temporal_api_key_version       = "1"
             attestation_secret_version     = "1"
             mcp_request_state_keys_version = "1"
             database_url_secret_version    = "1"
-
             cloud_sql_edition           = "ENTERPRISE"
             cloud_sql_tier              = "db-custom-1-3840"
             cloud_sql_availability_type = "ZONAL"
-
             enable_runtime_workloads = true
             allow_public_mcp_invoker = false
           }
 
           run "first_release_is_explicit_and_deterministic" {
             command = plan
-
-            variables {
-              initial_runtime_release = true
-            }
-
+            variables { initial_runtime_release = true }
             assert {
-              condition     = google_cloud_run_v2_service.api[0].template[0].revision == "hao-runtime-v2-api-${substr(sha256("test-release"), 0, 12)}"
+              condition     = output.api_candidate_revision == "hao-runtime-v2-api-41c7250e092d"
               error_message = "API revision identity must be deterministic from release_id."
             }
-
             assert {
-              condition     = google_cloud_run_v2_worker_pool.worker[0].template[0].revision == "hao-runtime-v2-worker-${substr(sha256("test-release"), 0, 12)}"
+              condition     = output.worker_candidate_revision == "hao-runtime-v2-worker-41c7250e092d"
               error_message = "Worker revision identity must be deterministic from release_id."
             }
-
             assert {
               condition     = google_cloud_run_v2_service.api[0].traffic[0].type == "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST" && google_cloud_run_v2_service.api[0].traffic[0].percent == 100
               error_message = "Only the explicitly gated first release may start on latest=100 while public invoker remains disabled."
@@ -312,65 +297,55 @@ jobs:
 
           run "post_first_release_pins_exact_stable_revisions" {
             command = plan
-
             variables {
               initial_runtime_release = false
-              api_stable_revision     = "hao-runtime-v2-api-${substr(sha256("test-release"), 0, 12)}"
-              worker_stable_revision  = "hao-runtime-v2-worker-${substr(sha256("test-release"), 0, 12)}"
+              api_stable_revision     = "hao-runtime-v2-api-41c7250e092d"
+              worker_stable_revision  = "hao-runtime-v2-worker-41c7250e092d"
             }
-
             assert {
-              condition     = length(google_cloud_run_v2_service.api[0].traffic) == 1 && google_cloud_run_v2_service.api[0].traffic[0].revision == "hao-runtime-v2-api-${substr(sha256("test-release"), 0, 12)}" && google_cloud_run_v2_service.api[0].traffic[0].percent == 100
+              condition     = length(google_cloud_run_v2_service.api[0].traffic) == 1 && google_cloud_run_v2_service.api[0].traffic[0].revision == "hao-runtime-v2-api-41c7250e092d" && google_cloud_run_v2_service.api[0].traffic[0].percent == 100
               error_message = "After first verification, API traffic must be revision-pinned rather than floating to latest."
             }
-
             assert {
-              condition     = length(google_cloud_run_v2_worker_pool.worker[0].instance_splits) == 1 && google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].revision == "hao-runtime-v2-worker-${substr(sha256("test-release"), 0, 12)}" && google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].percent == 100
+              condition     = length(google_cloud_run_v2_worker_pool.worker[0].instance_splits) == 1 && google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].revision == "hao-runtime-v2-worker-41c7250e092d" && google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].percent == 100
               error_message = "After first verification, Worker instances must be revision-pinned rather than floating to latest."
             }
           }
 
           run "later_release_keeps_stable_and_creates_zero_percent_candidates" {
             command = plan
-
             variables {
               release_id              = "test-release-2"
               temporal_worker_version = "test-worker-v2"
               initial_runtime_release = false
-              api_stable_revision     = "hao-runtime-v2-api-${substr(sha256("test-release"), 0, 12)}"
-              worker_stable_revision  = "hao-runtime-v2-worker-${substr(sha256("test-release"), 0, 12)}"
+              api_stable_revision     = "hao-runtime-v2-api-41c7250e092d"
+              worker_stable_revision  = "hao-runtime-v2-worker-41c7250e092d"
             }
-
             assert {
-              condition     = google_cloud_run_v2_service.api[0].traffic[0].percent == 100 && google_cloud_run_v2_service.api[0].traffic[0].revision == "hao-runtime-v2-api-${substr(sha256("test-release"), 0, 12)}"
+              condition     = google_cloud_run_v2_service.api[0].traffic[0].percent == 100 && google_cloud_run_v2_service.api[0].traffic[0].revision == "hao-runtime-v2-api-41c7250e092d"
               error_message = "A later API release must keep the verified stable revision at 100%."
             }
-
             assert {
-              condition     = google_cloud_run_v2_service.api[0].traffic[1].percent == 0 && google_cloud_run_v2_service.api[0].traffic[1].revision == "hao-runtime-v2-api-${substr(sha256("test-release-2"), 0, 12)}" && google_cloud_run_v2_service.api[0].traffic[1].tag == "candidate"
+              condition     = google_cloud_run_v2_service.api[0].traffic[1].percent == 0 && google_cloud_run_v2_service.api[0].traffic[1].revision == "hao-runtime-v2-api-b22833f0cfc1" && google_cloud_run_v2_service.api[0].traffic[1].tag == "candidate"
               error_message = "A later API candidate must be created at 0% with an exclusive candidate tag."
             }
-
             assert {
-              condition     = google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].percent == 100 && google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].revision == "hao-runtime-v2-worker-${substr(sha256("test-release"), 0, 12)}"
+              condition     = google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].percent == 100 && google_cloud_run_v2_worker_pool.worker[0].instance_splits[0].revision == "hao-runtime-v2-worker-41c7250e092d"
               error_message = "A later Worker release must keep the verified stable revision at 100%."
             }
-
             assert {
-              condition     = google_cloud_run_v2_worker_pool.worker[0].instance_splits[1].percent == 0 && google_cloud_run_v2_worker_pool.worker[0].instance_splits[1].revision == "hao-runtime-v2-worker-${substr(sha256("test-release-2"), 0, 12)}"
+              condition     = google_cloud_run_v2_worker_pool.worker[0].instance_splits[1].percent == 0 && google_cloud_run_v2_worker_pool.worker[0].instance_splits[1].revision == "hao-runtime-v2-worker-b22833f0cfc1"
               error_message = "A later Worker candidate must start at 0% until an explicit canary allocation is authorized."
             }
           }
 
           run "noninitial_release_without_stable_revisions_fails_closed" {
             command = plan
-
             variables {
               initial_runtime_release = false
               api_stable_revision     = null
               worker_stable_revision  = null
             }
-
             expect_failures = [google_cloud_run_v2_service.api]
           }
           ''')
