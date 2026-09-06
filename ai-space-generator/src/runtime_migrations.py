@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 
 ConnectionFactory = Callable[[], Any]
-CURRENT_RUNTIME_SCHEMA_VERSION = 3
+CURRENT_RUNTIME_SCHEMA_VERSION = 4
 CURRENT_RUNTIME_STORAGE_COMPATIBILITY_EPOCH = 1
 MIGRATION_ADVISORY_LOCK_ID = 0x48414F52  # "HAOR"
 RUNTIME_APPLICATION_ROLE = "hao_runtime_app"
@@ -145,10 +145,19 @@ _MIGRATION_3 = (
     "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT ''",
 )
 
+# Additive EXPAND migration: decision provenance becomes independently queryable
+# from durable completion state while remaining in compatibility epoch 1. Older
+# pinned workers that do not know these columns remain schema-compatible.
+_MIGRATION_4 = (
+    "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS policy_fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS decision_id TEXT NOT NULL DEFAULT ''",
+)
+
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: _MIGRATION_1,
     2: _MIGRATION_2,
     3: _MIGRATION_3,
+    4: _MIGRATION_4,
 }
 
 # Physical migrations and compatibility epochs intentionally advance independently.
@@ -159,6 +168,7 @@ MIGRATION_COMPATIBILITY_EPOCH: dict[int, int] = {
     1: 1,
     2: 1,
     3: 1,
+    4: 1,
 }
 
 _REQUIRED_TABLES = (
@@ -324,6 +334,10 @@ def verify_postgres_schema(
     closed.
     """
     _database_url(database_url)
+    if expected_version is not None and expected_version != CURRENT_RUNTIME_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"RUNTIME_BINARY_SCHEMA_VERSION_MISMATCH:{expected_version}!={CURRENT_RUNTIME_SCHEMA_VERSION}"
+        )
     if expected_version is not None and (
         minimum_version is not None or supported_compatibility_epochs is not None
     ):
@@ -335,14 +349,8 @@ def verify_postgres_schema(
             raise ValueError("STORAGE_MINIMUM_VERSION_MUST_BE_POSITIVE")
         if any(epoch < 1 for epoch in supported_compatibility_epochs):
             raise ValueError("STORAGE_COMPATIBILITY_EPOCH_MUST_BE_POSITIVE")
-    else:
-        if expected_version < 1:
-            raise ValueError("STORAGE_EXPECTED_VERSION_MUST_BE_POSITIVE")
-        if expected_version != CURRENT_RUNTIME_SCHEMA_VERSION:
-            raise RuntimeError(
-                "RUNTIME_BINARY_SCHEMA_VERSION_MISMATCH:"
-                f"{expected_version}!={CURRENT_RUNTIME_SCHEMA_VERSION}"
-            )
+    elif expected_version < 1:
+        raise ValueError("STORAGE_EXPECTED_VERSION_MUST_BE_POSITIVE")
 
     connect = connect_factory or _default_connect_factory(database_url)
     conn = connect()
