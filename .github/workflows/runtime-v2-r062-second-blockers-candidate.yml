@@ -23,10 +23,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Materialize bounded R-062 corrections
+      - name: Materialize bounded R-062 corrections when absent
         run: |
-          python .github/scripts/materialize_r062_second_blockers.py
-          python .github/scripts/fix_r062_worker_otel.py
+          set -euo pipefail
+          if grep -q 'resource "google_cloud_run_v2_job" "migration"' ai-space-generator/deploy/terraform/runtime-v2/cloud_run.tf; then
+            echo "R-062 source already materialized on this commit; reuse it."
+          else
+            python .github/scripts/materialize_r062_second_blockers.py
+            python .github/scripts/fix_r062_worker_otel.py
+          fi
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
@@ -60,15 +65,30 @@ jobs:
           grep -q 'output "cloud_sql_private_ip"' ai-space-generator/deploy/terraform/runtime-v2/outputs.tf
           grep -q "HAO_RUNTIME_MIGRATION_VERIFIED" ai-space-generator/src/runtime_migrations.py
 
-      - name: Materialize verified source and retire candidate carrier
+      - name: Commit verified non-workflow source only
         run: |
           set -euo pipefail
-          rm .github/workflows/runtime-v2-r062-second-blockers-candidate.yml
-          rm .github/scripts/materialize_r062_second_blockers.py
-          rm .github/scripts/fix_r062_worker_otel.py
+          rm -f .github/workflows/runtime-v2-image-publish.yml .github/workflows/runtime-v2-migration-execute.yml
+          rm -f ai-space-generator/deploy/terraform/runtime-v2/.terraform.lock.hcl
+          rm -rf ai-space-generator/src/__pycache__ ai-space-generator/tests/__pycache__
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add \
+            ai-space-generator/deploy/otel-collector.yaml \
+            ai-space-generator/deploy/terraform/runtime-v2/variables.tf \
+            ai-space-generator/deploy/terraform/runtime-v2/main.tf \
+            ai-space-generator/deploy/terraform/runtime-v2/cloud_run.tf \
+            ai-space-generator/deploy/terraform/runtime-v2/outputs.tf \
+            ai-space-generator/deploy/terraform/runtime-v2/staged_inputs.tftest.hcl \
+            ai-space-generator/deploy/terraform/runtime-v2/cloud_run_rollout.tftest.hcl \
+            ai-space-generator/deploy/terraform/runtime-v2/cloud_sql_edition.tftest.hcl \
+            ai-space-generator/deploy/terraform/runtime-v2/README.md \
+            ai-space-generator/src/runtime_migrations.py \
+            ai-space-generator/tests/test_runtime_migrations.py
           git diff --cached --check
+          if git diff --cached --quiet; then
+            echo "No source delta to commit."
+            exit 0
+          fi
           git commit -m "EXP: materialize Runtime deployment second-blocker fixes [r062-materialized]"
           git push origin "HEAD:${GITHUB_REF_NAME}"
