@@ -131,17 +131,6 @@ class _PostgresRuntimeDatabase:
                 )
                 """
             )
-            # Reference initialization remains restart-safe for engineering stores;
-            # production schema evolution is still owned by runtime_migrations.
-            conn.execute(
-                "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT ''"
-            )
-            conn.execute(
-                "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS policy_fingerprint TEXT NOT NULL DEFAULT ''"
-            )
-            conn.execute(
-                "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS decision_id TEXT NOT NULL DEFAULT ''"
-            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS mcp_control_runs (
