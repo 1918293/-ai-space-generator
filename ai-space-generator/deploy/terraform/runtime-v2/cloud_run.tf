@@ -46,6 +46,17 @@ resource "google_cloud_run_v2_service" "api" {
     revision        = local.api_candidate_revision
     service_account = google_service_account.api.email
 
+    volumes {
+      name = "otel-config"
+      secret {
+        secret = google_secret_manager_secret.otel_collector_config.secret_id
+        items {
+          version = var.otel_collector_config_secret_version
+          path    = "config.yaml"
+        }
+      }
+    }
+
     scaling {
       min_instance_count = var.api_min_instances
       max_instance_count = var.api_max_instances
@@ -61,8 +72,9 @@ resource "google_cloud_run_v2_service" "api" {
     }
 
     containers {
-      name  = "runtime-api"
-      image = var.runtime_image
+      name       = "runtime-api"
+      image      = var.runtime_image
+      depends_on = ["otel-collector"]
 
       ports {
         container_port = 8080
@@ -177,10 +189,16 @@ resource "google_cloud_run_v2_service" "api" {
     containers {
       name  = "otel-collector"
       image = var.otel_collector_image
+      args  = ["--config=/etc/otelcol-google/config.yaml"]
 
       env {
-        name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
-        value = var.otel_exporter_otlp_endpoint
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+
+      volume_mounts {
+        name       = "otel-config"
+        mount_path = "/etc/otelcol-google"
       }
 
       resources {
@@ -291,6 +309,17 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     revision        = local.worker_candidate_revision
     service_account = google_service_account.worker.email
 
+    volumes {
+      name = "otel-config"
+      secret {
+        secret = google_secret_manager_secret.otel_collector_config.secret_id
+        items {
+          version = var.otel_collector_config_secret_version
+          path    = "config.yaml"
+        }
+      }
+    }
+
     vpc_access {
       egress = "PRIVATE_RANGES_ONLY"
 
@@ -301,8 +330,9 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     }
 
     containers {
-      name  = "runtime-worker"
-      image = var.runtime_image
+      name       = "runtime-worker"
+      image      = var.runtime_image
+      depends_on = ["otel-collector"]
 
       resources {
         limits = {
@@ -346,10 +376,16 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     containers {
       name  = "otel-collector"
       image = var.otel_collector_image
+      args  = ["--config=/etc/otelcol-google/config.yaml"]
 
       env {
-        name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
-        value = var.otel_exporter_otlp_endpoint
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+
+      volume_mounts {
+        name       = "otel-config"
+        mount_path = "/etc/otelcol-google"
       }
 
       resources {
@@ -358,12 +394,86 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
           memory = "512Mi"
         }
       }
+
+      startup_probe {
+        timeout_seconds   = 2
+        period_seconds    = 5
+        failure_threshold = 12
+
+        http_get {
+          path = "/"
+          port = 13133
+        }
+      }
     }
   }
 
   depends_on = [
     google_project_service.required["run.googleapis.com"],
     google_secret_manager_secret_iam_member.worker,
+    google_sql_database.runtime,
+  ]
+}
+
+resource "google_cloud_run_v2_job" "migration" {
+  count = var.enable_runtime_migration ? 1 : 0
+
+  project             = var.project_id
+  name                = "${var.name_prefix}-migrate"
+  location            = var.region
+  deletion_protection = true
+
+  template {
+    template {
+      service_account = google_service_account.migration.email
+      max_retries     = 0
+      timeout         = "600s"
+
+      vpc_access {
+        egress = "PRIVATE_RANGES_ONLY"
+        network_interfaces {
+          network    = google_compute_network.runtime.name
+          subnetwork = google_compute_subnetwork.runtime.name
+        }
+      }
+
+      containers {
+        image   = var.runtime_image
+        command = ["python", "-m", "src.runtime_migrations"]
+
+        env {
+          name = "HAO_DATABASE_URL"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.migration_database_url.secret_id
+              version = var.migration_database_url_secret_version
+            }
+          }
+        }
+
+        env {
+          name  = "HAO_RELEASE_ID"
+          value = var.release_id
+        }
+
+        env {
+          name  = "HAO_DATABASE_SCHEMA_VERSION"
+          value = "3"
+        }
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "512Mi"
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_service.required["run.googleapis.com"],
+    google_secret_manager_secret_iam_member.migration_database,
     google_sql_database.runtime,
   ]
 }

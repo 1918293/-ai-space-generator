@@ -27,3 +27,33 @@ run "workload_enablement_requires_release_inputs" {
   variables { enable_runtime_workloads = true }
   expect_failures = [var.enable_runtime_workloads]
 }
+
+
+run "migration_enablement_requires_migration_inputs" {
+  command = plan
+  variables { enable_runtime_migration = true }
+  expect_failures = [var.enable_runtime_migration]
+}
+
+run "migration_job_is_in_vpc_and_single_attempt" {
+  command = plan
+  variables {
+    enable_runtime_migration              = true
+    runtime_image                         = "example.invalid/runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    release_id                            = "migration-test-release"
+    migration_database_url_secret_version = "1"
+  }
+
+  assert {
+    condition     = length(google_cloud_run_v2_job.migration) == 1
+    error_message = "Migration stage must create exactly one Cloud Run Job."
+  }
+  assert {
+    condition     = google_cloud_run_v2_job.migration[0].template[0].template[0].max_retries == 0
+    error_message = "Migration Job must not automatically retry consequential DDL."
+  }
+  assert {
+    condition     = google_cloud_run_v2_job.migration[0].template[0].template[0].vpc_access[0].egress == "PRIVATE_RANGES_ONLY"
+    error_message = "Migration Job must use private-range Direct VPC egress."
+  }
+}

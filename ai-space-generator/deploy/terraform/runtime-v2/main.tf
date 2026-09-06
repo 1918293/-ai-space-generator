@@ -7,6 +7,7 @@ locals {
     "secretmanager.googleapis.com",
     "servicenetworking.googleapis.com",
     "sqladmin.googleapis.com",
+    "telemetry.googleapis.com",
   ])
 
   common_env = {
@@ -134,6 +135,42 @@ resource "google_service_account" "worker" {
   display_name = "Hao Runtime v2 Worker"
 }
 
+resource "google_service_account" "migration" {
+  project      = var.project_id
+  account_id   = "${var.name_prefix}-migrate"
+  display_name = "Hao Runtime v2 Database Migration"
+}
+
+resource "google_secret_manager_secret" "otel_collector_config" {
+  project   = var.project_id
+  secret_id = "${var.name_prefix}-otel-config"
+
+  replication {
+    auto {}
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [google_project_service.required["secretmanager.googleapis.com"]]
+}
+
+resource "google_secret_manager_secret" "migration_database_url" {
+  project   = var.project_id
+  secret_id = "${var.name_prefix}-migration-database-url"
+
+  replication {
+    auto {}
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [google_project_service.required["secretmanager.googleapis.com"]]
+}
+
 resource "google_secret_manager_secret" "temporal_api_key" {
   project   = var.project_id
   secret_id = "${var.name_prefix}-temporal-api-key"
@@ -211,6 +248,7 @@ resource "google_secret_manager_secret" "attestation_previous" {
 
 locals {
   api_secret_access = {
+    otel_config = google_secret_manager_secret.otel_collector_config.id
     temporal    = google_secret_manager_secret.temporal_api_key.id
     database    = google_secret_manager_secret.database_url.id
     attestation = google_secret_manager_secret.attestation.id
@@ -218,8 +256,9 @@ locals {
   }
 
   worker_secret_access = {
-    temporal = google_secret_manager_secret.temporal_api_key.id
-    database = google_secret_manager_secret.database_url.id
+    otel_config = google_secret_manager_secret.otel_collector_config.id
+    temporal    = google_secret_manager_secret.temporal_api_key.id
+    database    = google_secret_manager_secret.database_url.id
   }
 }
 
@@ -248,6 +287,34 @@ resource "google_secret_manager_secret_iam_member" "worker" {
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.worker.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "migration_database" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.migration_database_url.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.migration.email}"
+}
+
+locals {
+  telemetry_service_accounts = {
+    api    = google_service_account.api.email
+    worker = google_service_account.worker.email
+  }
+}
+
+resource "google_project_iam_member" "telemetry_writer" {
+  for_each = local.telemetry_service_accounts
+  project  = var.project_id
+  role     = "roles/telemetry.writer"
+  member   = "serviceAccount:${each.value}"
+}
+
+resource "google_project_iam_member" "telemetry_service_usage" {
+  for_each = local.telemetry_service_accounts
+  project  = var.project_id
+  role     = "roles/serviceusage.serviceUsageConsumer"
+  member   = "serviceAccount:${each.value}"
 }
 
 resource "google_sql_database_instance" "runtime" {

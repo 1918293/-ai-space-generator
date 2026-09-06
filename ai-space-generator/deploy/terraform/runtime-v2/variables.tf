@@ -32,7 +32,7 @@ variable "runtime_image" {
 }
 
 variable "otel_collector_image" {
-  description = "Immutable OTel Collector image that contains deploy/otel-collector.yaml."
+  description = "Immutable Google-Built OpenTelemetry Collector image reference, pinned by OCI sha256 digest."
   type        = string
   default     = null
 
@@ -42,14 +42,14 @@ variable "otel_collector_image" {
   }
 }
 
-variable "otel_exporter_otlp_endpoint" {
-  description = "Upstream OTLP/HTTP endpoint consumed by the collector sidecar."
+variable "otel_collector_config_secret_version" {
   type        = string
   default     = null
+  description = "Existing numeric Secret Manager version containing deploy/otel-collector.yaml for the Google-Built Collector."
 
   validation {
-    condition     = var.otel_exporter_otlp_endpoint == null || can(regex("^https://", var.otel_exporter_otlp_endpoint))
-    error_message = "otel_exporter_otlp_endpoint must use HTTPS."
+    condition     = var.otel_collector_config_secret_version == null || can(regex("^[1-9][0-9]*$", var.otel_collector_config_secret_version))
+    error_message = "otel_collector_config_secret_version must be a positive numeric version."
   }
 }
 
@@ -228,6 +228,17 @@ variable "previous_attestation_keys_secret_version" {
   }
 }
 
+variable "migration_database_url_secret_version" {
+  type        = string
+  default     = null
+  description = "Existing numeric Secret Manager version containing the migration-only PostgreSQL URL."
+
+  validation {
+    condition     = var.migration_database_url_secret_version == null || can(regex("^[1-9][0-9]*$", var.migration_database_url_secret_version))
+    error_message = "migration_database_url_secret_version must be a positive numeric version."
+  }
+}
+
 variable "cloud_sql_edition" {
   type        = string
   description = "Explicit Cloud SQL edition. Required because PostgreSQL 16+ otherwise defaults to Enterprise Plus."
@@ -341,6 +352,23 @@ variable "worker_stable_revision" {
   default     = null
 }
 
+variable "enable_runtime_migration" {
+  type        = bool
+  description = "Create the in-VPC migration Job only after an immutable Runtime image and migration-only database credential exist."
+  default     = false
+
+  validation {
+    condition = !var.enable_runtime_migration || alltrue([
+      for value in [
+        var.runtime_image,
+        var.release_id,
+        var.migration_database_url_secret_version,
+      ] : try(length(trimspace(value)) > 0, false)
+    ])
+    error_message = "enable_runtime_migration=true requires runtime_image, release_id, and migration_database_url_secret_version."
+  }
+}
+
 variable "enable_runtime_workloads" {
   type        = bool
   description = "False by default. Set true only after authorized secret-version and DB-user bootstrap is complete."
@@ -352,7 +380,7 @@ variable "enable_runtime_workloads" {
       for value in [
         var.runtime_image,
         var.otel_collector_image,
-        var.otel_exporter_otlp_endpoint,
+        var.otel_collector_config_secret_version,
         var.release_id,
         var.deployment_id,
         var.temporal_worker_version,

@@ -13,6 +13,19 @@ output "cloud_sql_instance_connection_name" {
   value       = google_sql_database_instance.runtime.connection_name
 }
 
+output "cloud_sql_private_ip" {
+  description = "Authoritative private IP used by the current direct psycopg Runtime database URL."
+  value       = google_sql_database_instance.runtime.private_ip_address
+}
+
+output "migration_service_account" {
+  value = google_service_account.migration.email
+}
+
+output "migration_job_name" {
+  value = var.enable_runtime_migration ? google_cloud_run_v2_job.migration[0].name : null
+}
+
 output "api_service_account" {
   value = google_service_account.api.email
 }
@@ -49,7 +62,9 @@ output "external_bootstrap_required" {
   value = [
     "Secret Manager numeric secret versions with real values",
     "least-privilege Cloud SQL database user/password matching the database-url secret",
-    "immutable Runtime and OTel Collector image publication",
+    "immutable Runtime image publication and Google-Built OTel Collector image digest selection",
+    "numeric Secret Manager version containing the OTel Collector config",
+    "migration-only database credential plus successful in-VPC migration Job/schema readback",
     "Temporal Cloud namespace/API key",
     "OAuth IdP/JWKS/subject",
     "optional custom domain/DNS/TLS and public Cloud Run invoker authorization; the stable run.app URL is sufficient for the initial candidate",

@@ -1,6 +1,7 @@
 extensions:
   health_check:
-    endpoint: 127.0.0.1:13133
+    endpoint: 0.0.0.0:13133
+  googleclientauth:
 
 receivers:
   otlp:
@@ -9,6 +10,14 @@ receivers:
         endpoint: 127.0.0.1:4318
 
 processors:
+  resourcedetection:
+    detectors: [gcp]
+    timeout: 10s
+  resource/gcp_project_id:
+    attributes:
+      - action: insert
+        key: gcp.project_id
+        value: ${GOOGLE_CLOUD_PROJECT}
   memory_limiter:
     check_interval: 1s
     limit_mib: 256
@@ -19,29 +28,23 @@ processors:
     send_batch_max_size: 1024
 
 exporters:
-  otlphttp/upstream:
-    endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
-    sending_queue:
-      enabled: true
-      num_consumers: 4
-      queue_size: 2048
-    retry_on_failure:
-      enabled: true
-      initial_interval: 1s
-      max_interval: 15s
-      max_elapsed_time: 60s
+  otlp_grpc:
+    endpoint: telemetry.googleapis.com:443
+    balancer_name: pick_first
+    auth:
+      authenticator: googleclientauth
 
 service:
-  extensions: [health_check]
+  extensions: [health_check, googleclientauth]
   telemetry:
     logs:
       level: warn
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp/upstream]
+      processors: [resourcedetection, resource/gcp_project_id, memory_limiter, batch]
+      exporters: [otlp_grpc]
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp/upstream]
+      processors: [resourcedetection, resource/gcp_project_id, memory_limiter, batch]
+      exporters: [otlp_grpc]

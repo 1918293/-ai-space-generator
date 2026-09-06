@@ -3,6 +3,7 @@ import pytest
 from src.runtime_migrations import (
     CURRENT_RUNTIME_SCHEMA_VERSION,
     MIGRATION_ADVISORY_LOCK_ID,
+    RUNTIME_APPLICATION_ROLE,
     run_postgres_migrations,
     verify_postgres_schema,
 )
@@ -69,6 +70,13 @@ def test_migration_uses_serializable_transaction_and_advisory_lock():
     ) in conn.calls
     assert conn.calls[0][0] == "BEGIN ISOLATION LEVEL SERIALIZABLE"
     assert conn.calls[-1][0] == "COMMIT"
+    role_sql = [sql for sql, _ in conn.calls if RUNTIME_APPLICATION_ROLE in sql]
+    assert any("CREATE ROLE" in sql for sql in role_sql)
+    assert any("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES" in sql for sql in role_sql)
+    assert any("ALTER DEFAULT PRIVILEGES" in sql for sql in role_sql)
+    assert max(i for i, (sql, _) in enumerate(conn.calls) if RUNTIME_APPLICATION_ROLE in sql) < next(
+        i for i, (sql, _) in enumerate(conn.calls) if sql == "COMMIT"
+    )
     assert conn.closed is True
 
 
@@ -81,6 +89,7 @@ def test_migration_is_idempotent_when_target_version_already_applied():
     assert result.applied_versions == ()
     assert result.from_version == CURRENT_RUNTIME_SCHEMA_VERSION
     assert result.to_version == CURRENT_RUNTIME_SCHEMA_VERSION
+    assert any(RUNTIME_APPLICATION_ROLE in sql for sql, _ in conn.calls)
 
 
 def test_migration_upgrades_prior_schema_one_to_current():

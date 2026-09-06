@@ -8,6 +8,7 @@ from typing import Any, Callable
 ConnectionFactory = Callable[[], Any]
 CURRENT_RUNTIME_SCHEMA_VERSION = 3
 MIGRATION_ADVISORY_LOCK_ID = 0x48414F52  # "HAOR"
+RUNTIME_APPLICATION_ROLE = "hao_runtime_app"
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,35 @@ def _current_version(conn: Any) -> int:
     return int(_scalar(row, "version")) if row is not None else 0
 
 
+def _ensure_runtime_application_role(conn: Any) -> None:
+    """Keep long-lived Runtime credentials on DML-only privileges, not migration authority."""
+    conn.execute(
+        f"""
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{RUNTIME_APPLICATION_ROLE}') THEN
+            CREATE ROLE {RUNTIME_APPLICATION_ROLE} NOLOGIN;
+          END IF;
+        END
+        $$
+        """
+    )
+    conn.execute(f"GRANT CONNECT ON DATABASE runtime TO {RUNTIME_APPLICATION_ROLE}")
+    conn.execute(f"GRANT USAGE ON SCHEMA public TO {RUNTIME_APPLICATION_ROLE}")
+    conn.execute(
+        f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {RUNTIME_APPLICATION_ROLE}"
+    )
+    conn.execute(
+        f"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {RUNTIME_APPLICATION_ROLE}"
+    )
+    conn.execute(
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {RUNTIME_APPLICATION_ROLE}"
+    )
+    conn.execute(
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {RUNTIME_APPLICATION_ROLE}"
+    )
+
+
 def run_postgres_migrations(
     database_url: str,
     *,
@@ -235,6 +265,7 @@ def run_postgres_migrations(
                 (version, release_id.strip()),
             )
             applied.append(version)
+        _ensure_runtime_application_role(conn)
         conn.execute("COMMIT")
         return MigrationResult(before, target_version, tuple(applied))
     except Exception:
@@ -294,10 +325,15 @@ def main() -> None:
         target_version = int(raw_version)
     except ValueError as exc:
         raise ValueError("INVALID_INTEGER_CONFIG:HAO_DATABASE_SCHEMA_VERSION") from exc
-    run_postgres_migrations(
+    result = run_postgres_migrations(
         database_url,
         target_version=target_version,
         release_id=release_id,
+    )
+    verified = verify_postgres_schema(database_url, expected_version=result.to_version)
+    print(
+        f"HAO_RUNTIME_MIGRATION_VERIFIED from={result.from_version} to={result.to_version} "
+        f"applied={','.join(str(value) for value in result.applied_versions)} schema={verified}"
     )
 
 

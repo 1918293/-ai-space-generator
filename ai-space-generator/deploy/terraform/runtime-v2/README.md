@@ -73,7 +73,7 @@ Before Runtime workloads may be enabled, an explicitly authorized bootstrap must
 
 1. the numeric Secret Manager versions referenced by variables;
 2. a least-privilege PostgreSQL user/password and a `HAO_DATABASE_URL` secret version matching that user;
-3. immutable Runtime and OTel Collector images by digest;
+3. an immutable Runtime image digest, an immutable Google-Built OTel Collector digest, and a numeric Secret Manager version containing `deploy/otel-collector.yaml`;
 4. Temporal Cloud and OAuth/IdP values;
 5. any DNS/TLS/public-invoker/Workspace permissions explicitly authorized by Hao.
 
@@ -102,9 +102,7 @@ Cloud SQL IAM DB authentication / connector / proxy is **not** silently assumed.
 
 ## OTel sidecar
 
-`otel_collector_image` must be an immutable digest for an image containing the repository's `deploy/otel-collector.yaml`. This candidate does not publish that image.
-
-The collector receives the non-secret upstream endpoint as `OTEL_EXPORTER_OTLP_ENDPOINT`; backend authentication remains an external deployment decision.
+`otel_collector_image` is the Google-Built OpenTelemetry Collector pinned by immutable digest. The repository config is supplied through a numeric Secret Manager version mounted at `/etc/otelcol-google/config.yaml`; a custom collector image build is not required unless a future component/platform gap is proven. The current config exports traces and metrics directly to `telemetry.googleapis.com:443` with `googleclientauth`, so no external OTLP backend endpoint is a Runtime deployment prerequisite.
 
 ## Static, mocked, and deployment-preflight verification
 
@@ -143,3 +141,12 @@ Engineering validation of this directory does not establish:
 - provider production cutover
 - Natural-use PASS
 - System PASS
+
+
+## Staged Runtime migration boundary
+
+Base infrastructure remains plan/apply-capable with Runtime workloads and migration disabled. After an immutable Runtime image and a migration-only database credential exist, `enable_runtime_migration=true` creates one dedicated Cloud Run v2 Job using Direct VPC egress and the dedicated migration service account. The Job runs `python -m src.runtime_migrations`, has `max_retries=0`, and must complete successfully before API/Worker deployment is admitted. Production Runtime startup continues to verify rather than initialize schema.
+
+The migration credential is separate from the long-lived `HAO_DATABASE_URL`. Migrations ensure a fixed `hao_runtime_app` NOLOGIN role has Runtime DML/default privileges; the long-lived built-in Runtime database user is expected to bind that role and must not retain `cloudsqlsuperuser` merely for convenience.
+
+The base-stage outputs include the Cloud SQL private IP, migration service identity, and optional migration Job name so later stages consume exact provider state rather than reconstructing it.
