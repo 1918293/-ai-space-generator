@@ -49,24 +49,26 @@ def test_current_schema_has_explicit_compatibility_epoch():
 
 
 def test_additive_newer_physical_version_can_remain_compatible(monkeypatch):
-    monkeypatch.setitem(runtime_migrations.MIGRATION_COMPATIBILITY_EPOCH, 4, 1)
-    conn, factory = _factory(4)
+    future_version = runtime_migrations.CURRENT_RUNTIME_SCHEMA_VERSION + 1
+    monkeypatch.setitem(runtime_migrations.MIGRATION_COMPATIBILITY_EPOCH, future_version, 1)
+    conn, factory = _factory(future_version)
     verified = runtime_migrations.verify_postgres_schema(
         "postgresql://runtime/test",
-        minimum_version=3,
+        minimum_version=runtime_migrations.CURRENT_RUNTIME_SCHEMA_VERSION,
         supported_compatibility_epochs=(1,),
         connect_factory=factory,
     )
-    assert verified == 4
+    assert verified == future_version
     assert conn.closed is True
 
 
 def test_binary_needing_new_expand_migration_rejects_older_database():
-    conn, factory = _factory(3)
-    with pytest.raises(RuntimeError, match="RUNTIME_SCHEMA_TOO_OLD:3<4"):
+    current = runtime_migrations.CURRENT_RUNTIME_SCHEMA_VERSION
+    conn, factory = _factory(current - 1)
+    with pytest.raises(RuntimeError, match=rf"RUNTIME_SCHEMA_TOO_OLD:{current - 1}<{current}"):
         runtime_migrations.verify_postgres_schema(
             "postgresql://runtime/test",
-            minimum_version=4,
+            minimum_version=current,
             supported_compatibility_epochs=(1,),
             connect_factory=factory,
         )
@@ -74,15 +76,16 @@ def test_binary_needing_new_expand_migration_rejects_older_database():
 
 
 def test_contract_epoch_change_blocks_old_binary(monkeypatch):
-    monkeypatch.setitem(runtime_migrations.MIGRATION_COMPATIBILITY_EPOCH, 4, 2)
-    conn, factory = _factory(4)
+    current = runtime_migrations.CURRENT_RUNTIME_SCHEMA_VERSION
+    monkeypatch.setitem(runtime_migrations.MIGRATION_COMPATIBILITY_EPOCH, current, 2)
+    conn, factory = _factory(current)
     with pytest.raises(
         RuntimeError,
         match=r"RUNTIME_STORAGE_COMPATIBILITY_EPOCH_MISMATCH:2 not in \[1\]",
     ):
         runtime_migrations.verify_postgres_schema(
             "postgresql://runtime/test",
-            minimum_version=3,
+            minimum_version=current - 1,
             supported_compatibility_epochs=(1,),
             connect_factory=factory,
         )
@@ -90,15 +93,16 @@ def test_contract_epoch_change_blocks_old_binary(monkeypatch):
 
 
 def test_new_binary_can_explicitly_support_old_and_new_epochs(monkeypatch):
-    monkeypatch.setitem(runtime_migrations.MIGRATION_COMPATIBILITY_EPOCH, 4, 2)
-    conn, factory = _factory(4)
+    current = runtime_migrations.CURRENT_RUNTIME_SCHEMA_VERSION
+    monkeypatch.setitem(runtime_migrations.MIGRATION_COMPATIBILITY_EPOCH, current, 2)
+    conn, factory = _factory(current)
     verified = runtime_migrations.verify_postgres_schema(
         "postgresql://runtime/test",
-        minimum_version=4,
+        minimum_version=current,
         supported_compatibility_epochs=(1, 2),
         connect_factory=factory,
     )
-    assert verified == 4
+    assert verified == current
 
 
 def test_exact_verification_remains_available_for_migration_job():
@@ -112,10 +116,11 @@ def test_exact_verification_remains_available_for_migration_job():
 
 
 def test_exact_and_compatibility_modes_cannot_be_mixed():
+    current = runtime_migrations.CURRENT_RUNTIME_SCHEMA_VERSION
     with pytest.raises(ValueError, match="STORAGE_VERIFICATION_MODE_CONFLICT"):
         runtime_migrations.verify_postgres_schema(
             "postgresql://runtime/test",
-            expected_version=3,
-            minimum_version=3,
+            expected_version=current,
+            minimum_version=current,
             supported_compatibility_epochs=(1,),
         )
