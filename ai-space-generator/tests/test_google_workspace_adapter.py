@@ -575,3 +575,40 @@ def test_logical_append_readback_digest_normalizes_sheets_numbers():
 
 def test_fixed_range_digest_semantics_remain_unchanged():
     assert canonical_values_digest([[1]]) != canonical_values_digest([[1.0]])
+
+def test_logical_append_readback_digest_normalizes_interior_blank_cells():
+    current_proposal = proposal()
+    current_proposal = type(current_proposal)(
+        **{
+            **current_proposal.__dict__,
+            "arguments": (("values_json", '[["REC-B",null,"tail"]]'),),
+        }
+    )
+    resolver = ConfiguredSheetsCommandResolver(
+        (
+            SheetsMutationTarget(
+                binding_id="drive.formal_cells.update",
+                spreadsheet_id="trusted-sheet",
+                range_a1="01_Intake!A:C",
+                authority_sources=(AuthorityFileSource("AUTH:MAIN", "trusted-sheet"),),
+                mutation_mode="logical_append",
+                sheet_id=123,
+                unique_key_column="A",
+            ),
+        )
+    )
+    command = resolver.resolve(current_proposal)
+    assert command is not None
+
+    client = client_with_fakes()
+    client._sheets.values_api.values = [["REC-B", "", "tail"]]
+    readback = asyncio.run(client.readback(command))
+
+    assert readback.matched is True
+    assert readback.state_digest == command.expected_state_digest
+
+
+def test_fixed_range_digest_still_distinguishes_interior_none_and_empty_string():
+    assert canonical_values_digest([["REC-B", None, "tail"]]) != canonical_values_digest(
+        [["REC-B", "", "tail"]]
+    )
