@@ -1,9 +1,6 @@
 name: Runtime v2 Logical Append Blank Canonicalization
 
-on:
-  push:
-    branches:
-      - exp/runtime-v2-logical-append-blank-canonicalization
+on: push
 
 permissions:
   contents: write
@@ -19,7 +16,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "20b9ba56ca779473940559f9622e0aa549b00633"
+          test "$(git rev-parse HEAD^^)" = "20b9ba56ca779473940559f9622e0aa549b00633"
           test "$(git rev-parse HEAD:ai-space-generator/src/google_workspace_adapter.py)" = "14d8eee4c0a6016569c1515a52612ae8842cf4e0"
           test "$(git rev-parse HEAD:ai-space-generator/tests/test_google_workspace_adapter.py)" = "1287f6e92e8600aa99701f60878dbecb1ce816f9"
       - name: Materialize bounded blank-semantics fix
