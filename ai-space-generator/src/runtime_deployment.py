@@ -296,7 +296,8 @@ def _telemetry(settings: RuntimeSettings) -> Any | None:
 def _verify_schema(settings: RuntimeSettings) -> int:
     return verify_postgres_schema(
         settings.database_url,
-        expected_version=settings.database_schema_version,
+        minimum_version=settings.database_min_schema_version,
+        supported_compatibility_epochs=settings.storage_compatibility_epochs,
     )
 
 
@@ -305,8 +306,11 @@ def _runtime_identity_payload(settings: RuntimeSettings) -> dict[str, Any]:
         "role": settings.role.value,
         "release_id": settings.release_id,
         "deployment_id": settings.deployment_id,
-        "deployment_identity": settings.deployment_identity_fingerprint,
+        "shared_compatibility_identity": settings.deployment_identity_fingerprint,
+        "role_identity": settings.role_identity_fingerprint,
         "schema_version": settings.database_schema_version,
+        "schema_min_version": settings.database_min_schema_version,
+        "storage_compatibility_epochs": list(settings.storage_compatibility_epochs),
         "temporal_worker_version": settings.temporal_worker_version,
     }
 
