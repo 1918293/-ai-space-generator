@@ -52,6 +52,15 @@ run "first_release" {
   }
 }
 
+run "first_release_cannot_be_public" {
+  command = plan
+  variables {
+    initial_runtime_release  = true
+    allow_public_mcp_invoker = true
+  }
+  expect_failures = [output.api_candidate_revision]
+}
+
 run "pin_first_release" {
   command = plan
   variables {

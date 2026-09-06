@@ -32,6 +32,11 @@ output "worker_pool_name" {
 output "api_candidate_revision" {
   description = "Deterministic API revision identity for the current release."
   value       = local.api_candidate_revision
+
+  precondition {
+    condition     = !var.enable_runtime_workloads || !var.initial_runtime_release || !var.allow_public_mcp_invoker
+    error_message = "The explicitly gated first Runtime workload release must keep the public Cloud Run invoker disabled until the initial API/Worker revisions are verified and pinned."
+  }
 }
 
 output "worker_candidate_revision" {
@@ -47,7 +52,7 @@ output "external_bootstrap_required" {
     "immutable Runtime and OTel Collector image publication",
     "Temporal Cloud namespace/API key",
     "OAuth IdP/JWKS/subject",
-    "DNS/TLS and optional public Cloud Run invoker authorization",
+    "optional custom domain/DNS/TLS and public Cloud Run invoker authorization; the stable run.app URL is sufficient for the initial candidate",
     "Workspace file sharing for Runtime service identity",
     "remote Terraform state/executor decision",
   ]
