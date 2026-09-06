@@ -42,10 +42,10 @@ locals {
   }
 
   secret_version_paths = {
-    temporal    = "${google_secret_manager_secret.temporal_api_key.id}/versions/${var.temporal_api_key_version}"
-    database    = "${google_secret_manager_secret.database_url.id}/versions/${var.database_url_secret_version}"
-    attestation = "${google_secret_manager_secret.attestation.id}/versions/${var.attestation_secret_version}"
-    mcp_state   = "${google_secret_manager_secret.mcp_request_state.id}/versions/${var.mcp_request_state_keys_version}"
+    temporal    = var.enable_runtime_workloads ? "${google_secret_manager_secret.temporal_api_key.id}/versions/${var.temporal_api_key_version}" : null
+    database    = var.enable_runtime_workloads ? "${google_secret_manager_secret.database_url.id}/versions/${var.database_url_secret_version}" : null
+    attestation = var.enable_runtime_workloads ? "${google_secret_manager_secret.attestation.id}/versions/${var.attestation_secret_version}" : null
+    mcp_state   = var.enable_runtime_workloads ? "${google_secret_manager_secret.mcp_request_state.id}/versions/${var.mcp_request_state_keys_version}" : null
   }
 
   api_secret_bindings = merge(

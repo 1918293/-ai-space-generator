@@ -1,7 +1,7 @@
 locals {
-  runtime_revision_suffix   = substr(sha256(var.release_id), 0, 12)
-  api_candidate_revision    = "${var.name_prefix}-api-${local.runtime_revision_suffix}"
-  worker_candidate_revision = "${var.name_prefix}-worker-${local.runtime_revision_suffix}"
+  runtime_revision_suffix   = var.enable_runtime_workloads ? substr(sha256(var.release_id), 0, 12) : null
+  api_candidate_revision    = var.enable_runtime_workloads ? "${var.name_prefix}-api-${local.runtime_revision_suffix}" : null
+  worker_candidate_revision = var.enable_runtime_workloads ? "${var.name_prefix}-worker-${local.runtime_revision_suffix}" : null
   rollout_contract_valid = var.initial_runtime_release ? (
     var.api_stable_revision == null && var.worker_stable_revision == null
     ) : (

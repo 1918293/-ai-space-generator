@@ -23,9 +23,10 @@ variable "name_prefix" {
 variable "runtime_image" {
   description = "Immutable Runtime image reference. Must use an OCI sha256 digest."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("@sha256:[0-9a-fA-F]{64}$", var.runtime_image))
+    condition     = var.runtime_image == null || can(regex("@sha256:[0-9a-fA-F]{64}$", var.runtime_image))
     error_message = "runtime_image must end with @sha256:<64 hex chars>."
   }
 }
@@ -33,9 +34,10 @@ variable "runtime_image" {
 variable "otel_collector_image" {
   description = "Immutable OTel Collector image that contains deploy/otel-collector.yaml."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("@sha256:[0-9a-fA-F]{64}$", var.otel_collector_image))
+    condition     = var.otel_collector_image == null || can(regex("@sha256:[0-9a-fA-F]{64}$", var.otel_collector_image))
     error_message = "otel_collector_image must end with @sha256:<64 hex chars>."
   }
 }
@@ -43,40 +45,46 @@ variable "otel_collector_image" {
 variable "otel_exporter_otlp_endpoint" {
   description = "Upstream OTLP/HTTP endpoint consumed by the collector sidecar."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^https://", var.otel_exporter_otlp_endpoint))
+    condition     = var.otel_exporter_otlp_endpoint == null || can(regex("^https://", var.otel_exporter_otlp_endpoint))
     error_message = "otel_exporter_otlp_endpoint must use HTTPS."
   }
 }
 
 variable "release_id" {
   type        = string
+  default     = null
   description = "Immutable Runtime release ID."
 }
 
 variable "deployment_id" {
   type        = string
+  default     = null
   description = "Release-group/deployment identity shared by API and Worker."
 }
 
 variable "temporal_worker_version" {
   type        = string
+  default     = null
   description = "Immutable Temporal Worker deployment/build ID."
 }
 
 variable "public_mcp_url" {
   type        = string
+  default     = null
   description = "Final public OAuth resource URL ending in /mcp."
 
   validation {
-    condition     = can(regex("^https://.+/mcp$", var.public_mcp_url))
+    condition     = var.public_mcp_url == null || can(regex("^https://.+/mcp$", var.public_mcp_url))
     error_message = "public_mcp_url must be HTTPS and end in /mcp."
   }
 }
 
 variable "mcp_allowed_hosts" {
   type        = string
+  default     = null
   description = "Comma-separated allowed Host values for Runtime MCP."
 }
 
@@ -94,55 +102,65 @@ variable "mcp_request_state_audience" {
 
 variable "oauth_issuer_url" {
   type        = string
+  default     = null
   description = "Production OAuth issuer."
 }
 
 variable "oauth_jwks_url" {
   type        = string
+  default     = null
   description = "Production JWKS endpoint."
 }
 
 variable "expected_hao_subject" {
   type        = string
+  default     = null
   description = "Expected authenticated Hao subject."
   sensitive   = false
 }
 
 variable "attestation_key_id" {
   type        = string
+  default     = null
   description = "Current completion-attestation signing key identifier."
 }
 
 variable "initial_task" {
   type        = string
+  default     = null
   description = "Only used to seed a brand-new empty operational-state database."
 }
 
 variable "sheets_targets_json" {
   type        = string
+  default     = null
   description = "Deployment-owned HAO_SHEETS_TARGETS_JSON."
   sensitive   = true
 }
 
 variable "task_policies_json" {
   type        = string
+  default     = null
   description = "Deployment-owned HAO_TASK_POLICIES_JSON."
   sensitive   = true
 }
 
 variable "parent_task_plans_json" {
   type        = string
+  default     = null
   description = "Deployment-owned HAO_PARENT_TASK_PLANS_JSON."
   sensitive   = true
 }
 
 variable "temporal_endpoint" {
   type        = string
+  default     = null
   description = "Temporal Cloud endpoint."
 }
 
 variable "temporal_namespace" {
   type        = string
+  default     = null
   description = "Temporal Cloud namespace."
 }
 
@@ -154,40 +172,44 @@ variable "temporal_task_queue" {
 
 variable "temporal_api_key_version" {
   type        = string
+  default     = null
   description = "Existing numeric Secret Manager version for the Temporal API key."
 
   validation {
-    condition     = can(regex("^[1-9][0-9]*$", var.temporal_api_key_version))
+    condition     = var.temporal_api_key_version == null || can(regex("^[1-9][0-9]*$", var.temporal_api_key_version))
     error_message = "temporal_api_key_version must be a positive numeric version."
   }
 }
 
 variable "attestation_secret_version" {
   type        = string
+  default     = null
   description = "Existing numeric Secret Manager version for current attestation signing secret."
 
   validation {
-    condition     = can(regex("^[1-9][0-9]*$", var.attestation_secret_version))
+    condition     = var.attestation_secret_version == null || can(regex("^[1-9][0-9]*$", var.attestation_secret_version))
     error_message = "attestation_secret_version must be a positive numeric version."
   }
 }
 
 variable "mcp_request_state_keys_version" {
   type        = string
+  default     = null
   description = "Existing numeric Secret Manager version for MCP request-state keys."
 
   validation {
-    condition     = can(regex("^[1-9][0-9]*$", var.mcp_request_state_keys_version))
+    condition     = var.mcp_request_state_keys_version == null || can(regex("^[1-9][0-9]*$", var.mcp_request_state_keys_version))
     error_message = "mcp_request_state_keys_version must be a positive numeric version."
   }
 }
 
 variable "database_url_secret_version" {
   type        = string
+  default     = null
   description = "Existing numeric Secret Manager version containing the password-bearing PostgreSQL URL."
 
   validation {
-    condition     = can(regex("^[1-9][0-9]*$", var.database_url_secret_version))
+    condition     = var.database_url_secret_version == null || can(regex("^[1-9][0-9]*$", var.database_url_secret_version))
     error_message = "database_url_secret_version must be a positive numeric version."
   }
 }
@@ -323,6 +345,37 @@ variable "enable_runtime_workloads" {
   type        = bool
   description = "False by default. Set true only after authorized secret-version and DB-user bootstrap is complete."
   default     = false
+
+
+  validation {
+    condition = !var.enable_runtime_workloads || nonsensitive(alltrue([
+      for value in [
+        var.runtime_image,
+        var.otel_collector_image,
+        var.otel_exporter_otlp_endpoint,
+        var.release_id,
+        var.deployment_id,
+        var.temporal_worker_version,
+        var.public_mcp_url,
+        var.mcp_allowed_hosts,
+        var.oauth_issuer_url,
+        var.oauth_jwks_url,
+        var.expected_hao_subject,
+        var.attestation_key_id,
+        var.initial_task,
+        var.sheets_targets_json,
+        var.task_policies_json,
+        var.parent_task_plans_json,
+        var.temporal_endpoint,
+        var.temporal_namespace,
+        var.temporal_api_key_version,
+        var.attestation_secret_version,
+        var.mcp_request_state_keys_version,
+        var.database_url_secret_version,
+      ] : try(length(trimspace(value)) > 0, false)
+    ]))
+    error_message = "enable_runtime_workloads=true requires every Runtime workload/release input; base-infrastructure planning must not fabricate those values."
+  }
 }
 
 variable "allow_public_mcp_invoker" {
