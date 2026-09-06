@@ -176,6 +176,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git add -N ai-space-generator/deploy/terraform/runtime-v2/staged_inputs.tftest.hcl
           git diff --check
           mapfile -t files < <(git diff --name-only | sort)
           expected=(
