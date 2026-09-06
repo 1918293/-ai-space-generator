@@ -59,6 +59,9 @@ def test_run_id_is_trace_only_not_high_cardinality_metric_attribute():
         provider="google-drive",
         failure_stage="VERIFICATION",
         failure_code="READBACK_MISMATCH",
+        decision_id="DECISION:high-cardinality",
+        policy_fingerprint="sha256:policy-high-cardinality",
+        admission_result="ADMITTED",
     )
     metric_attributes = item.run_events.calls[0][1]
     failure_attributes = item.failures.calls[0][1]
@@ -66,7 +69,14 @@ def test_run_id_is_trace_only_not_high_cardinality_metric_attribute():
 
     assert "hao.run.id" not in metric_attributes
     assert "hao.run.id" not in failure_attributes
+    assert "hao.decision.id" not in metric_attributes
+    assert "hao.decision.id" not in failure_attributes
+    assert "hao.policy.fingerprint" not in metric_attributes
+    assert "hao.policy.fingerprint" not in failure_attributes
+    assert metric_attributes["hao.admission.result"] == "ADMITTED"
     assert span_attributes["hao.run.id"] == "RUN-SECRETLY-HIGH-CARDINALITY"
+    assert span_attributes["hao.decision.id"] == "DECISION:high-cardinality"
+    assert span_attributes["hao.policy.fingerprint"] == "sha256:policy-high-cardinality"
     assert "arguments" not in span_attributes
     assert "payload" not in span_attributes
 
@@ -74,7 +84,11 @@ def test_run_id_is_trace_only_not_high_cardinality_metric_attribute():
 class Bridge:
     async def submit(self, principal, **kwargs):
         return SimpleNamespace(
-            workflow_id="RUN-1", code="CONTROLLED_RUN_STARTED", phase="ADMITTED"
+            workflow_id="RUN-1",
+            code="CONTROLLED_RUN_STARTED",
+            phase="ADMITTED",
+            decision_id="DECISION:RUN-1",
+            policy_fingerprint="sha256:POLICY-1",
         )
 
     async def status(self, principal, *, workflow_id):
@@ -99,6 +113,8 @@ class Bridge:
             authoritative=True,
             code="AUTHORITATIVE_COMPLETION_COMMITTED",
             phase="CLOSED",
+            decision_id="DECISION:RUN-1",
+            policy_fingerprint="sha256:POLICY-1",
         )
 
     def operational_context(self, principal):
@@ -192,6 +208,8 @@ def test_mcp_observer_records_state_but_never_model_arguments():
     item = asyncio.run(scenario())
     all_attributes = [attributes for _, attributes in item.tracer.spans]
     assert any(attrs.get("hao.run.id") == "RUN-1" for attrs in all_attributes)
+    assert any(attrs.get("hao.decision.id") == "DECISION:RUN-1" for attrs in all_attributes)
+    assert any(attrs.get("hao.policy.fingerprint") == "sha256:POLICY-1" for attrs in all_attributes)
     assert any(attrs.get("hao.run.id") == "TASK-1" for attrs in all_attributes)
     assert any(attrs.get("hao.run.id") == "RUN-RECON-ORIGINAL" for attrs in all_attributes)
     assert any(attrs.get("hao.run.id") == "RUN-RETRY-1" for attrs in all_attributes)

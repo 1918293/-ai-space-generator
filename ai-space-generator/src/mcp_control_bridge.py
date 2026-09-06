@@ -161,6 +161,8 @@ class MCPSubmissionView:
     task: str
     phase: str
     authorization_scope: str = ""
+    decision_id: str = ""
+    policy_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,8 @@ class MCPFinalizeView:
     authoritative: bool
     code: str
     phase: str
+    decision_id: str = ""
+    policy_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -413,6 +417,10 @@ class MCPControlBridge:
             task=state.task,
             phase=phase,
             authorization_scope=authorization_scope,
+            decision_id=submission.record.decision_id if submission.record is not None else "",
+            policy_fingerprint=(
+                submission.record.policy_fingerprint if submission.record is not None else ""
+            ),
         )
 
     async def _pending_for(
@@ -537,7 +545,16 @@ class MCPControlBridge:
         )
         if result.authoritative and self._telemetry is not None:
             self._telemetry.record_authoritative_completion()
-        return MCPFinalizeView(workflow_id, result.authoritative, result.code, phase)
+        return MCPFinalizeView(
+            workflow_id,
+            result.authoritative,
+            result.code,
+            phase,
+            decision_id=result.record.decision_id if result.record is not None else "",
+            policy_fingerprint=(
+                result.record.policy_fingerprint if result.record is not None else ""
+            ),
+        )
 
     def parent_start(self, principal: MCPPrincipal, *, plan_id: str) -> MCPParentTaskView:
         self._identity_policy.require(principal, SCOPE_EXECUTE)

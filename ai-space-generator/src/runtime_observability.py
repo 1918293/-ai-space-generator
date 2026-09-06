@@ -58,6 +58,9 @@ class RuntimeTelemetry:
         provider: str = "",
         failure_stage: str = "",
         failure_code: str = "",
+        decision_id: str = "",
+        policy_fingerprint: str = "",
+        admission_result: str = "",
     ) -> None:
         metric_attributes: dict[str, str] = {
             "hao.event": event,
@@ -65,6 +68,8 @@ class RuntimeTelemetry:
         }
         if provider:
             metric_attributes["hao.provider"] = provider
+        if admission_result:
+            metric_attributes["hao.admission.result"] = admission_result.strip().upper()
         if failure_stage:
             metric_attributes["hao.failure.stage"] = failure_stage
         self.run_events.add(1, metric_attributes)
@@ -78,8 +83,12 @@ class RuntimeTelemetry:
 
         trace_attributes = dict(metric_attributes)
         if run_id:
-            # IDs are high-cardinality and therefore trace-only.
+            # IDs and fingerprints are high-cardinality and therefore trace-only.
             trace_attributes["hao.run.id"] = run_id
+        if decision_id:
+            trace_attributes["hao.decision.id"] = decision_id
+        if policy_fingerprint:
+            trace_attributes["hao.policy.fingerprint"] = policy_fingerprint
         if failure_code:
             trace_attributes["hao.failure.code"] = failure_code
         with self.tracer.start_as_current_span(

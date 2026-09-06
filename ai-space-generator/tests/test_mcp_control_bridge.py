@@ -81,6 +81,8 @@ class FakeProduction:
             mode=state.mode,
             goal_valid=True,
             acceptance_criteria=("verified",),
+            policy_fingerprint="sha256:FAKE-POLICY",
+            decision_id="DECISION:" + workflow_id,
             phase=phase,
             action=action,
         )
@@ -246,6 +248,8 @@ def test_submit_uses_runtime_owned_mode_task_and_server_generated_run_identity(t
         assert view.workflow_id.startswith("RUN-MCP-")
         assert view.mode == "EXP"
         assert view.task == "MCP controlled task"
+        assert view.decision_id == "DECISION:" + view.workflow_id
+        assert view.policy_fingerprint == "sha256:FAKE-POLICY"
         assert production.records[view.workflow_id].mode == Mode.EXP
         assert production.records[view.workflow_id].task == "MCP controlled task"
 

@@ -26,6 +26,9 @@ class ObservableMCPControlBridge:
             phase=result.phase,
             failure_stage="" if result.workflow_id else "ADMISSION",
             failure_code="" if result.workflow_id else result.code,
+            decision_id=getattr(result, "decision_id", ""),
+            policy_fingerprint=getattr(result, "policy_fingerprint", ""),
+            admission_result="ADMITTED" if result.workflow_id else "REJECTED",
         )
         return result
 
@@ -63,6 +66,8 @@ class ObservableMCPControlBridge:
             phase=result.phase,
             failure_stage="" if result.authoritative else "COMPLETION",
             failure_code="" if result.authoritative else result.code,
+            decision_id=getattr(result, "decision_id", ""),
+            policy_fingerprint=getattr(result, "policy_fingerprint", ""),
         )
         if result.authoritative:
             self._telemetry.record_authoritative_completion()
