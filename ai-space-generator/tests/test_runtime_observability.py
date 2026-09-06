@@ -236,3 +236,98 @@ def test_reconciliation_observer_counts_only_new_case_transition():
 
     item = asyncio.run(scenario())
     assert len(item.reconciliation_cases.calls) == 1
+
+
+def test_decision_provenance_is_trace_only_and_summarizes_evidence_without_payloads():
+    from src.execution_control import (
+        ActionArchetype,
+        ActionExternality,
+        ActionProposal,
+        EvidenceKind,
+        EvidenceOrigin,
+        EvidenceReceipt,
+        ExecutionRecord,
+        Mode,
+        RunPhase,
+    )
+
+    action = ActionProposal(
+        action_id="RUN-DECISION:A0001:formal.write",
+        archetype=ActionArchetype.MUTATE,
+        externality=ActionExternality.PRIVATE_REVERSIBLE,
+        capability="formal_persistence",
+        provider="google-drive",
+        action_name="update",
+        expected_state_delta="PRIVATE-EXPECTED-DELTA",
+        arguments=(("payload", "PRIVATE-MODEL-ARGUMENT"),),
+    )
+    record = ExecutionRecord(
+        run_id="RUN-DECISION-HIGH-CARDINALITY",
+        task="Decision provenance telemetry",
+        mode=Mode.EXP,
+        goal_valid=True,
+        acceptance_criteria=("verified",),
+        policy_fingerprint="sha256:POLICY-HIGH-CARDINALITY",
+        decision_id="DECISION:HIGH-CARDINALITY",
+        phase=RunPhase.CLOSED,
+        action=action,
+        evidence=(
+            EvidenceReceipt(
+                "PRIVATE-TOOL-RECEIPT-ID",
+                EvidenceKind.TOOL_RECEIPT,
+                True,
+                "PRIVATE-PROVIDER-SOURCE",
+                claim_scope=action.action_id,
+                origin=EvidenceOrigin.PROVIDER,
+            ),
+            EvidenceReceipt(
+                "PRIVATE-READBACK-ID",
+                EvidenceKind.STATE_READBACK,
+                True,
+                "PRIVATE-READBACK-SOURCE",
+                claim_scope=action.action_id,
+                origin=EvidenceOrigin.PROVIDER,
+            ),
+            EvidenceReceipt(
+                "PRIVATE-VERIFY-ID",
+                EvidenceKind.VERIFICATION_PASS,
+                True,
+                "PRIVATE-VERIFIER-SOURCE",
+                claim_scope=action.action_id,
+                origin=EvidenceOrigin.VERIFIER,
+            ),
+        ),
+    )
+    item = telemetry()
+    item.record_decision_event(
+        "finalization",
+        record,
+        admission_code="ADMITTED",
+        completion_code="AUTHORITATIVE_COMPLETION_COMMITTED",
+        authoritative=True,
+    )
+
+    assert item.run_events.calls == []
+    assert item.failures.calls == []
+    assert item.authoritative_completions.calls == []
+    assert item.reconciliation_cases.calls == []
+
+    name, attributes = item.tracer.spans[-1]
+    assert name == "hao.runtime.decision.finalization"
+    assert attributes["hao.run.id"] == record.run_id
+    assert attributes["hao.decision.id"] == record.decision_id
+    assert attributes["hao.policy.fingerprint"] == record.policy_fingerprint
+    assert attributes["hao.admission.code"] == "ADMITTED"
+    assert attributes["hao.completion.code"] == "AUTHORITATIVE_COMPLETION_COMMITTED"
+    assert attributes["hao.completion.authoritative"] is True
+    assert attributes["hao.evidence.tool_receipt.count"] == 1
+    assert attributes["hao.evidence.state_readback.count"] == 1
+    assert attributes["hao.evidence.verification_pass.count"] == 1
+
+    serialized = repr(attributes)
+    assert "PRIVATE-TOOL-RECEIPT-ID" not in serialized
+    assert "PRIVATE-READBACK-ID" not in serialized
+    assert "PRIVATE-VERIFY-ID" not in serialized
+    assert "PRIVATE-PROVIDER-SOURCE" not in serialized
+    assert "PRIVATE-MODEL-ARGUMENT" not in serialized
+    assert "PRIVATE-EXPECTED-DELTA" not in serialized
