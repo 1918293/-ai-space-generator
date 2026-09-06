@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - fam/contracts-v0.1
-      - exp/execution-control-plane-v1
+      - exp/runtime-v2-contract-event-dedup
   pull_request:
     branches:
       - main
