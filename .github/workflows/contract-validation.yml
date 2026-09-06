@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - fam/contracts-v0.1
-      - exp/execution-control-plane-v1
   pull_request:
     branches:
       - main
