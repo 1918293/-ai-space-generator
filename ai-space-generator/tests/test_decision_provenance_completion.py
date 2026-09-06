@@ -84,8 +84,8 @@ def test_completion_signature_binds_runtime_owned_decision_identity():
         operational_version=11,
     ) is False
     assert attestor.verify(
-        replace(record, policy_fingerprint="sha256:forged-policy"),
         receipt,
+        replace(record, policy_fingerprint="sha256:forged-policy"),
         operational_version=11,
     ) is False
 
