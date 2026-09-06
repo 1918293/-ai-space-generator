@@ -189,7 +189,34 @@ class FakeStarter:
         return handle
 
 
-def service(tmp_path, *, close=True):
+class DecisionTelemetryRecorder:
+    def __init__(self):
+        self.calls = []
+
+    def record_decision_event(
+        self,
+        event,
+        record,
+        *,
+        admission_code="",
+        completion_code="",
+        authoritative=None,
+    ):
+        self.calls.append(
+            {
+                "event": event,
+                "run_id": record.run_id,
+                "decision_id": record.decision_id,
+                "policy_fingerprint": record.policy_fingerprint,
+                "evidence_kinds": tuple(item.kind for item in record.evidence if item.passed),
+                "admission_code": admission_code,
+                "completion_code": completion_code,
+                "authoritative": authoritative,
+            }
+        )
+
+
+def service(tmp_path, *, close=True, telemetry=None):
     return ProductionExecutionService(
         gateway=gateway(),
         starter=FakeStarter(close=close),
@@ -197,6 +224,7 @@ def service(tmp_path, *, close=True):
         completion_store=SQLiteAuthoritativeCompletionStore(
             str(tmp_path / "completion.sqlite")
         ),
+        telemetry=telemetry,
     )
 
 
@@ -257,6 +285,64 @@ def test_submit_returns_durable_handle_and_approval_is_a_signal_not_an_open_requ
         assert result.authoritative is True
 
     asyncio.run(scenario())
+
+
+def test_decision_provenance_uses_actual_durable_outcomes_and_one_runtime_identity(tmp_path):
+    import asyncio
+
+    recorder = DecisionTelemetryRecorder()
+    result = asyncio.run(
+        service(tmp_path, telemetry=recorder).execute(
+            state(),
+            external_request(),
+            issued_at="2026-09-06T20:55:00+08:00",
+        )
+    )
+
+    assert result.authoritative is True
+    assert [call["event"] for call in recorder.calls] == [
+        "admission",
+        "provider_readback",
+        "verification",
+        "finalization",
+    ]
+    assert {call["run_id"] for call in recorder.calls} == {"RUN-PROD-EXT"}
+    decision_ids = {call["decision_id"] for call in recorder.calls}
+    policy_fingerprints = {call["policy_fingerprint"] for call in recorder.calls}
+    assert len(decision_ids) == 1
+    assert next(iter(decision_ids)).startswith("DECISION:")
+    assert len(policy_fingerprints) == 1
+    assert next(iter(policy_fingerprints)).startswith("sha256:")
+
+    admission = recorder.calls[0]
+    assert admission["admission_code"] == "ADMITTED"
+    evidence = recorder.calls[1]
+    assert EvidenceKind.TOOL_RECEIPT in evidence["evidence_kinds"]
+    assert EvidenceKind.STATE_READBACK in evidence["evidence_kinds"]
+    verification = recorder.calls[2]
+    assert EvidenceKind.VERIFICATION_PASS in verification["evidence_kinds"]
+    finalization = recorder.calls[3]
+    assert finalization["completion_code"] == "AUTHORITATIVE_COMPLETION_COMMITTED"
+    assert finalization["authoritative"] is True
+
+
+def test_nonclosed_finalization_records_fail_closed_outcome_without_attestation(tmp_path):
+    import asyncio
+
+    recorder = DecisionTelemetryRecorder()
+    result = asyncio.run(
+        service(tmp_path, close=False, telemetry=recorder).execute(
+            state(),
+            request(),
+            issued_at="2026-09-06T20:56:00+08:00",
+        )
+    )
+
+    assert result.authoritative is False
+    assert result.attestation is None
+    assert recorder.calls[-1]["event"] == "finalization"
+    assert recorder.calls[-1]["completion_code"] == "CONTROLLED_RUN_NOT_CLOSED:BLOCKED"
+    assert recorder.calls[-1]["authoritative"] is False
 
 
 def test_out_of_band_native_or_manual_effect_is_quarantined_not_promoted():
