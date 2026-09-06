@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -28,6 +28,58 @@ class TaskExecutionPolicy:
     required_action_authority_refs: tuple[str, ...] = ()
     required_action_tags: tuple[str, ...] = ()
     forbidden_action_tags: tuple[str, ...] = ()
+
+
+def _task_policy_fingerprint(policy: TaskExecutionPolicy) -> str:
+    payload = {
+        "goal_valid": policy.goal_valid,
+        "acceptance_criteria": policy.acceptance_criteria,
+        "required_acceptance_gate_ids": policy.required_acceptance_gate_ids,
+        "hao_acceptance_required": policy.hao_acceptance_required,
+        "authority_refs": tuple(sorted(ref.strip() for ref in policy.authority_refs if ref.strip())),
+        "authority_stamps": tuple(
+            sorted(
+                (stamp.ref.strip(), stamp.version.strip())
+                for stamp in policy.authority_stamps
+                if stamp.ref.strip() and stamp.version.strip()
+            )
+        ),
+        "required_action_authority_refs": tuple(
+            sorted(ref.strip() for ref in policy.required_action_authority_refs if ref.strip())
+        ),
+        "required_action_tags": tuple(sorted(tag.strip().upper() for tag in policy.required_action_tags if tag.strip())),
+        "forbidden_action_tags": tuple(sorted(tag.strip().upper() for tag in policy.forbidden_action_tags if tag.strip())),
+    }
+    material = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(material).hexdigest()
+
+
+def _mint_decision_id(
+    state: ActiveOperationalState,
+    request: ModelIngressRequest,
+    *,
+    policy_fingerprint: str,
+    action_id: str,
+    authority_snapshot_fingerprint: str,
+    resolution_code: str,
+) -> str:
+    payload = {
+        "run_id": request.run_id.strip(),
+        "sequence": request.sequence,
+        "mode": state.mode.value,
+        "task": state.task,
+        "operational_version": state.version,
+        "policy_fingerprint": policy_fingerprint,
+        "action_id": action_id.strip(),
+        "authority_snapshot_fingerprint": authority_snapshot_fingerprint.strip(),
+        "resolution_code": resolution_code.strip(),
+    }
+    material = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "DECISION:" + hashlib.sha256(material).hexdigest()
 
 
 class TaskPolicyProvider(Protocol):
@@ -73,11 +125,13 @@ class ControlPlaneGateway:
             raise ValueError("RUN_ID_REQUIRED")
 
         policy = self._policy_provider.resolve(state)
+        policy_fingerprint = _task_policy_fingerprint(policy)
         record = execution_record_from_operational_state(
             state,
             run_id=request.run_id,
             goal_valid=policy.goal_valid,
             acceptance_criteria=policy.acceptance_criteria,
+            policy_fingerprint=policy_fingerprint,
             required_acceptance_gate_ids=policy.required_acceptance_gate_ids,
             hao_acceptance_required=policy.hao_acceptance_required,
             authority_refs=policy.authority_refs,
@@ -94,7 +148,15 @@ class ControlPlaneGateway:
         )
         if resolution.proposal is None:
             return PreparedControlledAction(None, resolution)
-        return PreparedControlledAction(record, resolution)
+        decision_id = _mint_decision_id(
+            state,
+            request,
+            policy_fingerprint=policy_fingerprint,
+            action_id=resolution.proposal.action_id,
+            authority_snapshot_fingerprint=resolution.proposal.authority_snapshot_fingerprint,
+            resolution_code=resolution.decision.code,
+        )
+        return PreparedControlledAction(replace(record, decision_id=decision_id), resolution)
 
 
 _CHECKPOINT_CUE = re.compile(r"(?<![A-Z0-9_])R(\d+)(?![A-Z0-9_])", re.IGNORECASE)

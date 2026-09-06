@@ -1,4 +1,4 @@
-from dataclasses import fields
+from dataclasses import fields, replace
 
 from src.action_catalog import ActionBinding, ActionCatalog, ModelActionIntent
 from src.control_gateway import (
@@ -512,3 +512,61 @@ def test_responses_phase_a_admitted_call_is_stateless_tool_free_and_structurally
     assert '"mode":"EXP"' in call["instructions"]
     assert '"task":"Knowledge-to-Execution preflight prospective field validation"' in call["instructions"]
     assert '"context_fingerprint":"' in call["instructions"]
+
+
+def test_gateway_mints_runtime_owned_decision_provenance():
+    gateway = ControlPlaneGateway(catalog(), PolicyProvider())
+    request = ModelIngressRequest(
+        "RUN-GW-PROVENANCE",
+        1,
+        ModelActionIntent(
+            "INTENT-PROVENANCE",
+            "image_edit",
+            "image.local_edit",
+            expected_state_delta="bounded edit",
+        ),
+    )
+    first = gateway.prepare(state(), request)
+    second = gateway.prepare(state(), request)
+    assert first.record is not None and second.record is not None
+    assert first.record.policy_fingerprint.startswith("sha256:")
+    assert first.record.decision_id.startswith("DECISION:")
+    assert first.record.policy_fingerprint == second.record.policy_fingerprint
+    assert first.record.decision_id == second.record.decision_id
+    ingress_fields = {field.name for field in fields(ModelIngressRequest)}
+    assert "decision_id" not in ingress_fields
+    assert "policy_fingerprint" not in ingress_fields
+
+
+def test_authority_revision_change_changes_policy_and_decision_identity():
+    class RevisedAuthorityPolicyProvider(PolicyProvider):
+        def resolve(self, state):
+            policy = super().resolve(state)
+            return replace(
+                policy,
+                authority_stamps=(
+                    AuthorityStamp("SOURCE-ORIGINAL", "sha256:def"),
+                ),
+            )
+
+    request = ModelIngressRequest(
+        "RUN-GW-PROVENANCE-REVISION",
+        1,
+        ModelActionIntent(
+            "INTENT-PROVENANCE",
+            "image_edit",
+            "image.local_edit",
+            expected_state_delta="bounded edit",
+        ),
+    )
+    original = ControlPlaneGateway(catalog(), PolicyProvider()).prepare(state(), request)
+    revised = ControlPlaneGateway(catalog(), RevisedAuthorityPolicyProvider()).prepare(state(), request)
+    assert original.record is not None and revised.record is not None
+    assert original.resolution.proposal is not None and revised.resolution.proposal is not None
+    assert original.resolution.proposal.action_id == revised.resolution.proposal.action_id
+    assert original.record.policy_fingerprint != revised.record.policy_fingerprint
+    assert original.record.decision_id != revised.record.decision_id
+    assert (
+        original.resolution.proposal.authority_snapshot_fingerprint
+        != revised.resolution.proposal.authority_snapshot_fingerprint
+    )

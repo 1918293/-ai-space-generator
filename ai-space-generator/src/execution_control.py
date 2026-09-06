@@ -140,6 +140,8 @@ class ExecutionRecord:
     required_action_authority_refs: tuple[str, ...] = ()
     required_action_tags: tuple[str, ...] = ()
     forbidden_action_tags: tuple[str, ...] = ()
+    policy_fingerprint: str = ""
+    decision_id: str = ""
     phase: RunPhase = RunPhase.RESOLVED
     action: ActionProposal | None = None
     evidence: tuple[EvidenceReceipt, ...] = ()
