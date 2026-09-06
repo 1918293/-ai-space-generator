@@ -102,7 +102,7 @@ jobs:
           marker = "def test_fixed_range_digest_semantics_remain_unchanged():"
           if marker not in test_text:
               raise SystemExit("test guard failed: fixed-range digest marker missing")
-          tests.write_text(test_text.rstrip() + addition + "\n")
+          tests.write_text(test_text.rstrip() + addition.rstrip() + "\n")
       - name: Install Runtime dependencies
         run: |
           python -m pip install --upgrade pip
