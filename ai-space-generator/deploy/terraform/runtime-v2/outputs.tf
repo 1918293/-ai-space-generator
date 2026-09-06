@@ -39,7 +39,12 @@ output "api_service_uri" {
 }
 
 output "worker_pool_name" {
-  value = var.enable_runtime_workloads ? google_cloud_run_v2_worker_pool.worker[0].name : null
+  description = "Legacy single-pool Worker name. Null when explicit rainbow worker_versions are active."
+  value = (
+    var.enable_runtime_workloads && !local.worker_rainbow_enabled
+    ? google_cloud_run_v2_worker_pool.worker[0].name
+    : null
+  )
 }
 
 output "api_candidate_revision" {
@@ -48,12 +53,12 @@ output "api_candidate_revision" {
 
   precondition {
     condition     = !var.enable_runtime_workloads || !var.initial_runtime_release || !var.allow_public_mcp_invoker
-    error_message = "The explicitly gated first Runtime workload release must keep the public Cloud Run invoker disabled until the initial API/Worker revisions are verified and pinned."
+    error_message = "The explicitly gated first Runtime workload release must keep the public Cloud Run invoker disabled until the initial API and Worker compute are verified."
   }
 }
 
 output "worker_candidate_revision" {
-  description = "Deterministic Worker Pool revision identity for the current release."
+  description = "Legacy single-pool Worker revision identity. Null when rainbow worker_versions are active."
   value       = local.worker_candidate_revision
 }
 
