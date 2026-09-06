@@ -125,9 +125,22 @@ class _PostgresRuntimeDatabase:
                     evidence_digest TEXT NOT NULL,
                     issued_at TEXT NOT NULL,
                     signature TEXT NOT NULL,
-                    key_id TEXT NOT NULL DEFAULT ''
+                    key_id TEXT NOT NULL DEFAULT '',
+                    policy_fingerprint TEXT NOT NULL DEFAULT '',
+                    decision_id TEXT NOT NULL DEFAULT ''
                 )
                 """
+            )
+            # Reference initialization remains restart-safe for engineering stores;
+            # production schema evolution is still owned by runtime_migrations.
+            conn.execute(
+                "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT ''"
+            )
+            conn.execute(
+                "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS policy_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+            conn.execute(
+                "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS decision_id TEXT NOT NULL DEFAULT ''"
             )
             conn.execute(
                 """
@@ -376,8 +389,8 @@ class PostgresAuthoritativeCompletionStore:
                 INSERT INTO authoritative_completions(
                     run_id, action_id, task, mode, operational_version,
                     authority_snapshot_fingerprint, evidence_digest, issued_at,
-                    key_id, signature
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    key_id, policy_fingerprint, decision_id, signature
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     attestation.run_id,
@@ -389,6 +402,8 @@ class PostgresAuthoritativeCompletionStore:
                     attestation.evidence_digest,
                     attestation.issued_at,
                     attestation.key_id,
+                    attestation.policy_fingerprint,
+                    attestation.decision_id,
                     attestation.signature,
                 ),
             )
