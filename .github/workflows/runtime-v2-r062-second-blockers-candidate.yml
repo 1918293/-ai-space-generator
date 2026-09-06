@@ -1,9 +1,7 @@
 name: Runtime v2 R062 second blockers candidate
 
 on:
-  push:
-    branches:
-      - exp/runtime-v2-r062-second-blockers
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -24,7 +22,9 @@ jobs:
           persist-credentials: true
 
       - name: Materialize bounded R-062 corrections
-        run: python .github/scripts/materialize_r062_second_blockers.py
+        run: |
+          python .github/scripts/materialize_r062_second_blockers.py
+          python .github/scripts/fix_r062_worker_otel.py
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
@@ -63,6 +63,7 @@ jobs:
           set -euo pipefail
           rm .github/workflows/runtime-v2-r062-second-blockers-candidate.yml
           rm .github/scripts/materialize_r062_second_blockers.py
+          rm .github/scripts/fix_r062_worker_otel.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
