@@ -1,0 +1,214 @@
+name: Runtime v2 staged input candidate
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-staged-input-gate
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runtime-v2-staged-input-candidate
+  cancel-in-progress: false
+
+jobs:
+  materialize-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Materialize staged-input contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path("ai-space-generator/deploy/terraform/runtime-v2")
+          variables_path = root / "variables.tf"
+          outputs_path = root / "outputs.tf"
+          test_path = root / "staged_inputs.tftest.hcl"
+
+          optional_when_workloads_disabled = [
+              "runtime_image",
+              "otel_collector_image",
+              "otel_exporter_otlp_endpoint",
+              "release_id",
+              "deployment_id",
+              "temporal_worker_version",
+              "public_mcp_url",
+              "mcp_allowed_hosts",
+              "oauth_issuer_url",
+              "oauth_jwks_url",
+              "expected_hao_subject",
+              "attestation_key_id",
+              "initial_task",
+              "sheets_targets_json",
+              "task_policies_json",
+              "parent_task_plans_json",
+              "temporal_endpoint",
+              "temporal_namespace",
+              "temporal_api_key_version",
+              "attestation_secret_version",
+              "mcp_request_state_keys_version",
+              "database_url_secret_version",
+          ]
+
+          text = variables_path.read_text()
+          for name in optional_when_workloads_disabled:
+              marker = f'variable "{name}" {{'
+              start = text.index(marker)
+              next_start = text.find('\nvariable "', start + len(marker))
+              end = len(text) if next_start == -1 else next_start
+              block = text[start:end]
+              if "\n  default" in block:
+                  raise SystemExit(f"unexpected existing default for {name}")
+              type_line = "  type        = string\n" if "  type        = string\n" in block else "  type = string\n"
+              if type_line not in block:
+                  raise SystemExit(f"string type line not found for {name}")
+              block = block.replace(type_line, type_line + "  default     = null\n", 1)
+              condition = "condition     = can(regex("
+              if condition in block:
+                  block = block.replace(
+                      condition,
+                      f"condition     = var.{name} == null || can(regex(",
+                      1,
+                  )
+              text = text[:start] + block + text[end:]
+
+          old_gate = '''variable "enable_runtime_workloads" {
+            type        = bool
+            description = "False by default. Set true only after authorized secret-version and DB-user bootstrap is complete."
+            default     = false
+          }'''
+          required_refs = "\n".join(
+              f"      var.{name}," for name in optional_when_workloads_disabled
+          )
+          new_gate = f'''variable "enable_runtime_workloads" {{
+            type        = bool
+            description = "False by default. Set true only after authorized secret-version and DB-user bootstrap is complete."
+            default     = false
+
+            validation {{
+              condition = !var.enable_runtime_workloads || nonsensitive(alltrue([
+                for value in [
+          {required_refs}
+                ] : try(length(trimspace(value)) > 0, false)
+              ]))
+              error_message = "enable_runtime_workloads=true requires every Runtime workload/release input; base-infrastructure planning must not fabricate those values."
+            }}
+          }}'''
+          if text.count(old_gate) != 1:
+              raise SystemExit("enable_runtime_workloads block did not match exactly once")
+          text = text.replace(old_gate, new_gate, 1)
+          variables_path.write_text(text)
+
+          outputs = outputs_path.read_text()
+          api_old = "  value       = local.api_candidate_revision"
+          worker_old = "  value       = local.worker_candidate_revision"
+          if outputs.count(api_old) != 1 or outputs.count(worker_old) != 1:
+              raise SystemExit("candidate revision outputs did not match exactly once")
+          outputs = outputs.replace(
+              api_old,
+              "  value       = var.enable_runtime_workloads ? local.api_candidate_revision : null",
+              1,
+          )
+          outputs = outputs.replace(
+              worker_old,
+              "  value       = var.enable_runtime_workloads ? local.worker_candidate_revision : null",
+              1,
+          )
+          outputs_path.write_text(outputs)
+
+          test_path.write_text('''mock_provider "google" {}
+          mock_provider "google-beta" {}
+
+          variables {
+            project_id                  = "hao-runtime-v2-staged-input-test"
+            cloud_sql_edition           = "ENTERPRISE"
+            cloud_sql_tier              = "db-custom-1-3840"
+            cloud_sql_availability_type = "ZONAL"
+          }
+
+          run "base_infrastructure_without_workload_inputs" {
+            command = plan
+
+            assert {
+              condition     = length(google_cloud_run_v2_service.api) == 0
+              error_message = "Base infrastructure planning must keep the Runtime API disabled."
+            }
+
+            assert {
+              condition     = length(google_cloud_run_v2_worker_pool.worker) == 0
+              error_message = "Base infrastructure planning must keep the Runtime Worker disabled."
+            }
+
+            assert {
+              condition     = output.api_candidate_revision == null && output.worker_candidate_revision == null
+              error_message = "Disabled workloads must not manufacture candidate revision identities."
+            }
+          }
+
+          run "workload_enablement_requires_release_inputs" {
+            command = plan
+
+            variables {
+              enable_runtime_workloads = true
+            }
+
+            expect_failures = [var.enable_runtime_workloads]
+          }
+          ''')
+          PY
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+
+      - name: Format and verify Runtime Terraform
+        shell: bash
+        working-directory: ai-space-generator/deploy/terraform/runtime-v2
+        run: |
+          set -euo pipefail
+          terraform fmt -recursive
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate -no-color
+          terraform test -no-color
+
+      - name: Verify candidate diff scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          mapfile -t files < <(git diff --name-only | sort)
+          expected=(
+            "ai-space-generator/deploy/terraform/runtime-v2/outputs.tf"
+            "ai-space-generator/deploy/terraform/runtime-v2/staged_inputs.tftest.hcl"
+            "ai-space-generator/deploy/terraform/runtime-v2/variables.tf"
+          )
+          if [[ "${files[*]}" != "${expected[*]}" ]]; then
+            printf 'Unexpected candidate diff scope:\n%s\n' "${files[*]}" >&2
+            exit 1
+          fi
+
+      - name: Commit verified candidate and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/runtime-v2-staged-input-candidate.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ai-space-generator/deploy/terraform/runtime-v2/variables.tf \
+                  ai-space-generator/deploy/terraform/runtime-v2/outputs.tf \
+                  ai-space-generator/deploy/terraform/runtime-v2/staged_inputs.tftest.hcl \
+                  .github/workflows/runtime-v2-staged-input-candidate.yml
+          git commit -m "EXP: stage-gate Runtime workload inputs [staged-input-materialized]"
+          git push origin HEAD:exp/runtime-v2-staged-input-gate
