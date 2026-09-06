@@ -1,0 +1,23 @@
+name: Runtime v2 Workflow Lint Candidate
+
+on:
+  push:
+    branches:
+      - exp/runtime-v2-r062-second-blockers
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Lint new Runtime workflows
+        run: >-
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106
+          .github/workflows/runtime-v2-image-publish.yml
+          .github/workflows/runtime-v2-migration-execute.yml
