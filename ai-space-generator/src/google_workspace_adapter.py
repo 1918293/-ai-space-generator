@@ -82,7 +82,13 @@ def _logical_append_values_digest(values: object) -> str:
             raise ValueError("SHEETS_LOGICAL_APPEND_VALUES_INVALID")
         row: list[Any] = []
         for item in raw_row:
-            if isinstance(item, bool):
+            # Sheets ValueRange does not preserve a distinction between an
+            # absent/empty cell and the Python None/empty-string forms used to
+            # express that blank in trusted input. Canonicalize both to the same
+            # provider-state token for logical-append verification only.
+            if item is None or item == "":
+                row.append(None)
+            elif isinstance(item, bool):
                 row.append(item)
             elif isinstance(item, (int, float)):
                 row.append(["__sheets_number__", _canonical_sheet_double(item)])
