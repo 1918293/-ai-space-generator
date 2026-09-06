@@ -36,6 +36,22 @@ def _closed_provenance_record() -> ExecutionRecord:
     )
     evidence = (
         EvidenceReceipt(
+            "TOOL-1",
+            EvidenceKind.TOOL_RECEIPT,
+            True,
+            "google_drive",
+            claim_scope=action.action_id,
+            origin=EvidenceOrigin.PROVIDER,
+        ),
+        EvidenceReceipt(
+            "READBACK-1",
+            EvidenceKind.STATE_READBACK,
+            True,
+            "google_drive",
+            claim_scope=action.action_id,
+            origin=EvidenceOrigin.PROVIDER,
+        ),
+        EvidenceReceipt(
             "VERIFY-1",
             EvidenceKind.VERIFICATION_PASS,
             True,
