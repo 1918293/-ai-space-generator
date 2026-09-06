@@ -53,6 +53,30 @@ def _positive_int(values: dict[str, str], key: str, *, production: bool, default
     return value
 
 
+def _positive_int_csv(
+    values: dict[str, str], key: str, *, production: bool, default: tuple[int, ...]
+) -> tuple[int, ...]:
+    raw = _required(values, key) if production else str(
+        values.get(key, ",".join(str(value) for value in default))
+    ).strip()
+    result: list[int] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            value = int(item)
+        except ValueError as exc:
+            raise ValueError(f"INVALID_INTEGER_LIST_CONFIG:{key}") from exc
+        if value < 1:
+            raise ValueError(f"POSITIVE_INTEGER_LIST_REQUIRED:{key}")
+        if value not in result:
+            result.append(value)
+    if not result:
+        raise ValueError(f"MISSING_CONFIG:{key}")
+    return tuple(sorted(result))
+
+
 def _csv(values: dict[str, str], key: str) -> tuple[str, ...]:
     raw = str(values.get(key, ""))
     result: list[str] = []
@@ -200,6 +224,11 @@ def _attestation_previous_keys(
     return tuple(sorted(normalized))
 
 
+def _fingerprint(items: tuple[tuple[str, str], ...]) -> str:
+    body = json.dumps(dict(items), separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(body).hexdigest()
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     environment: RuntimeEnvironment
@@ -214,6 +243,8 @@ class RuntimeSettings:
     mcp_request_state_audience: str
     database_url: str
     database_schema_version: int
+    database_min_schema_version: int
+    storage_compatibility_epochs: tuple[int, ...]
     database_rpo_seconds: int
     database_rto_seconds: int
     temporal_endpoint: str
@@ -247,36 +278,72 @@ class RuntimeSettings:
         return dict(self.attestation_previous_keys)
 
     @property
-    def deployment_identity(self) -> tuple[tuple[str, str], ...]:
-        """Non-secret compatibility identity that API and worker must share."""
+    def shared_compatibility_identity(self) -> tuple[tuple[str, str], ...]:
+        """Cross-role invariants that must remain stable across rainbow worker versions."""
         return (
             ("environment", self.environment.value),
             ("region", self.region),
-            ("release_id", self.release_id),
-            ("deployment_id", self.deployment_id),
-            ("public_mcp_url", self.public_mcp_url),
             ("database_identity", _database_identity(self.database_url)),
-            ("database_schema_version", str(self.database_schema_version)),
             ("temporal_endpoint", self.temporal_endpoint),
             ("temporal_namespace", self.temporal_namespace),
             ("temporal_task_queue", self.temporal_task_queue),
-            ("temporal_worker_version", self.temporal_worker_version),
+        )
+
+    @property
+    def deployment_identity(self) -> tuple[tuple[str, str], ...]:
+        """Backward-compatible alias for the true cross-role compatibility identity."""
+        return self.shared_compatibility_identity
+
+    @property
+    def deployment_identity_fingerprint(self) -> str:
+        return _fingerprint(self.shared_compatibility_identity)
+
+    @property
+    def storage_contract_identity(self) -> tuple[tuple[str, str], ...]:
+        return (
+            ("database_min_schema_version", str(self.database_min_schema_version)),
+            (
+                "storage_compatibility_epochs",
+                ",".join(str(value) for value in self.storage_compatibility_epochs),
+            ),
+        )
+
+    @property
+    def api_release_identity(self) -> tuple[tuple[str, str], ...]:
+        if self.role != RuntimeRole.API:
+            return ()
+        return (
+            ("release_id", self.release_id),
+            ("deployment_id", self.deployment_id),
+            ("public_mcp_url", self.public_mcp_url),
             ("oauth_issuer_url", self.oauth_issuer_url),
             ("oauth_resource_url", self.oauth_resource_url),
             ("oauth_audience", self.oauth_audience),
             ("expected_hao_subject", self.expected_hao_subject),
             ("attestation_key_id", self.attestation_key_id),
             ("mcp_request_state_audience", self.mcp_request_state_audience),
+            *self.storage_contract_identity,
         )
 
     @property
-    def deployment_identity_fingerprint(self) -> str:
-        body = json.dumps(
-            dict(self.deployment_identity),
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return hashlib.sha256(body).hexdigest()
+    def worker_version_identity(self) -> tuple[tuple[str, str], ...]:
+        if self.role != RuntimeRole.WORKER:
+            return ()
+        return (
+            ("release_id", self.release_id),
+            ("deployment_id", self.deployment_id),
+            ("temporal_worker_version", self.temporal_worker_version),
+            *self.storage_contract_identity,
+        )
+
+    @property
+    def role_identity_fingerprint(self) -> str:
+        role_identity = (
+            self.api_release_identity
+            if self.role == RuntimeRole.API
+            else self.worker_version_identity
+        )
+        return _fingerprint(self.shared_compatibility_identity + role_identity)
 
     @classmethod
     def from_mapping(cls, values: dict[str, str]) -> "RuntimeSettings":
@@ -307,6 +374,20 @@ class RuntimeSettings:
         database_schema_version = _positive_int(
             values, "HAO_DATABASE_SCHEMA_VERSION", production=production, default=1
         )
+        database_min_schema_version = _positive_int(
+            values,
+            "HAO_DATABASE_MIN_SCHEMA_VERSION",
+            production=production,
+            default=database_schema_version,
+        )
+        if database_min_schema_version > database_schema_version:
+            raise ValueError("DATABASE_MIN_SCHEMA_VERSION_EXCEEDS_RELEASE_SCHEMA_VERSION")
+        storage_compatibility_epochs = _positive_int_csv(
+            values,
+            "HAO_STORAGE_COMPATIBILITY_EPOCHS",
+            production=production,
+            default=(1,),
+        )
         database_rpo_seconds = _positive_int(
             values, "HAO_DATABASE_RPO_SECONDS", production=production, default=300
         )
@@ -321,7 +402,7 @@ class RuntimeSettings:
         temporal_task_queue = _required(values, "HAO_TEMPORAL_TASK_QUEUE")
         temporal_worker_version = (
             _required(values, "HAO_TEMPORAL_WORKER_VERSION")
-            if production
+            if production and role == RuntimeRole.WORKER
             else str(values.get("HAO_TEMPORAL_WORKER_VERSION", release_id)).strip() or release_id
         )
         temporal_api_key = _required(values, "HAO_TEMPORAL_API_KEY") if production else str(
@@ -448,6 +529,8 @@ class RuntimeSettings:
             mcp_request_state_audience=request_state_audience,
             database_url=database_url,
             database_schema_version=database_schema_version,
+            database_min_schema_version=database_min_schema_version,
+            storage_compatibility_epochs=storage_compatibility_epochs,
             database_rpo_seconds=database_rpo_seconds,
             database_rto_seconds=database_rto_seconds,
             temporal_endpoint=temporal_endpoint,
