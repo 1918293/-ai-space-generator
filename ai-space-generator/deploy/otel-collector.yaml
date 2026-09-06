@@ -33,6 +33,15 @@ exporters:
     balancer_name: pick_first
     auth:
       authenticator: googleclientauth
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 2048
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 15s
+      max_elapsed_time: 60s
 
 service:
   extensions: [health_check, googleclientauth]
