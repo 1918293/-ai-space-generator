@@ -20,6 +20,8 @@ def production_values(**overrides):
         "HAO_MCP_REQUEST_STATE_AUDIENCE": "hao-system-control",
         "HAO_DATABASE_URL": "postgresql://runtime@db/runtime",
         "HAO_DATABASE_SCHEMA_VERSION": str(CURRENT_RUNTIME_SCHEMA_VERSION),
+        "HAO_DATABASE_MIN_SCHEMA_VERSION": str(CURRENT_RUNTIME_SCHEMA_VERSION),
+        "HAO_STORAGE_COMPATIBILITY_EPOCHS": "1",
         "HAO_DATABASE_RPO_SECONDS": "300",
         "HAO_DATABASE_RTO_SECONDS": "3600",
         "HAO_TEMPORAL_ENDPOINT": "hao-runtime.tmprl.cloud:7233",
@@ -77,15 +79,69 @@ def test_valid_production_configuration_loads_as_one_runtime_identity():
         bytes.fromhex("22" * 32),
     )
     assert settings.database_schema_version == CURRENT_RUNTIME_SCHEMA_VERSION
+    assert settings.database_min_schema_version == CURRENT_RUNTIME_SCHEMA_VERSION
+    assert settings.storage_compatibility_epochs == (1,)
     assert settings.attestation_previous_keys == ()
     assert settings.worker_instance_count == 1
 
 
-def test_api_and_worker_share_exact_non_secret_deployment_identity():
+def test_api_and_worker_share_only_true_cross_role_compatibility_identity():
     api = RuntimeSettings.from_mapping(production_values(HAO_RUNTIME_ROLE="api"))
     worker = RuntimeSettings.from_mapping(production_values(HAO_RUNTIME_ROLE="worker"))
-    assert api.deployment_identity == worker.deployment_identity
+    assert api.shared_compatibility_identity == worker.shared_compatibility_identity
     assert api.deployment_identity_fingerprint == worker.deployment_identity_fingerprint
+    assert api.api_release_identity
+    assert api.worker_version_identity == ()
+    assert worker.worker_version_identity
+    assert worker.api_release_identity == ()
+    assert api.role_identity_fingerprint != worker.role_identity_fingerprint
+
+
+def test_worker_build_id_no_longer_changes_shared_compatibility_identity():
+    first = RuntimeSettings.from_mapping(
+        production_values(HAO_RUNTIME_ROLE="worker", HAO_TEMPORAL_WORKER_VERSION="build-v1")
+    )
+    second = RuntimeSettings.from_mapping(
+        production_values(HAO_RUNTIME_ROLE="worker", HAO_TEMPORAL_WORKER_VERSION="build-v2")
+    )
+    assert first.deployment_identity_fingerprint == second.deployment_identity_fingerprint
+    assert first.role_identity_fingerprint != second.role_identity_fingerprint
+
+
+def test_api_only_key_rotation_no_longer_changes_worker_shared_identity():
+    worker = RuntimeSettings.from_mapping(production_values(HAO_RUNTIME_ROLE="worker"))
+    api_v1 = RuntimeSettings.from_mapping(production_values(HAO_ATTESTATION_KEY_ID="sign-v1"))
+    api_v2 = RuntimeSettings.from_mapping(production_values(HAO_ATTESTATION_KEY_ID="sign-v2"))
+    assert api_v1.deployment_identity_fingerprint == api_v2.deployment_identity_fingerprint
+    assert api_v1.deployment_identity_fingerprint == worker.deployment_identity_fingerprint
+    assert api_v1.role_identity_fingerprint != api_v2.role_identity_fingerprint
+
+
+def test_storage_compatibility_contract_is_explicit_and_fail_closed():
+    settings = RuntimeSettings.from_mapping(
+        production_values(
+            HAO_DATABASE_SCHEMA_VERSION="5",
+            HAO_DATABASE_MIN_SCHEMA_VERSION="4",
+            HAO_STORAGE_COMPATIBILITY_EPOCHS="3,4,4",
+        )
+    )
+    assert settings.database_schema_version == 5
+    assert settings.database_min_schema_version == 4
+    assert settings.storage_compatibility_epochs == (3, 4)
+
+    with pytest.raises(ValueError, match="MISSING_CONFIG:HAO_DATABASE_MIN_SCHEMA_VERSION"):
+        RuntimeSettings.from_mapping(production_values(HAO_DATABASE_MIN_SCHEMA_VERSION=""))
+    with pytest.raises(ValueError, match="MISSING_CONFIG:HAO_STORAGE_COMPATIBILITY_EPOCHS"):
+        RuntimeSettings.from_mapping(production_values(HAO_STORAGE_COMPATIBILITY_EPOCHS=""))
+    with pytest.raises(
+        ValueError, match="DATABASE_MIN_SCHEMA_VERSION_EXCEEDS_RELEASE_SCHEMA_VERSION"
+    ):
+        RuntimeSettings.from_mapping(
+            production_values(
+                HAO_DATABASE_SCHEMA_VERSION="3",
+                HAO_DATABASE_MIN_SCHEMA_VERSION="4",
+            )
+        )
 
 
 def test_oauth_issuer_preserves_exact_trailing_slash_identity():
@@ -212,9 +268,7 @@ def test_production_requires_temporal_credentials_and_observability():
 
 def test_weak_attestation_secret_is_rejected():
     with pytest.raises(ValueError, match="ATTESTATION_SECRET_MIN_32_BYTES"):
-        RuntimeSettings.from_mapping(
-            production_values(HAO_ATTESTATION_SECRET="too-short")
-        )
+        RuntimeSettings.from_mapping(production_values(HAO_ATTESTATION_SECRET="too-short"))
 
 
 def test_attestation_previous_keys_are_secret_bound_rotation_only():
@@ -275,16 +329,12 @@ def test_attestation_previous_keys_are_secret_bound_rotation_only():
 
 def test_missing_expected_hao_subject_is_fatal():
     with pytest.raises(ValueError, match="MISSING_CONFIG:HAO_EXPECTED_SUBJECT"):
-        RuntimeSettings.from_mapping(
-            production_values(HAO_EXPECTED_SUBJECT="")
-        )
+        RuntimeSettings.from_mapping(production_values(HAO_EXPECTED_SUBJECT=""))
 
 
 def test_secret_manager_bindings_fail_closed_and_reject_latest_alias():
     with pytest.raises(ValueError, match="MISSING_CONFIG:HAO_SECRET_BINDINGS_JSON"):
-        RuntimeSettings.from_mapping(
-            production_values(HAO_SECRET_BINDINGS_JSON="")
-        )
+        RuntimeSettings.from_mapping(production_values(HAO_SECRET_BINDINGS_JSON=""))
     with pytest.raises(
         ValueError,
         match="SECRET_BINDING_EXPLICIT_VERSION_REQUIRED:HAO_TEMPORAL_API_KEY",
@@ -347,7 +397,7 @@ def test_production_allows_plain_http_only_for_loopback_otel_collector():
         )
 
 
-def test_deployment_identity_never_embeds_database_credentials():
+def test_shared_identity_never_embeds_database_credentials():
     first = RuntimeSettings.from_mapping(
         production_values(HAO_DATABASE_URL="postgresql://api-secret@db.internal/runtime")
     )
