@@ -88,13 +88,13 @@ resource "google_cloud_run_v2_worker_pool" "worker_version" {
 
       dynamic "env" {
         for_each = merge(local.common_env, {
-          HAO_RUNTIME_ROLE                  = "worker"
-          HAO_RELEASE_ID                    = each.value.release_id
-          HAO_TEMPORAL_WORKER_VERSION       = each.key
-          HAO_WORKER_INSTANCE_COUNT         = tostring(each.value.instance_count)
-          HAO_DATABASE_MIN_SCHEMA_VERSION   = tostring(each.value.database_min_schema_version)
-          HAO_STORAGE_COMPATIBILITY_EPOCHS  = join(",", [for epoch in sort(tolist(each.value.storage_compatibility_epochs)) : tostring(epoch)])
-          HAO_SECRET_BINDINGS_JSON          = jsonencode(local.worker_secret_bindings)
+          HAO_RUNTIME_ROLE                 = "worker"
+          HAO_RELEASE_ID                   = each.value.release_id
+          HAO_TEMPORAL_WORKER_VERSION      = each.key
+          HAO_WORKER_INSTANCE_COUNT        = tostring(each.value.instance_count)
+          HAO_DATABASE_MIN_SCHEMA_VERSION  = tostring(each.value.database_min_schema_version)
+          HAO_STORAGE_COMPATIBILITY_EPOCHS = join(",", [for epoch in sort(tolist(each.value.storage_compatibility_epochs)) : tostring(epoch)])
+          HAO_SECRET_BINDINGS_JSON         = jsonencode(local.worker_secret_bindings)
         })
         content {
           name  = env.key
