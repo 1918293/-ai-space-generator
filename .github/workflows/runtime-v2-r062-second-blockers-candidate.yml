@@ -1,7 +1,9 @@
 name: Runtime v2 R062 second blockers candidate
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - exp/runtime-v2-r062-second-blockers
 
 permissions:
   contents: write
