@@ -151,8 +151,13 @@ def semantic_gateway(items=None):
 
 
 class IntentModel:
-    def __init__(self, binding_id="formal.persist"):
+    def __init__(
+        self,
+        binding_id="formal.persist",
+        used_refs=("CURRENT:PROJECT_HAO", "PR17:CURRENT"),
+    ):
         self.binding_id = binding_id
+        self.used_refs = used_refs
         self.calls = 0
         self.inputs = []
 
@@ -164,6 +169,7 @@ class IntentModel:
             "formal_persistence",
             self.binding_id,
             expected_state_delta="bounded formal delta",
+            model_reported_used_refs=self.used_refs,
         )
 
 
@@ -245,7 +251,10 @@ def test_known_failure_disposition_blocks_same_binding_before_control_plane():
         prior_disposition="DO_NOT_REPEAT",
         prior_binding_id="formal.persist.legacy",
     )
-    model = IntentModel(binding_id="formal.persist.legacy")
+    model = IntentModel(
+        binding_id="formal.persist.legacy",
+        used_refs=("CURRENT:PROJECT_HAO", "INTAKE:FAIL-1"),
+    )
     ingress = ContextBoundReasoningIngress(
         pre_model=semantic_gateway(blocked),
         model=model,
@@ -257,6 +266,10 @@ def test_known_failure_disposition_blocks_same_binding_before_control_plane():
     assert result.code == "PRE_MODEL_KNOWN_FAILURE_REPEAT_BLOCKED"
     assert model.calls == 1
     assert result.intent is not None
+    assert result.intent.model_reported_used_refs == (
+        "CURRENT:PROJECT_HAO",
+        "INTAKE:FAIL-1",
+    )
     assert result.prepared is None
 
 
@@ -275,6 +288,11 @@ def test_valid_semantic_context_reaches_existing_control_plane():
     assert result.admission.model_input is not None
     assert result.admission.model_input.semantic_fingerprint.startswith("sha256:")
     assert model.calls == 1
+    assert result.intent is not None
+    assert result.intent.model_reported_used_refs == (
+        "CURRENT:PROJECT_HAO",
+        "PR17:CURRENT",
+    )
     assert result.prepared is not None
     assert result.prepared.record is not None
     assert result.prepared.record.mode == Mode.EXP
@@ -282,6 +300,63 @@ def test_valid_semantic_context_reaches_existing_control_plane():
     assert result.prepared.resolution.proposal is not None
     assert result.prepared.resolution.proposal.provider == "google-drive"
     assert result.code == "MODEL_INTENT_RESOLVED_TO_TRUSTED_BINDING"
+
+
+def test_model_reported_usage_is_required_before_control_plane():
+    model = IntentModel(used_refs=())
+    ingress = ContextBoundReasoningIngress(
+        pre_model=semantic_gateway(),
+        model=model,
+        control_plane=ControlPlaneGateway(catalog(), PolicyProvider()),
+    )
+
+    result = ingress.prepare(state(), request(), run_id="RUN-SEM-USED-1")
+
+    assert result.code == "PRE_MODEL_REPORTED_USED_REFS_REQUIRED"
+    assert result.intent is not None
+    assert result.prepared is None
+
+
+def test_model_reported_usage_must_be_exact_admitted_ref():
+    model = IntentModel(used_refs=(" CURRENT:PROJECT_HAO",))
+    ingress = ContextBoundReasoningIngress(
+        pre_model=semantic_gateway(),
+        model=model,
+        control_plane=ControlPlaneGateway(catalog(), PolicyProvider()),
+    )
+
+    result = ingress.prepare(state(), request(), run_id="RUN-SEM-USED-2")
+
+    assert result.code == "PRE_MODEL_REPORTED_USED_REF_EXACT_REQUIRED"
+    assert result.prepared is None
+
+
+def test_model_reported_usage_rejects_unadmitted_ref():
+    model = IntentModel(used_refs=("CURRENT:PROJECT_HAO", "UNBOUND:OTHER"))
+    ingress = ContextBoundReasoningIngress(
+        pre_model=semantic_gateway(),
+        model=model,
+        control_plane=ControlPlaneGateway(catalog(), PolicyProvider()),
+    )
+
+    result = ingress.prepare(state(), request(), run_id="RUN-SEM-USED-3")
+
+    assert result.code == "PRE_MODEL_REPORTED_USED_REF_UNADMITTED:UNBOUND:OTHER"
+    assert result.prepared is None
+
+
+def test_model_reported_usage_rejects_duplicate_ref():
+    model = IntentModel(used_refs=("CURRENT:PROJECT_HAO", "CURRENT:PROJECT_HAO"))
+    ingress = ContextBoundReasoningIngress(
+        pre_model=semantic_gateway(),
+        model=model,
+        control_plane=ControlPlaneGateway(catalog(), PolicyProvider()),
+    )
+
+    result = ingress.prepare(state(), request(), run_id="RUN-SEM-USED-4")
+
+    assert result.code == "PRE_MODEL_REPORTED_USED_REF_DUPLICATE:CURRENT:PROJECT_HAO"
+    assert result.prepared is None
 
 
 def test_semantic_fingerprint_changes_when_admitted_meaning_changes():
@@ -327,18 +402,21 @@ def admitted_model_input():
     return admission.model_input
 
 
+def valid_response_payload(**overrides):
+    payload = {
+        "requested_capability": "formal_persistence",
+        "binding_id": "formal.persist",
+        "expected_state_delta": "bounded formal delta",
+        "authorization_target": "",
+        "arguments": {},
+        "model_reported_used_refs": ["CURRENT:PROJECT_HAO", "PR17:CURRENT"],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_responses_boundary_receives_semantics_not_only_refs():
-    client = FakeResponsesClient(
-        json.dumps(
-            {
-                "requested_capability": "formal_persistence",
-                "binding_id": "formal.persist",
-                "expected_state_delta": "bounded formal delta",
-                "authorization_target": "",
-                "arguments": {},
-            }
-        )
-    )
+    client = FakeResponsesClient(json.dumps(valid_response_payload()))
     boundary = ContextBoundResponsesIntentBoundary(
         client,
         model="gpt-5.6-luna",
@@ -349,6 +427,10 @@ def test_responses_boundary_receives_semantics_not_only_refs():
 
     assert intent.intent_id.startswith("INTENT:")
     assert intent.binding_id == "formal.persist"
+    assert intent.model_reported_used_refs == (
+        "CURRENT:PROJECT_HAO",
+        "PR17:CURRENT",
+    )
     assert len(client.responses.calls) == 1
     call = client.responses.calls[0]
     assert call["tool_choice"] == "none"
@@ -359,21 +441,55 @@ def test_responses_boundary_receives_semantics_not_only_refs():
     assert '"semantic_context_fingerprint":"sha256:' in instructions
     assert "Reuse the current Runtime v2 control plane" in instructions
     assert "A prior same-shape path failed" in instructions
+    assert "model_reported_used_refs" in instructions
+
+
+def test_responses_boundary_requires_reported_used_refs():
+    payload = valid_response_payload()
+    payload.pop("model_reported_used_refs")
+    boundary = ContextBoundResponsesIntentBoundary(
+        FakeResponsesClient(json.dumps(payload)),
+        model="gpt-5.6-luna",
+    )
+
+    with pytest.raises(ValueError, match="RESPONSES_INTENT_REPORTED_USED_REFS_LIST_REQUIRED"):
+        boundary.invoke(admitted_model_input())
+
+
+def test_responses_boundary_rejects_non_exact_reported_ref():
+    boundary = ContextBoundResponsesIntentBoundary(
+        FakeResponsesClient(
+            json.dumps(
+                valid_response_payload(
+                    model_reported_used_refs=[" CURRENT:PROJECT_HAO"]
+                )
+            )
+        ),
+        model="gpt-5.6-luna",
+    )
+
+    with pytest.raises(ValueError, match="RESPONSES_INTENT_REPORTED_USED_REF_EXACT_REQUIRED"):
+        boundary.invoke(admitted_model_input())
+
+
+def test_responses_boundary_rejects_unadmitted_reported_ref():
+    boundary = ContextBoundResponsesIntentBoundary(
+        FakeResponsesClient(
+            json.dumps(
+                valid_response_payload(model_reported_used_refs=["UNBOUND:OTHER"])
+            )
+        ),
+        model="gpt-5.6-luna",
+    )
+
+    with pytest.raises(ValueError, match="RESPONSES_INTENT_REPORTED_USED_REF_UNADMITTED:UNBOUND:OTHER"):
+        boundary.invoke(admitted_model_input())
 
 
 def test_responses_boundary_rejects_model_attempt_to_author_runtime_state():
-    client = FakeResponsesClient(
-        json.dumps(
-            {
-                "requested_capability": "formal_persistence",
-                "binding_id": "formal.persist",
-                "arguments": {},
-                "mode": "SYS",
-            }
-        )
-    )
+    payload = valid_response_payload(mode="SYS")
     boundary = ContextBoundResponsesIntentBoundary(
-        client,
+        FakeResponsesClient(json.dumps(payload)),
         model="gpt-5.6-luna",
     )
 
