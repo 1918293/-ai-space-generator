@@ -3,6 +3,7 @@ from PIL import Image, ImageDraw
 
 from src.material_projection import (
     PerspectiveMaterialConfig,
+    build_orthographic_tile_plane,
     metric_scale_verified,
     outside_mask_invariance,
     render_perspective_material,
@@ -91,3 +92,28 @@ def test_tile_count_uses_physical_module_not_visual_guess():
     _, meta = render_perspective_material(source, mask, texture, config)
     assert meta["cols"] == 10
     assert meta["rows"] == 12
+
+
+def test_partial_plane_extent_does_not_rescale_298mm_tiles():
+    _, _, texture = _fixture()
+    config = PerspectiveMaterialConfig(
+        plane_quad=((70, 118), (245, 118), (319, 239), (35, 239)),
+        floor_width_mm=2280,
+        floor_depth_mm=3000,
+        tile_width_mm=298,
+        tile_depth_mm=298,
+        grout_mm=2,
+        scale_basis="FIELD_ANCHORED_ESTIMATE",
+        tile_pixels=96,
+    )
+    plane, meta = build_orthographic_tile_plane(texture, config)
+    assert meta["cols"] == 8
+    assert meta["rows"] == 11
+    assert meta["plane_width_px"] == round(2280 / 298 * 96)
+    assert meta["plane_height_px"] == round(3000 / 298 * 96)
+    assert plane.shape[1] == meta["plane_width_px"]
+    assert plane.shape[0] == meta["plane_height_px"]
+    # The canvas is intentionally smaller than ceil(tile_count) * tile_pixels;
+    # otherwise the homography would shrink every 298 mm tile to fit.
+    assert meta["plane_width_px"] < meta["cols"] * meta["tile_pixels"]
+    assert meta["plane_height_px"] < meta["rows"] * meta["tile_pixels"]
