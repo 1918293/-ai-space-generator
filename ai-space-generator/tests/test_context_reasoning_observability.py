@@ -74,8 +74,13 @@ def admission(current_items=None):
     return ContextBoundAdmission(True, "PRE_MODEL_SEMANTIC_CONTEXT_ADMITTED", value)
 
 
-def test_presented_is_not_promoted_to_used_on_normal_model_action():
-    intent = ModelActionIntent("INTENT-1", "formal_persistence", "formal.persist")
+def test_presented_and_model_reported_use_remain_distinct_from_deterministic_use():
+    intent = ModelActionIntent(
+        "INTENT-1",
+        "formal_persistence",
+        "formal.persist",
+        model_reported_used_refs=("CURRENT:A540", "PR17:HEAD"),
+    )
     prepared = SimpleNamespace(resolution=SimpleNamespace(proposal=object()))
     result = ContextBoundReasoningResult(
         admission=admission(),
@@ -89,12 +94,35 @@ def test_presented_is_not_promoted_to_used_on_normal_model_action():
     assert observation.structural_ref_count == 4
     assert observation.admitted_ref_count == 4
     assert observation.presented_to_model is True
+    assert observation.model_reported_used_count == 2
     assert observation.deterministic_used_count == 0
     assert observation.action_selected is True
     assert observation.structural_fingerprint == "structural-fp"
     assert observation.semantic_fingerprint == "semantic-fp"
     assert not hasattr(observation, "user_text")
     assert not hasattr(observation, "summary")
+    assert not hasattr(observation, "model_reported_used_refs")
+
+
+def test_invalid_model_reported_usage_is_not_counted_as_validated_use():
+    intent = ModelActionIntent(
+        "INTENT-BAD",
+        "formal_persistence",
+        "formal.persist",
+        model_reported_used_refs=("UNBOUND:OTHER",),
+    )
+    result = ContextBoundReasoningResult(
+        admission=admission(),
+        intent=intent,
+        code="PRE_MODEL_REPORTED_USED_REF_UNADMITTED:UNBOUND:OTHER",
+    )
+
+    observation = observation_from_result(result, run_id="RUN-BAD")
+
+    assert observation.presented_to_model is True
+    assert observation.model_reported_used_count == 0
+    assert observation.deterministic_used_count == 0
+    assert observation.action_selected is False
 
 
 def test_trusted_no_action_is_counted_as_deterministic_use_without_model_call():
@@ -114,12 +142,18 @@ def test_trusted_no_action_is_counted_as_deterministic_use_without_model_call():
     observation = observation_from_result(result, run_id="RUN-2")
 
     assert observation.presented_to_model is False
+    assert observation.model_reported_used_count == 0
     assert observation.deterministic_used_count == 1
     assert observation.action_selected is False
 
 
-def test_known_failure_block_records_deterministic_use_but_no_action_selection():
-    intent = ModelActionIntent("INTENT-2", "formal_persistence", "legacy.binding")
+def test_known_failure_block_records_both_reported_and_deterministic_use_but_no_action_selection():
+    intent = ModelActionIntent(
+        "INTENT-2",
+        "formal_persistence",
+        "legacy.binding",
+        model_reported_used_refs=("FAIL:1",),
+    )
     result = ContextBoundReasoningResult(
         admission=admission(),
         intent=intent,
@@ -129,6 +163,7 @@ def test_known_failure_block_records_deterministic_use_but_no_action_selection()
     observation = observation_from_result(result, run_id="RUN-3")
 
     assert observation.presented_to_model is True
+    assert observation.model_reported_used_count == 1
     assert observation.deterministic_used_count == 1
     assert observation.action_selected is False
 
@@ -154,7 +189,12 @@ class Ingress:
 def test_observable_wrapper_emits_once_without_changing_result():
     result = ContextBoundReasoningResult(
         admission=admission(),
-        intent=ModelActionIntent("INTENT-3", "formal_persistence", "formal.persist"),
+        intent=ModelActionIntent(
+            "INTENT-3",
+            "formal_persistence",
+            "formal.persist",
+            model_reported_used_refs=("CURRENT:A540",),
+        ),
         code="MODEL_INTENT_RESOLVED_TO_TRUSTED_BINDING",
     )
     sink = Sink()
@@ -169,3 +209,4 @@ def test_observable_wrapper_emits_once_without_changing_result():
     assert len(base.calls) == 1
     assert len(sink.values) == 1
     assert sink.values[0].run_id == "RUN-4"
+    assert sink.values[0].model_reported_used_count == 1
