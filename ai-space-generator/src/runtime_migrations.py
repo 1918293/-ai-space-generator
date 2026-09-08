@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 
 ConnectionFactory = Callable[[], Any]
-CURRENT_RUNTIME_SCHEMA_VERSION = 4
+CURRENT_RUNTIME_SCHEMA_VERSION = 5
 CURRENT_RUNTIME_STORAGE_COMPATIBILITY_EPOCH = 1
 MIGRATION_ADVISORY_LOCK_ID = 0x48414F52  # "HAOR"
 RUNTIME_APPLICATION_ROLE = "hao_runtime_app"
@@ -153,11 +153,19 @@ _MIGRATION_4 = (
     "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS decision_id TEXT NOT NULL DEFAULT ''",
 )
 
+# Additive EXPAND migration: accepted TASK transitions persist a fingerprint of
+# the runtime-verified TaskChangeReceipt. The column is evidence/provenance only;
+# older compatible workers can ignore it, so compatibility epoch remains 1.
+_MIGRATION_5 = (
+    "ALTER TABLE operational_events ADD COLUMN IF NOT EXISTS task_change_receipt_fingerprint TEXT NOT NULL DEFAULT ''",
+)
+
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: _MIGRATION_1,
     2: _MIGRATION_2,
     3: _MIGRATION_3,
     4: _MIGRATION_4,
+    5: _MIGRATION_5,
 }
 
 # Physical migrations and compatibility epochs intentionally advance independently.
@@ -169,6 +177,7 @@ MIGRATION_COMPATIBILITY_EPOCH: dict[int, int] = {
     2: 1,
     3: 1,
     4: 1,
+    5: 1,
 }
 
 _REQUIRED_TABLES = (
