@@ -89,16 +89,25 @@ def build_orthographic_tile_plane(
     texture: Image.Image,
     config: PerspectiveMaterialConfig,
 ) -> tuple[np.ndarray, dict[str, int]]:
-    """Build a deterministic tile plane from the supplied real/catalog swatch.
+    """Build a deterministic plane from the supplied real/catalog swatch.
 
-    No procedural replacement texture is synthesized here. The input texture is
-    the material identity source; deterministic flips/rotations only reduce
-    obvious repetition between square cells.
+    The orthographic canvas is cropped to the exact modeled millimetre extent.
+    This is critical: using `ceil(tile_count) * tile_pixels` as the homography
+    extent would silently rescale every tile whenever the floor ends on a
+    partial tile.
     """
     _validate_config(config)
     tile_px = int(config.tile_pixels)
     cols = max(1, int(np.ceil(config.floor_width_mm / config.tile_width_mm)))
     rows = max(1, int(np.ceil(config.floor_depth_mm / config.tile_depth_mm)))
+    plane_width_px = max(
+        1,
+        int(round(config.floor_width_mm / config.tile_width_mm * tile_px)),
+    )
+    plane_height_px = max(
+        1,
+        int(round(config.floor_depth_mm / config.tile_depth_mm * tile_px)),
+    )
 
     src = _rgb(texture)
     src = cv2.resize(src, (tile_px, tile_px), interpolation=cv2.INTER_AREA)
@@ -107,8 +116,8 @@ def build_orthographic_tile_plane(
 
     median = np.median(src.reshape(-1, 3), axis=0)
     grout_colour = np.clip(median * 0.78, 0, 255).astype(np.uint8)
-    plane = np.empty((rows * tile_px, cols * tile_px, 3), dtype=np.uint8)
-    plane[:] = grout_colour
+    full = np.empty((rows * tile_px, cols * tile_px, 3), dtype=np.uint8)
+    full[:] = grout_colour
 
     inset = grout_px // 2
     for row in range(rows):
@@ -117,13 +126,25 @@ def build_orthographic_tile_plane(
             y0, x0 = row * tile_px, col * tile_px
             y1, x1 = y0 + tile_px, x0 + tile_px
             if grout_px:
-                plane[y0 + inset : y1 - (grout_px - inset), x0 + inset : x1 - (grout_px - inset)] = cell[
-                    inset : tile_px - (grout_px - inset), inset : tile_px - (grout_px - inset)
+                full[
+                    y0 + inset : y1 - (grout_px - inset),
+                    x0 + inset : x1 - (grout_px - inset),
+                ] = cell[
+                    inset : tile_px - (grout_px - inset),
+                    inset : tile_px - (grout_px - inset),
                 ]
             else:
-                plane[y0:y1, x0:x1] = cell
+                full[y0:y1, x0:x1] = cell
 
-    return plane, {"rows": rows, "cols": cols, "grout_px_ortho": grout_px}
+    plane = full[:plane_height_px, :plane_width_px].copy()
+    return plane, {
+        "rows": rows,
+        "cols": cols,
+        "grout_px_ortho": grout_px,
+        "tile_pixels": tile_px,
+        "plane_width_px": plane_width_px,
+        "plane_height_px": plane_height_px,
+    }
 
 
 def _illumination_field(source: np.ndarray, edit: np.ndarray, roughness: float) -> np.ndarray:
