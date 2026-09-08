@@ -17,7 +17,9 @@ from .operational_state import (
     CommandActor,
     OperationalCommand,
     OperationalUpdate,
+    TaskChangeAuthority,
     explicit_user_mode,
+    explicit_user_task,
 )
 
 
@@ -97,9 +99,14 @@ class _PostgresRuntimeDatabase:
                     command_text TEXT NOT NULL,
                     resulting_version INTEGER NOT NULL,
                     applied INTEGER NOT NULL,
-                    code TEXT NOT NULL
+                    code TEXT NOT NULL,
+                    task_change_receipt_fingerprint TEXT NOT NULL DEFAULT ''
                 )
                 """
+            )
+            conn.execute(
+                "ALTER TABLE operational_events "
+                "ADD COLUMN IF NOT EXISTS task_change_receipt_fingerprint TEXT NOT NULL DEFAULT ''"
             )
             conn.execute(
                 """
@@ -143,8 +150,14 @@ class _PostgresRuntimeDatabase:
 
 
 class PostgresOperationalStateStore:
-    def __init__(self, database: _PostgresRuntimeDatabase) -> None:
+    def __init__(
+        self,
+        database: _PostgresRuntimeDatabase,
+        *,
+        task_change_authority: TaskChangeAuthority | None = None,
+    ) -> None:
         self._database = database
+        self._task_change_authority = task_change_authority
 
     @staticmethod
     def _state(row: Any) -> ActiveOperationalState:
@@ -215,19 +228,41 @@ class PostgresOperationalStateStore:
             if command.expected_version is not None and command.expected_version != current.version:
                 return OperationalUpdate(current, False, "STALE_OPERATIONAL_STATE")
 
+            requested_mode = explicit_user_mode(command.text) if command.actor == CommandActor.USER else None
+            explicit_task_directive = (
+                explicit_user_task(command.text) if command.actor == CommandActor.USER else None
+            )
+
             next_mode = current.mode
             next_task = current.task
             code = "NO_OPERATIONAL_CHANGE"
-            if command.actor == CommandActor.USER:
-                requested = explicit_user_mode(command.text)
-                if requested is not None:
-                    next_mode = requested
-                    code = "USER_MODE_COMMAND_APPLIED"
-                if command.explicit_task.strip():
-                    next_task = command.explicit_task.strip()
-                    code = "USER_TASK_COMMAND_APPLIED" if requested is None else "USER_MODE_AND_TASK_APPLIED"
-            elif command.explicit_task.strip():
+            verified_receipt_fingerprint = ""
+
+            if command.actor != CommandActor.USER and command.task_change_receipt is not None:
                 code = "NON_USER_TASK_CHANGE_IGNORED"
+            elif command.actor == CommandActor.USER:
+                receipt = command.task_change_receipt
+                if explicit_task_directive is not None and receipt is None:
+                    code = "USER_TASK_CHANGE_RECEIPT_REQUIRED"
+                    requested_mode = None
+                elif receipt is not None:
+                    if self._task_change_authority is None:
+                        code = "TASK_CHANGE_AUTHORITY_REQUIRED"
+                        requested_mode = None
+                    elif not self._task_change_authority.verify(current, command, receipt):
+                        code = "TASK_CHANGE_RECEIPT_INVALID"
+                        requested_mode = None
+                    else:
+                        next_task = receipt.requested_task
+                        verified_receipt_fingerprint = receipt.receipt_fingerprint
+                        if requested_mode is not None:
+                            next_mode = requested_mode
+                            code = "USER_MODE_AND_TASK_RECEIPT_APPLIED"
+                        else:
+                            code = "USER_TASK_RECEIPT_APPLIED"
+                elif requested_mode is not None:
+                    next_mode = requested_mode
+                    code = "USER_MODE_COMMAND_APPLIED"
 
             changed = next_mode != current.mode or next_task != current.task
             next_version = current.version + 1 if changed else current.version
@@ -246,10 +281,24 @@ class PostgresOperationalStateStore:
             conn.execute(
                 """
                 INSERT INTO operational_events(
-                    event_id, actor, command_text, resulting_version, applied, code
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                    event_id,
+                    actor,
+                    command_text,
+                    resulting_version,
+                    applied,
+                    code,
+                    task_change_receipt_fingerprint
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (event_id, command.actor.value, command.text, next_version, int(changed), code),
+                (
+                    event_id,
+                    command.actor.value,
+                    command.text,
+                    next_version,
+                    int(changed),
+                    code,
+                    verified_receipt_fingerprint,
+                ),
             )
             return OperationalUpdate(
                 ActiveOperationalState(
@@ -474,6 +523,7 @@ def build_postgres_persistence(
     *,
     connect_factory: ConnectionFactory | None = None,
     initialize_schema: bool = True,
+    task_change_authority: TaskChangeAuthority | None = None,
 ) -> PostgresPersistenceBundle:
     database = _PostgresRuntimeDatabase(
         database_url,
@@ -481,7 +531,10 @@ def build_postgres_persistence(
         initialize_schema=initialize_schema,
     )
     return PostgresPersistenceBundle(
-        operational_state=PostgresOperationalStateStore(database),
+        operational_state=PostgresOperationalStateStore(
+            database,
+            task_change_authority=task_change_authority,
+        ),
         idempotency=PostgresIdempotencyStore(database),
         completion=PostgresAuthoritativeCompletionStore(database),
         run_registry=PostgresMCPRunRegistry(database),
