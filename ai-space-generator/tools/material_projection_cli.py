@@ -4,18 +4,23 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 from PIL import Image
 
 from src.material_projection import (
     PerspectiveMaterialConfig,
     outside_mask_invariance,
     render_perspective_material,
+    validate_material_mask_contract,
 )
 
 
-def _binary(mask: Image.Image, size: tuple[int, int]) -> np.ndarray:
-    return np.asarray(mask.resize(size).convert("L"), dtype=np.uint8) > 8
+def _write_qa(path: str, payload: dict[str, object]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
@@ -25,6 +30,7 @@ def main() -> int:
     parser.add_argument("--source", required=True)
     parser.add_argument("--edit-mask", required=True)
     parser.add_argument("--protected-mask")
+    parser.add_argument("--occluder-mask")
     parser.add_argument("--texture", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output", required=True)
@@ -33,20 +39,30 @@ def main() -> int:
 
     source = Image.open(args.source).convert("RGB")
     edit_mask = Image.open(args.edit_mask).convert("L")
+    protected = Image.open(args.protected_mask).convert("L") if args.protected_mask else None
+    occluder = Image.open(args.occluder_mask).convert("L") if args.occluder_mask else None
     texture = Image.open(args.texture).convert("RGB")
     raw = json.loads(Path(args.config).read_text(encoding="utf-8"))
     config = PerspectiveMaterialConfig(**raw)
 
-    protected_overlap = 0
-    if args.protected_mask:
-        protected = Image.open(args.protected_mask).convert("L")
-        edit = _binary(edit_mask, source.size)
-        protect = _binary(protected, source.size)
-        protected_overlap = int(np.count_nonzero(edit & protect))
-        if protected_overlap:
-            raise SystemExit(
-                f"Protected mask overlaps Edit Mask by {protected_overlap} pixels; refusing render."
-            )
+    mask_contract = validate_material_mask_contract(
+        edit_mask,
+        config,
+        protected_mask=protected,
+        occluder_mask=occluder,
+    )
+    if not mask_contract["hard_gate_pass"]:
+        _write_qa(
+            args.qa,
+            {
+                "mask_contract": mask_contract,
+                "pixel_lock_pass": False,
+                "render_executed": False,
+                "visual_qa": "NOT_RUN_MASK_GATE_FAILED",
+                "promotion_allowed": False,
+            },
+        )
+        raise SystemExit("Material mask contract failed; refusing render.")
 
     result, render_meta = render_perspective_material(
         source,
@@ -54,28 +70,26 @@ def main() -> int:
         texture,
         config,
     )
-    qa = outside_mask_invariance(source, result, edit_mask)
-    qa.update(
-        {
-            "protected_overlap_pixels": protected_overlap,
-            "pixel_lock_pass": bool(
-                qa["dimensions_match"]
-                and qa["outside_changed_pixels"] == 0
-                and qa["outside_max_channel_diff"] == 0
-                and protected_overlap == 0
-            ),
-            "render": render_meta,
-            "visual_qa": "REQUIRED_SEPARATELY",
-            "promotion_allowed": False,
-        }
+    pixel_qa = outside_mask_invariance(source, result, edit_mask)
+    pixel_lock_pass = bool(
+        pixel_qa["dimensions_match"]
+        and pixel_qa["outside_changed_pixels"] == 0
+        and pixel_qa["outside_max_channel_diff"] == 0
     )
+
+    qa: dict[str, object] = {
+        **pixel_qa,
+        "mask_contract": mask_contract,
+        "pixel_lock_pass": pixel_lock_pass,
+        "render": render_meta,
+        "render_executed": True,
+        "visual_qa": "REQUIRED_SEPARATELY",
+        "promotion_allowed": False,
+    }
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     result.save(args.output, "PNG")
-    Path(args.qa).write_text(
-        json.dumps(qa, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_qa(args.qa, qa)
     return 0
 
 
