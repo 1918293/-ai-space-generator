@@ -7,6 +7,7 @@ from src.material_projection import (
     metric_scale_verified,
     outside_mask_invariance,
     render_perspective_material,
+    validate_material_mask_contract,
 )
 
 
@@ -25,9 +26,8 @@ def _fixture():
     return source, mask, texture
 
 
-def test_masked_projection_preserves_every_outside_pixel():
-    source, mask, texture = _fixture()
-    config = PerspectiveMaterialConfig(
+def _config(**overrides):
+    values = dict(
         plane_quad=((70, 118), (245, 118), (319, 239), (35, 239)),
         floor_width_mm=2980,
         floor_depth_mm=3576,
@@ -36,6 +36,13 @@ def test_masked_projection_preserves_every_outside_pixel():
         grout_mm=2,
         scale_basis="FIELD_ANCHORED_ESTIMATE",
     )
+    values.update(overrides)
+    return PerspectiveMaterialConfig(**values)
+
+
+def test_masked_projection_preserves_every_outside_pixel():
+    source, mask, texture = _fixture()
+    config = _config()
     result, meta = render_perspective_material(source, mask, texture, config)
     qa = outside_mask_invariance(source, result, mask)
     assert qa == {
@@ -50,14 +57,7 @@ def test_masked_projection_preserves_every_outside_pixel():
 
 def test_material_projection_changes_selected_floor_pixels():
     source, mask, texture = _fixture()
-    config = PerspectiveMaterialConfig(
-        plane_quad=((70, 118), (245, 118), (319, 239), (35, 239)),
-        floor_width_mm=2980,
-        floor_depth_mm=3576,
-        tile_width_mm=298,
-        tile_depth_mm=298,
-        scale_basis="RELATIVE",
-    )
+    config = _config(scale_basis="RELATIVE")
     result, _ = render_perspective_material(source, mask, texture, config)
     src = np.asarray(source)
     out = np.asarray(result)
@@ -79,31 +79,18 @@ def test_metric_verification_fails_closed_for_estimated_or_relative_plane():
 
 
 def test_tile_count_uses_physical_module_not_visual_guess():
-    source, mask, texture = _fixture()
-    config = PerspectiveMaterialConfig(
-        plane_quad=((70, 118), (245, 118), (319, 239), (35, 239)),
-        floor_width_mm=2980,
-        floor_depth_mm=3576,
-        tile_width_mm=298,
-        tile_depth_mm=298,
-        grout_mm=2,
-        scale_basis="FIELD_MEASURED",
-    )
-    _, meta = render_perspective_material(source, mask, texture, config)
+    _, mask, texture = _fixture()
+    config = _config(scale_basis="FIELD_MEASURED")
+    _, meta = render_perspective_material(Image.new("RGB", mask.size, "white"), mask, texture, config)
     assert meta["cols"] == 10
     assert meta["rows"] == 12
 
 
 def test_partial_plane_extent_does_not_rescale_298mm_tiles():
     _, _, texture = _fixture()
-    config = PerspectiveMaterialConfig(
-        plane_quad=((70, 118), (245, 118), (319, 239), (35, 239)),
+    config = _config(
         floor_width_mm=2280,
         floor_depth_mm=3000,
-        tile_width_mm=298,
-        tile_depth_mm=298,
-        grout_mm=2,
-        scale_basis="FIELD_ANCHORED_ESTIMATE",
         tile_pixels=96,
     )
     plane, meta = build_orthographic_tile_plane(texture, config)
@@ -113,7 +100,55 @@ def test_partial_plane_extent_does_not_rescale_298mm_tiles():
     assert meta["plane_height_px"] == round(3000 / 298 * 96)
     assert plane.shape[1] == meta["plane_width_px"]
     assert plane.shape[0] == meta["plane_height_px"]
-    # The canvas is intentionally smaller than ceil(tile_count) * tile_pixels;
-    # otherwise the homography would shrink every 298 mm tile to fit.
     assert meta["plane_width_px"] < meta["cols"] * meta["tile_pixels"]
     assert meta["plane_height_px"] < meta["rows"] * meta["tile_pixels"]
+
+
+def test_material_mask_contract_rejects_wall_or_sky_contamination():
+    _, mask, _ = _fixture()
+    contaminated = mask.copy()
+    ImageDraw.Draw(contaminated).rectangle((2, 2, 12, 12), fill=255)
+    qa = validate_material_mask_contract(contaminated, _config())
+    assert qa["hard_gate_pass"] is False
+    assert qa["edit_outside_plane_pixels"] > 0
+
+
+def test_explicit_floor_occluder_must_be_fully_protected():
+    _, mask, _ = _fixture()
+    edit = mask.copy()
+    occluder = Image.new("L", edit.size, 0)
+    protected = Image.new("L", edit.size, 0)
+    box = (145, 155, 180, 190)
+    ImageDraw.Draw(occluder).rectangle(box, fill=255)
+    ImageDraw.Draw(protected).rectangle(box, fill=255)
+    ImageDraw.Draw(edit).rectangle(box, fill=0)
+
+    good = validate_material_mask_contract(
+        edit,
+        _config(),
+        protected_mask=protected,
+        occluder_mask=occluder,
+    )
+    assert good["hard_gate_pass"] is True
+    assert good["occluder"]["object_role"] == "PRESERVE_OCCLUDER"
+    assert good["occluder"]["expected_mask_coverage_ratio"] == 1.0
+
+    bad_edit = edit.copy()
+    ImageDraw.Draw(bad_edit).rectangle(box, fill=255)
+    bad = validate_material_mask_contract(
+        bad_edit,
+        _config(),
+        protected_mask=protected,
+        occluder_mask=occluder,
+    )
+    assert bad["hard_gate_pass"] is False
+    assert bad["edit_protected_overlap_pixels"] > 0
+    assert bad["occluder"]["hard_gate_pass"] is False
+
+    missing_protected = validate_material_mask_contract(
+        edit,
+        _config(),
+        occluder_mask=occluder,
+    )
+    assert missing_protected["hard_gate_pass"] is False
+    assert missing_protected["occluder"]["reason"] == "PROTECTED_MASK_REQUIRED_FOR_OCCLUDER"
