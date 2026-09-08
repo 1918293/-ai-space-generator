@@ -18,11 +18,12 @@ from src.execution_control import (
     RunPhase,
 )
 from src.idempotent_broker import IdempotentAsyncBroker, IdempotencyState
-from src.operational_state import CommandActor, OperationalCommand
+from src.operational_state import CommandActor, OperationalCommand, TaskChangeAuthority
 from src.postgres_persistence import build_postgres_persistence
 
 
 SECRET = b"hao-postgres-persistence-test-secret-32-bytes"
+TASK_CHANGE_SECRET = b"hao-postgres-task-change-authority-key-32-bytes"
 
 
 class SqlitePostgresCompatConnection:
@@ -36,6 +37,14 @@ class SqlitePostgresCompatConnection:
         normalized = sql.strip()
         if normalized == "BEGIN ISOLATION LEVEL SERIALIZABLE":
             return self._conn.execute("BEGIN IMMEDIATE")
+        if normalized.startswith(
+            "ALTER TABLE operational_events ADD COLUMN IF NOT EXISTS "
+            "task_change_receipt_fingerprint"
+        ):
+            # Fresh compatibility databases already receive the v5 column in
+            # CREATE TABLE. Real Postgres uses this idempotent ALTER for an
+            # existing pre-v5 table; SQLite lacks the IF NOT EXISTS form.
+            return self._conn.execute("SELECT 1")
         normalized = normalized.replace(" FOR UPDATE", "").replace("%s", "?")
         return self._conn.execute(normalized, params)
 
@@ -47,10 +56,11 @@ def factory(path: Path):
     return lambda: SqlitePostgresCompatConnection(path)
 
 
-def bundle(tmp_path: Path):
+def bundle(tmp_path: Path, *, task_change_authority=None):
     return build_postgres_persistence(
         "postgresql://runtime-v2/test",
         connect_factory=factory(tmp_path / "runtime-postgres-compat.sqlite3"),
+        task_change_authority=task_change_authority,
     )
 
 
@@ -125,15 +135,25 @@ def test_bundle_rejects_non_postgres_production_database_url(tmp_path):
         )
 
 
-def test_operational_state_is_durable_idempotent_and_stale_safe(tmp_path):
-    first = bundle(tmp_path)
+def test_operational_state_is_durable_idempotent_stale_safe_and_task_receipt_bound(tmp_path):
+    authority = TaskChangeAuthority(TASK_CHANGE_SECRET)
+    first = bundle(tmp_path, task_change_authority=authority)
     initial = first.operational_state.initialize(mode=Mode.EXP, task="Stable task")
+
+    change_text = "SYS > TASK: New task"
+    receipt = authority.issue(
+        initial,
+        event_id="EVENT-PG-1",
+        actor=CommandActor.USER,
+        text=change_text,
+    )
+    assert receipt is not None
     changed = first.operational_state.apply(
         OperationalCommand(
             "EVENT-PG-1",
             CommandActor.USER,
-            "SYS > formalize",
-            explicit_task="New task",
+            change_text,
+            task_change_receipt=receipt,
             expected_version=initial.version,
         )
     )
@@ -141,8 +161,16 @@ def test_operational_state_is_durable_idempotent_and_stale_safe(tmp_path):
         OperationalCommand(
             "EVENT-PG-1",
             CommandActor.USER,
-            "SYS > formalize",
-            explicit_task="New task",
+            change_text,
+            task_change_receipt=receipt,
+        )
+    )
+    reactive_upload = first.operational_state.apply(
+        OperationalCommand(
+            "EVENT-PG-REACTIVE-IMAGE",
+            CommandActor.USER,
+            "這張屋頂圖片只是回應上一個錯誤生成結果",
+            expected_version=changed.state.version,
         )
     )
     stale = first.operational_state.apply(
@@ -154,20 +182,48 @@ def test_operational_state_is_durable_idempotent_and_stale_safe(tmp_path):
         )
     )
 
+    assert changed.code == "USER_MODE_AND_TASK_RECEIPT_APPLIED"
     assert changed.state.mode == Mode.SYS
     assert changed.state.task == "New task"
     assert changed.state.version == 2
     assert duplicate.code == "EVENT_ALREADY_APPLIED"
     assert duplicate.state.version == 2
+    assert reactive_upload.applied is False
+    assert reactive_upload.code == "NO_OPERATIONAL_CHANGE"
+    assert reactive_upload.state.task == "New task"
     assert stale.applied is False
     assert stale.code == "STALE_OPERATIONAL_STATE"
     assert stale.state.mode == Mode.SYS
 
-    restarted = bundle(tmp_path)
+    with sqlite3.connect(tmp_path / "runtime-postgres-compat.sqlite3") as conn:
+        fingerprint = conn.execute(
+            "SELECT task_change_receipt_fingerprint FROM operational_events WHERE event_id = ?",
+            ("EVENT-PG-1",),
+        ).fetchone()[0]
+    assert fingerprint == receipt.receipt_fingerprint
+
+    restarted = bundle(tmp_path, task_change_authority=authority)
     restored = restarted.operational_state.get()
     assert restored.mode == Mode.SYS
     assert restored.task == "New task"
     assert restored.version == 2
+
+
+def test_postgres_task_directive_without_runtime_receipt_fails_closed(tmp_path):
+    authority = TaskChangeAuthority(TASK_CHANGE_SECRET)
+    runtime = bundle(tmp_path, task_change_authority=authority)
+    initial = runtime.operational_state.initialize(mode=Mode.EXP, task="Stable task")
+    blocked = runtime.operational_state.apply(
+        OperationalCommand(
+            "EVENT-PG-NO-RECEIPT",
+            CommandActor.USER,
+            "TASK: Caller invented task",
+            expected_version=initial.version,
+        )
+    )
+    assert blocked.applied is False
+    assert blocked.code == "USER_TASK_CHANGE_RECEIPT_REQUIRED"
+    assert blocked.state.task == "Stable task"
 
 
 def test_broker_replays_success_from_postgres_store_without_second_provider_call(tmp_path):
