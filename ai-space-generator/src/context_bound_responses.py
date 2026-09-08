@@ -117,8 +117,8 @@ def _reported_used_refs(
         if not isinstance(raw_ref, str):
             raise ValueError("RESPONSES_INTENT_REPORTED_USED_REF_STRING_REQUIRED")
         ref = raw_ref.strip()
-        if not ref:
-            raise ValueError("RESPONSES_INTENT_REPORTED_USED_REF_REQUIRED")
+        if not ref or ref != raw_ref:
+            raise ValueError("RESPONSES_INTENT_REPORTED_USED_REF_EXACT_REQUIRED")
         if ref in seen:
             raise ValueError("RESPONSES_INTENT_REPORTED_USED_REF_DUPLICATE:" + ref)
         if ref not in admitted:
