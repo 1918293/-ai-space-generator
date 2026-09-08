@@ -43,6 +43,10 @@ class ModelActionIntent:
     This is a request for a trusted binding plus non-authoritative arguments, not
     an executable tool call. Safety classification, provider target, exact
     authorization proof, and trusted assurance metadata remain outside the model.
+    `model_reported_used_refs` is a non-authoritative self-report of which
+    already-admitted semantic refs influenced the proposed action. It is evidence
+    of claimed use only: it cannot create Authority, prove semantic correctness,
+    or substitute for Runtime/provider verification.
     """
 
     intent_id: str
@@ -51,6 +55,7 @@ class ModelActionIntent:
     expected_state_delta: str = ""
     authorization_target: str = ""
     arguments: tuple[tuple[str, str], ...] = ()
+    model_reported_used_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
