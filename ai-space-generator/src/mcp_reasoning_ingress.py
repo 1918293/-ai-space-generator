@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 import uuid
 
 from mcp.server import MCPServer
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel
@@ -139,3 +140,48 @@ def register_authenticated_reasoning_tool(
             )
         except (PermissionError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
+
+
+def build_reasoning_enabled_mcp_control_server(
+    bridge: Any,
+    *,
+    ingress: AuthenticatedMCPReasoningIngress,
+    token_verifier: Any,
+    auth_settings: Any,
+    request_state_keys: Iterable[bytes] = (),
+    request_state_audience: str = "hao-system-control",
+) -> MCPServer:
+    """Add reasoning ingress to the existing authenticated MCP control server."""
+    from .mcp_control_server import SCOPE_ACCESS, build_mcp_control_server
+
+    mcp = build_mcp_control_server(
+        bridge,
+        token_verifier=token_verifier,
+        auth_settings=auth_settings,
+        request_state_keys=request_state_keys,
+        request_state_audience=request_state_audience,
+    )
+
+    def principal() -> MCPPrincipal:
+        access = get_access_token()
+        if access is None:
+            raise ToolError("AUTHENTICATION_REQUIRED")
+        subject = (access.subject or "").strip()
+        if not subject:
+            raise ToolError("AUTHENTICATED_SUBJECT_REQUIRED")
+        return MCPPrincipal(subject, frozenset(access.scopes or ()))
+
+    def oauth_meta(tool_scope: str) -> dict[str, Any]:
+        return {
+            "securitySchemes": [
+                {"type": "oauth2", "scopes": [SCOPE_ACCESS, tool_scope]}
+            ]
+        }
+
+    register_authenticated_reasoning_tool(
+        mcp,
+        ingress=ingress,
+        principal_provider=principal,
+        oauth_meta=oauth_meta,
+    )
+    return mcp
