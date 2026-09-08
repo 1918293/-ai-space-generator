@@ -276,13 +276,39 @@ class ContextBoundPreModelGateway:
         )
 
 
+def _validate_model_reported_usage(
+    model_input: ContextBoundModelInput,
+    intent: ModelActionIntent,
+) -> str:
+    raw_refs = intent.model_reported_used_refs
+    if not raw_refs:
+        return "PRE_MODEL_REPORTED_USED_REFS_REQUIRED"
+
+    admitted = {item.ref for item in model_input.admitted_context}
+    seen: set[str] = set()
+    for raw_ref in raw_refs:
+        if not isinstance(raw_ref, str):
+            return "PRE_MODEL_REPORTED_USED_REF_STRING_REQUIRED"
+        ref = raw_ref.strip()
+        if not ref or ref != raw_ref:
+            return "PRE_MODEL_REPORTED_USED_REF_EXACT_REQUIRED"
+        if ref in seen:
+            return "PRE_MODEL_REPORTED_USED_REF_DUPLICATE:" + ref
+        if ref not in admitted:
+            return "PRE_MODEL_REPORTED_USED_REF_UNADMITTED:" + ref
+        seen.add(ref)
+    return ""
+
+
 class ContextBoundReasoningIngress:
     """Connect raw Hao input to the existing post-model ControlPlaneGateway.
 
     No provider side effect happens here. The first model receives only admitted
     semantics and may propose only `ModelActionIntent`; the existing trusted
     ControlPlane remains responsible for binding, policy, Authority and action
-    admission.
+    admission. A model-driven action must carry a bounded non-authoritative usage
+    report whose refs are revalidated against the admitted semantic set before
+    the ControlPlane is reached.
     """
 
     def __init__(
@@ -328,6 +354,14 @@ class ContextBoundReasoningIngress:
             return ContextBoundReasoningResult(
                 admission=admission,
                 code=f"PRE_MODEL_INTENT_INVALID:{exc}",
+            )
+
+        usage_error = _validate_model_reported_usage(admission.model_input, intent)
+        if usage_error:
+            return ContextBoundReasoningResult(
+                admission=admission,
+                intent=intent,
+                code=usage_error,
             )
 
         blocked_bindings = {
