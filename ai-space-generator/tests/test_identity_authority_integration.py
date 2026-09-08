@@ -17,6 +17,7 @@ from src.operational_state import (
     Mode,
     OperationalCommand,
     SQLiteOperationalStateStore,
+    TaskChangeAuthority,
 )
 from src.runtime_deployment import (
     load_parent_task_plans,
@@ -24,6 +25,9 @@ from src.runtime_deployment import (
     load_task_policies,
 )
 from src.runtime_policy import ConfiguredTaskPolicySpec, GoogleAuthorityTaskPolicyProvider
+
+
+_TASK_CHANGE_KEY = b"hao-runtime-v2-identity-integration-key-32+"
 
 
 class FakeAuthorityReader:
@@ -64,15 +68,18 @@ def test_expected_hao_subject_and_per_operation_scope_fail_closed():
 
 
 def test_mode_and_task_mutation_remain_user_authoritative(tmp_path):
-    store = SQLiteOperationalStateStore(str(tmp_path / "state.sqlite"))
+    task_authority = TaskChangeAuthority(_TASK_CHANGE_KEY)
+    store = SQLiteOperationalStateStore(
+        str(tmp_path / "state.sqlite"),
+        task_change_authority=task_authority,
+    )
     original = store.initialize(mode=Mode.EXP, task="Original task")
 
     model = store.apply(
         OperationalCommand(
             event_id="EVT-MODEL",
             actor=CommandActor.MODEL,
-            text="EXE > switch",
-            explicit_task="Model task",
+            text="TASK: Model task",
             expected_version=original.version,
         )
     )
@@ -84,8 +91,7 @@ def test_mode_and_task_mutation_remain_user_authoritative(tmp_path):
         OperationalCommand(
             event_id="EVT-PROJECTION",
             actor=CommandActor.PROJECTION,
-            text="SYS > projected",
-            explicit_task="Projected task",
+            text="TASK: Projected task",
             expected_version=original.version,
         )
     )
@@ -93,12 +99,20 @@ def test_mode_and_task_mutation_remain_user_authoritative(tmp_path):
     assert projection.state.mode == Mode.EXP
     assert projection.state.task == "Original task"
 
+    user_text = "EXE > TASK: Hao task"
+    receipt = task_authority.issue(
+        original,
+        event_id="EVT-USER",
+        actor=CommandActor.USER,
+        text=user_text,
+    )
+    assert receipt is not None
     user = store.apply(
         OperationalCommand(
             event_id="EVT-USER",
             actor=CommandActor.USER,
-            text="EXE > explicit Hao command",
-            explicit_task="Hao task",
+            text=user_text,
+            task_change_receipt=receipt,
             expected_version=original.version,
         )
     )
