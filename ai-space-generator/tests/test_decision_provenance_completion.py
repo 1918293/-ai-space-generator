@@ -149,10 +149,19 @@ def test_reference_authoritative_store_persists_decision_identity(tmp_path):
 
 
 def test_schema_v4_is_additive_expand_in_compatibility_epoch_one():
-    assert CURRENT_RUNTIME_SCHEMA_VERSION == 4
+    assert CURRENT_RUNTIME_SCHEMA_VERSION >= 4
     assert compatibility_epoch_for_version(3) == 1
     assert compatibility_epoch_for_version(4) == 1
     statements = "\n".join(MIGRATIONS[4])
     assert "policy_fingerprint" in statements
     assert "decision_id" in statements
+    assert "DROP " not in statements.upper()
+
+
+def test_schema_v5_task_change_receipt_provenance_is_additive_expand():
+    assert CURRENT_RUNTIME_SCHEMA_VERSION == 5
+    assert compatibility_epoch_for_version(5) == 1
+    statements = "\n".join(MIGRATIONS[5])
+    assert "ALTER TABLE operational_events" in statements
+    assert "task_change_receipt_fingerprint" in statements
     assert "DROP " not in statements.upper()
