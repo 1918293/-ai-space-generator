@@ -24,8 +24,12 @@ from .google_workspace_adapter import (
 )
 from .idempotent_broker import IdempotentAsyncBroker
 from .mcp_control_bridge import HaoMCPIdentityPolicy, MCPControlBridge
-from .mcp_control_server import SCOPE_ACCESS, build_mcp_control_server
+from .mcp_control_server import SCOPE_ACCESS
 from .mcp_http import build_mcp_http_app
+from .mcp_reasoning_ingress import (
+    AuthenticatedMCPReasoningIngress,
+    build_reasoning_enabled_mcp_control_server,
+)
 from .oauth_verifier import JWKSAccessTokenVerifier
 from .parent_task_production import (
     ParentChildPlan,
@@ -365,6 +369,11 @@ async def build_api_app(values: dict[str, str]) -> Any:
         state_source=persistence.operational_state,
         control_plane=gateway,
     )
+    identity_policy = HaoMCPIdentityPolicy(settings.expected_hao_subject)
+    reasoning_ingress = AuthenticatedMCPReasoningIngress(
+        consumer=reasoning_consumer,
+        identity_policy=identity_policy,
+    )
     temporal_client = await connect_temporal(settings)
     starter = TemporalWorkflowStarter(
         temporal_client,
@@ -394,7 +403,7 @@ async def build_api_app(values: dict[str, str]) -> Any:
         production=production,
         operational_state=persistence.operational_state,
         run_registry=persistence.run_registry,
-        identity_policy=HaoMCPIdentityPolicy(settings.expected_hao_subject),
+        identity_policy=identity_policy,
         parent_tasks=parent_tasks,
         reconciliation_store=reconciliation,
         reconciliation_inspector=reconciliation_inspector,
@@ -410,8 +419,9 @@ async def build_api_app(values: dict[str, str]) -> Any:
         audience=settings.oauth_audience,
         jwks_url=settings.oauth_jwks_url,
     )
-    mcp = build_mcp_control_server(
+    mcp = build_reasoning_enabled_mcp_control_server(
         bridge,
+        ingress=reasoning_ingress,
         token_verifier=verifier,
         auth_settings=_oauth_settings(settings),
         request_state_keys=settings.request_state_key_bytes,
