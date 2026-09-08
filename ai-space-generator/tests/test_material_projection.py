@@ -3,6 +3,7 @@ from PIL import Image, ImageDraw
 
 from src.material_projection import (
     PerspectiveMaterialConfig,
+    _masked_gaussian_blur,
     build_orthographic_tile_plane,
     metric_scale_verified,
     outside_mask_invariance,
@@ -53,6 +54,7 @@ def test_masked_projection_preserves_every_outside_pixel():
     assert result.size == source.size
     assert meta["full_image_generation_used"] is False
     assert meta["tile_size_mm"] == [298, 298]
+    assert meta["edge_safe_illumination"] is True
 
 
 def test_material_projection_changes_selected_floor_pixels():
@@ -152,3 +154,18 @@ def test_explicit_floor_occluder_must_be_fully_protected():
     )
     assert missing_protected["hard_gate_pass"] is False
     assert missing_protected["occluder"]["reason"] == "PROTECTED_MASK_REQUIRED_FOR_OCCLUDER"
+
+
+def test_masked_blur_does_not_pull_bright_wall_into_floor_boundary():
+    values = np.full((80, 120), 0.30, dtype=np.float32)
+    edit = np.zeros((80, 120), dtype=bool)
+    edit[:, 40:] = True
+    # Outside the floor is intentionally much brighter than the floor.
+    values[:, :40] = 1.0
+
+    safe = _masked_gaussian_blur(values, edit, sigma=10.0)
+    ordinary = np.asarray(values, dtype=np.float32)
+    # Near the boundary, the edge-safe result must stay at the floor value,
+    # proving the bright preserve region is not mixed into the floor.
+    assert np.allclose(safe[:, 40:45], 0.30, atol=0.01)
+    assert float(np.mean(safe[:, 40:45])) < 0.35
