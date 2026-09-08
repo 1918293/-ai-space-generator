@@ -51,6 +51,7 @@ from .runtime_observability_bridge import (
     ObservableReconciliationBroker,
 )
 from .runtime_policy import ConfiguredTaskPolicySpec, GoogleAuthorityTaskPolicyProvider
+from .runtime_reasoning_composition import build_runtime_reasoning_consumer
 from .stable_finalization import (
     PostgresFinalizationIssueStore,
     StableFinalizationProductionService,
@@ -359,6 +360,11 @@ async def build_api_app(values: dict[str, str]) -> Any:
 
     policy = GoogleAuthorityTaskPolicyProvider(google_client, specs)
     gateway = ControlPlaneGateway(action_catalog_for_targets(targets), policy)
+    reasoning_consumer = build_runtime_reasoning_consumer(
+        values,
+        state_source=persistence.operational_state,
+        control_plane=gateway,
+    )
     temporal_client = await connect_temporal(settings)
     starter = TemporalWorkflowStarter(
         temporal_client,
@@ -483,7 +489,7 @@ async def build_api_app(values: dict[str, str]) -> Any:
                     )
                 )
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/livez", livez, methods=["GET"]),
             Route("/startupz", startupz, methods=["GET"]),
@@ -493,6 +499,8 @@ async def build_api_app(values: dict[str, str]) -> Any:
         ],
         lifespan=lifespan,
     )
+    app.state.context_reasoning_consumer = reasoning_consumer
+    return app
 
 
 async def run_worker(values: dict[str, str]) -> None:
