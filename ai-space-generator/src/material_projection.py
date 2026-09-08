@@ -212,10 +212,29 @@ def build_orthographic_tile_plane(
     }
 
 
+def _masked_gaussian_blur(values: np.ndarray, edit: np.ndarray, sigma: float) -> np.ndarray:
+    """Blur only with samples from inside Edit Mask.
+
+    Ordinary Gaussian blur mixes wall/bench/sky pixels into the floor near a
+    semantic boundary. Normalized convolution prevents the mask-edge halo seen
+    in the rejected Chenghe428 refinement while keeping the operation smooth.
+    """
+    weights = edit.astype(np.float32)
+    denominator = cv2.GaussianBlur(weights, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    denominator = np.maximum(denominator, 1e-5)
+    numerator = cv2.GaussianBlur(
+        values.astype(np.float32) * weights,
+        (0, 0),
+        sigmaX=sigma,
+        sigmaY=sigma,
+    )
+    return numerator / denominator
+
+
 def _illumination_field(source: np.ndarray, edit: np.ndarray, roughness: float) -> np.ndarray:
     gray = cv2.cvtColor(source, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
     sigma = max(source.shape[:2]) * 0.045
-    low = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    low = _masked_gaussian_blur(gray, edit, sigma)
     samples = low[edit]
     reference = float(np.median(samples)) if samples.size else float(np.median(low))
     reference = max(reference, 1e-4)
@@ -278,6 +297,7 @@ def render_perspective_material(
         "metric_scale_verified": metric_scale_verified(config),
         "full_image_generation_used": False,
         "outside_mask_source_pasteback": True,
+        "edge_safe_illumination": True,
     }
     return Image.fromarray(out, mode="RGB"), meta
 
