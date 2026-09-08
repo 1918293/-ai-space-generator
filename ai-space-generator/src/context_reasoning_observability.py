@@ -13,10 +13,11 @@ class ContextReasoningObservation:
     """Content-free stage evidence for one context-bound reasoning attempt.
 
     Counts/fingerprints/codes are deliberately separated from canonical cell
-    content and Hao user text. `presented_to_model` is not called `used`: model
-    exposure alone cannot prove semantic use. `deterministic_used_count` is only
-    incremented where trusted runtime logic itself consumed a disposition to
-    stop/block an action.
+    content and Hao user text. `presented_to_model` is not called `used`.
+    `model_reported_used_count` is a validated but non-authoritative model
+    self-report and remains distinct from `deterministic_used_count`, which is
+    only incremented where trusted Runtime logic itself consumed a disposition
+    to stop/block an action.
     """
 
     run_id: str
@@ -24,6 +25,7 @@ class ContextReasoningObservation:
     structural_ref_count: int
     admitted_ref_count: int
     presented_to_model: bool
+    model_reported_used_count: int
     deterministic_used_count: int
     action_selected: bool
     structural_fingerprint: str = ""
@@ -44,6 +46,7 @@ def observation_from_result(
     admitted_ref_count = 0
     structural_fingerprint = ""
     semantic_fingerprint = ""
+    model_reported_used_count = 0
     deterministic_used_count = 0
 
     if model_input is not None:
@@ -57,6 +60,12 @@ def observation_from_result(
         admitted_ref_count = len(model_input.admitted_context)
         structural_fingerprint = receipt.context_fingerprint
         semantic_fingerprint = model_input.semantic_fingerprint
+
+        if (
+            result.intent is not None
+            and not result.code.startswith("PRE_MODEL_REPORTED_USED_")
+        ):
+            model_reported_used_count = len(result.intent.model_reported_used_refs)
 
         if result.code == "PRE_MODEL_CONTEXT_NO_ACTION":
             deterministic_used_count = sum(
@@ -86,6 +95,7 @@ def observation_from_result(
         structural_ref_count=structural_ref_count,
         admitted_ref_count=admitted_ref_count,
         presented_to_model=presented_to_model,
+        model_reported_used_count=model_reported_used_count,
         deterministic_used_count=deterministic_used_count,
         action_selected=action_selected,
         structural_fingerprint=structural_fingerprint,
