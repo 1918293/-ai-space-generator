@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .validation import validate_object_role_contract
+
 ScaleBasis = Literal["FIELD_MEASURED", "FIELD_ANCHORED_ESTIMATE", "RELATIVE", "SCENARIO"]
 
 
@@ -64,6 +66,69 @@ def _validate_config(config: PerspectiveMaterialConfig) -> None:
 def metric_scale_verified(config: PerspectiveMaterialConfig) -> bool:
     """Only a field-measured plane may be called metrically verified."""
     return config.scale_basis == "FIELD_MEASURED"
+
+
+def validate_material_mask_contract(
+    edit_mask: Image.Image,
+    config: PerspectiveMaterialConfig,
+    *,
+    protected_mask: Image.Image | None = None,
+    occluder_mask: Image.Image | None = None,
+) -> dict[str, object]:
+    """Fail closed on the mask mistakes that caused the rejected 428 render.
+
+    This gate is deterministic only. It verifies that the Edit Mask stays inside
+    the declared floor plane, that Edit and Protected masks do not overlap, and
+    that any explicit occluder is fully protected. It does not decide whether a
+    human-selected plane or semantic mask is visually correct.
+    """
+    _validate_config(config)
+    width, height = edit_mask.size
+    edit = _mask(edit_mask, (width, height))
+    edit_pixels = int(np.count_nonzero(edit))
+
+    plane = np.zeros((height, width), dtype=np.uint8)
+    quad = np.rint(np.asarray(config.plane_quad, dtype=np.float32)).astype(np.int32)
+    cv2.fillConvexPoly(plane, quad, 1)
+    plane_bool = plane.astype(bool)
+    outside_plane = int(np.count_nonzero(edit & ~plane_bool))
+
+    protected_overlap = 0
+    protected = None
+    if protected_mask is not None:
+        protected = _mask(protected_mask, (width, height))
+        protected_overlap = int(np.count_nonzero(edit & protected))
+
+    occluder_qa: dict[str, object] | None = None
+    if occluder_mask is not None:
+        if protected_mask is None:
+            occluder_qa = {
+                "object_role": "PRESERVE_OCCLUDER",
+                "hard_gate_pass": False,
+                "reason": "PROTECTED_MASK_REQUIRED_FOR_OCCLUDER",
+            }
+        else:
+            occluder_qa = validate_object_role_contract(
+                edit_mask,
+                protected_mask,
+                occluder_mask,
+                object_role="PRESERVE_OCCLUDER",
+            )
+
+    hard_gate_pass = bool(
+        edit_pixels > 0
+        and outside_plane == 0
+        and protected_overlap == 0
+        and (occluder_qa is None or bool(occluder_qa.get("hard_gate_pass")))
+    )
+    return {
+        "hard_gate_pass": hard_gate_pass,
+        "edit_pixels": edit_pixels,
+        "edit_outside_plane_pixels": outside_plane,
+        "edit_protected_overlap_pixels": protected_overlap,
+        "occluder": occluder_qa,
+        "semantic_visual_qa": "REQUIRED_SEPARATELY",
+    }
 
 
 def _variant(tile: np.ndarray, index: int) -> np.ndarray:
