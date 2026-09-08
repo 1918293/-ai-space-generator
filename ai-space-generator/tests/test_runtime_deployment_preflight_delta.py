@@ -66,6 +66,11 @@ class SqlitePostgresCompatConnection:
         normalized = sql.strip()
         if normalized == "BEGIN ISOLATION LEVEL SERIALIZABLE":
             return self._conn.execute("BEGIN IMMEDIATE")
+        if normalized.startswith(
+            "ALTER TABLE operational_events ADD COLUMN IF NOT EXISTS "
+            "task_change_receipt_fingerprint"
+        ):
+            return self._conn.execute("SELECT 1")
         normalized = normalized.replace(" FOR UPDATE", "").replace("%s", "?")
         return self._conn.execute(normalized, params)
 
@@ -114,17 +119,17 @@ def _closed_record() -> ExecutionRecord:
     )
 
 
-def test_schema_two_upgrades_through_key_id_and_additive_provenance_migrations():
+def test_schema_two_upgrades_through_key_id_decision_and_task_provenance_migrations():
     conn = FakeMigrationConnection(initial_version=2)
     result = run_postgres_migrations(
         "postgresql://runtime/test",
-        release_id="runtime-v2-decision-provenance",
+        release_id="runtime-v2-task-change-provenance",
         connect_factory=lambda: conn,
     )
-    assert CURRENT_RUNTIME_SCHEMA_VERSION == 4
+    assert CURRENT_RUNTIME_SCHEMA_VERSION == 5
     assert result.from_version == 2
-    assert result.to_version == 4
-    assert result.applied_versions == (3, 4)
+    assert result.to_version == 5
+    assert result.applied_versions == (3, 4, 5)
     migration_sql = [sql for sql, _ in conn.calls]
     assert any(
         "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS key_id" in sql
@@ -136,6 +141,10 @@ def test_schema_two_upgrades_through_key_id_and_additive_provenance_migrations()
     )
     assert any(
         "ALTER TABLE authoritative_completions ADD COLUMN IF NOT EXISTS decision_id" in sql
+        for sql in migration_sql
+    )
+    assert any(
+        "ALTER TABLE operational_events ADD COLUMN IF NOT EXISTS task_change_receipt_fingerprint" in sql
         for sql in migration_sql
     )
     assert conn.closed is True
