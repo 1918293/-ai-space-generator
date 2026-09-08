@@ -15,7 +15,13 @@ class ResponsesClient(Protocol):
 
 
 def _trusted_runtime_instructions(receipt: PreModelContextReceipt) -> str:
-    """Serialize only runtime-verified context into the trusted instruction surface."""
+    """Serialize only runtime-verified structural context into trusted instructions.
+
+    This Phase-A adapter preserves every ref already bound into the structural
+    context fingerprint. Model-usable semantic hydration is handled by the
+    context-bound reasoning seam rather than silently dropping existing-work or
+    prior-attempt evidence at the first-model boundary.
+    """
 
     payload = {
         "checkpoint_id": receipt.checkpoint_id,
@@ -23,6 +29,8 @@ def _trusted_runtime_instructions(receipt: PreModelContextReceipt) -> str:
         "task": receipt.task,
         "operational_version": receipt.operational_version,
         "authority_refs": list(receipt.authority_refs),
+        "existing_work_refs": list(receipt.existing_work_refs),
+        "prior_attempt_refs": list(receipt.prior_attempt_refs),
         "regression_refs": list(receipt.regression_refs),
         "reuse_disposition": receipt.reuse_disposition,
         "context_fingerprint": receipt.context_fingerprint,
