@@ -14,8 +14,13 @@ from .canonical_semantic_reader import (
 from .context_bound_reasoning import ContextBoundIntentModel, ContextBoundPreModelGateway, ContextBoundReasoningIngress
 from .context_bound_responses import build_openai_context_bound_intent_boundary
 from .context_reasoning_consumer import ContextBoundReasoningConsumer, OperationalStateSource
+from .context_reasoning_observability import (
+    ContextReasoningObservation,
+    ObservableContextBoundReasoningIngress,
+)
 from .control_gateway import ControlPlaneGateway, PreModelContextGateway, PreModelContextRequest, PreModelContextResolution
 from .operational_state import ActiveOperationalState
+from .runtime_observability import RuntimeTelemetry, active_runtime_telemetry
 
 
 _ALLOWED_REUSE_DISPOSITIONS = frozenset(
@@ -190,6 +195,16 @@ def _required_text(values: Mapping[str, str], key: str) -> str:
     return value
 
 
+class _RuntimeTelemetryReasoningSink:
+    """One-way adapter from content-free reasoning observations to RuntimeTelemetry."""
+
+    def __init__(self, telemetry: RuntimeTelemetry) -> None:
+        self._telemetry = telemetry
+
+    def record(self, observation: ContextReasoningObservation) -> None:
+        self._telemetry.record_context_reasoning_observation(observation)
+
+
 def build_runtime_reasoning_consumer(
     values: Mapping[str, str],
     *,
@@ -197,13 +212,16 @@ def build_runtime_reasoning_consumer(
     control_plane: ControlPlaneGateway,
     reader: CanonicalRangeReader | None = None,
     model: ContextBoundIntentModel | None = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> ContextBoundReasoningConsumer:
     """Compose the production first-model reasoning seam from deployment config.
 
     No private source ID or canonical semantic text is embedded in public code.
     Route metadata selects logical refs; provider-backed semantic reading remains
     fresh and fail-closed; the interaction-facing consumer accepts only raw Hao
-    text plus run/event/sequence identity.
+    text plus run/event/sequence identity. If Runtime telemetry is configured for
+    the process, the existing ingress is decorated once with content-free stage
+    observation; no second reasoning or MCP telemetry path is created.
     """
 
     sources = load_canonical_semantic_sources_json(
@@ -227,6 +245,19 @@ def build_runtime_reasoning_consumer(
         model=intent_model,
         control_plane=control_plane,
     )
+
+    effective_telemetry = telemetry
+    telemetry_configured = bool(str(values.get("HAO_OTEL_ENDPOINT", "")).strip())
+    if effective_telemetry is None and telemetry_configured:
+        effective_telemetry = active_runtime_telemetry()
+        if effective_telemetry is None:
+            raise ValueError("RUNTIME_REASONING_TELEMETRY_NOT_CONFIGURED")
+    if effective_telemetry is not None:
+        ingress = ObservableContextBoundReasoningIngress(
+            ingress,
+            _RuntimeTelemetryReasoningSink(effective_telemetry),
+        )
+
     return ContextBoundReasoningConsumer(
         state_source=state_source,
         ingress=ingress,
