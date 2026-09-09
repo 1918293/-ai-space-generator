@@ -1,0 +1,160 @@
+name: R111 Live Responses Phase A
+
+on:
+  push:
+    branches:
+      - exp/execution-control-plane-v1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r111-live-responses-phase-a
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-environment:
+    if: ${{ !contains(github.event.head_commit.message, '[r111-live]') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: hao-r111-live-eval
+      deployment: false
+    steps:
+      - name: Prepare bounded environment only
+        run: echo "R111 environment bootstrap only; no OpenAI API call attempted."
+
+  live-phase-a:
+    if: ${{ contains(github.event.head_commit.message, '[r111-live]') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: hao-r111-live-eval
+      deployment: false
+    defaults:
+      run:
+        working-directory: ai-space-generator
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_R111 }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install bounded test dependencies
+        run: python -m pip install --upgrade -r requirements-control.txt
+
+      - name: Require scoped R111 secret without printing it
+        shell: bash
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::OPENAI_API_KEY_R111 is not configured in hao-r111-live-eval. No API call was attempted."
+            exit 2
+          fi
+          echo "Scoped secret is present; plaintext remains masked and is not printed."
+
+      - name: Execute fixed blocked=0 admitted=1 live Responses eval
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+
+          from openai import OpenAI
+
+          from src.control_gateway import (
+              PreModelContextGateway,
+              PreModelContextRequest,
+              PreModelContextResolution,
+              VerifiedModelInput,
+              invoke_after_pre_model_admission,
+          )
+          from src.execution_control import Mode
+          from src.operational_state import ActiveOperationalState, CommandActor
+          from src.responses_model_boundary import ResponsesModelBoundary
+
+          TASK = "Hao System｜Runtime v2 Responses Phase-A live validation"
+          state = ActiveOperationalState(mode=Mode("EXP"), task=TASK, version=1)
+          request = PreModelContextRequest(
+              user_text="Auto > R111. Return a short acknowledgement only.",
+              actor=CommandActor.USER,
+              event_id="R111-LIVE-EVAL",
+          )
+
+          class UnresolvedResolver:
+              def resolve(self, state, request, checkpoint_cue):
+                  return None
+
+          class ForbiddenBoundary:
+              def __init__(self):
+                  self.calls = 0
+
+              def invoke(self, model_input: VerifiedModelInput):
+                  self.calls += 1
+                  raise AssertionError("BLOCKED_PATH_MUST_NOT_CALL_MODEL")
+
+          blocked_boundary = ForbiddenBoundary()
+          blocked = invoke_after_pre_model_admission(
+              PreModelContextGateway(UnresolvedResolver()),
+              state,
+              request,
+              blocked_boundary,
+          )
+          assert blocked.admission.allowed is False
+          assert blocked.admission.code == "PRE_MODEL_CURRENT_UNRESOLVED"
+          assert blocked.model_output is None
+          assert blocked_boundary.calls == 0
+
+          class StaticVerifiedResolver:
+              def resolve(self, state, request, checkpoint_cue):
+                  return PreModelContextResolution(
+                      checkpoint_id="R111",
+                      task=state.task,
+                      operational_version=state.version,
+                      authority_refs=(
+                          "REC-20260904-R111-GITHUB-ACTIONS-SECRET-APPROVAL-01",
+                          "R111",
+                      ),
+                      regression_refs=("RUN-20260904-PREFLIGHT-FIELD-R1",),
+                      existing_work_lookup_complete=True,
+                      regression_lookup_complete=True,
+                      reuse_disposition="REUSE",
+                  )
+
+          client = OpenAI(max_retries=0, timeout=30.0)
+          live_boundary = ResponsesModelBoundary(
+              client,
+              model="gpt-5.6-luna",
+              max_output_tokens=32,
+          )
+          admitted = invoke_after_pre_model_admission(
+              PreModelContextGateway(StaticVerifiedResolver()),
+              state,
+              request,
+              live_boundary,
+          )
+          assert admitted.admission.allowed is True
+          assert admitted.admission.code == "PRE_MODEL_CONTEXT_ADMITTED"
+          response = admitted.model_output
+          assert response is not None
+
+          usage = getattr(response, "usage", None)
+          receipt = admitted.admission.receipt
+          assert receipt is not None
+          safe_result = {
+              "blocked_model_calls": 0,
+              "admitted_provider_calls": 1,
+              "response_id": getattr(response, "id", None),
+              "model": getattr(response, "model", None),
+              "input_tokens": getattr(usage, "input_tokens", None) if usage else None,
+              "output_tokens": getattr(usage, "output_tokens", None) if usage else None,
+              "total_tokens": getattr(usage, "total_tokens", None) if usage else None,
+              "store_requested": False,
+              "tool_choice": "none",
+              "max_output_tokens": 32,
+              "checkpoint": receipt.checkpoint_id,
+              "mode": receipt.mode.value,
+              "task": receipt.task,
+          }
+          print("R111_SAFE_RESULT=" + json.dumps(safe_result, ensure_ascii=False, sort_keys=True))
+          PY

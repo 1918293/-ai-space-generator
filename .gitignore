@@ -1,0 +1,10 @@
+# Generated short-lived credentials from google-github-actions/auth
+gha-creds-*.json
+
+# Terraform local/runtime artifacts
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
