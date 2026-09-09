@@ -90,6 +90,62 @@ class RuntimeTelemetry:
         ):
             pass
 
+    def record_context_reasoning_observation(self, observation: Any) -> None:
+        """Emit content-free context reasoning stage evidence on existing telemetry.
+
+        Stage counts reuse the existing low-cardinality run-events counter. Run
+        identity and the Runtime-owned decision code remain trace-only. Canonical
+        semantic summaries, Hao user text, individual used refs and semantic or
+        structural fingerprints are deliberately not accepted into telemetry.
+        """
+        stage_counts = (
+            ("context_retrieved", int(observation.structural_ref_count)),
+            ("context_admitted", int(observation.admitted_ref_count)),
+            ("context_presented", 1 if observation.presented_to_model else 0),
+            (
+                "context_model_reported_used",
+                int(observation.model_reported_used_count),
+            ),
+            (
+                "context_deterministic_used",
+                int(observation.deterministic_used_count),
+            ),
+            ("context_action_selected", 1 if observation.action_selected else 0),
+        )
+        for event, count in stage_counts:
+            if count <= 0:
+                continue
+            self.run_events.add(
+                count,
+                {
+                    "hao.event": event,
+                    "hao.run.phase": "REASONING",
+                },
+            )
+
+        trace_attributes: dict[str, Any] = {
+            "hao.run.phase": "REASONING",
+            "hao.reasoning.code": str(observation.code),
+            "hao.context.retrieved.count": int(observation.structural_ref_count),
+            "hao.context.admitted.count": int(observation.admitted_ref_count),
+            "hao.context.presented": bool(observation.presented_to_model),
+            "hao.context.model_reported_used.count": int(
+                observation.model_reported_used_count
+            ),
+            "hao.context.deterministic_used.count": int(
+                observation.deterministic_used_count
+            ),
+            "hao.context.action_selected": bool(observation.action_selected),
+        }
+        run_id = str(observation.run_id).strip()
+        if run_id:
+            trace_attributes["hao.run.id"] = run_id
+        with self.tracer.start_as_current_span(
+            "hao.runtime.context_reasoning",
+            attributes=trace_attributes,
+        ):
+            pass
+
     def record_decision_event(
         self,
         event: str,
@@ -194,6 +250,14 @@ class RuntimeTelemetry:
                 shutdown()
 
 
+_ACTIVE_RUNTIME_TELEMETRY: RuntimeTelemetry | None = None
+
+
+def active_runtime_telemetry() -> RuntimeTelemetry | None:
+    """Return the telemetry instance already configured for this Runtime process."""
+    return _ACTIVE_RUNTIME_TELEMETRY
+
+
 def configure_runtime_telemetry(
     *,
     endpoint: str,
@@ -256,7 +320,7 @@ def configure_runtime_telemetry(
 
     tracer = trace_provider.get_tracer("hao.runtime.v2")
     meter = meter_provider.get_meter("hao.runtime.v2")
-    return RuntimeTelemetry(
+    telemetry = RuntimeTelemetry(
         tracer=tracer,
         run_events=meter.create_counter(
             "hao.runtime.run.events",
@@ -281,3 +345,6 @@ def configure_runtime_telemetry(
         trace_provider=trace_provider,
         meter_provider=meter_provider,
     )
+    global _ACTIVE_RUNTIME_TELEMETRY
+    _ACTIVE_RUNTIME_TELEMETRY = telemetry
+    return telemetry
