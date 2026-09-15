@@ -5,6 +5,7 @@ colors:
   background: "#0e1012"
   surface: "#171a1d"
   surface-raised: "#202429"
+  surface-inset: "#111416"
   line: "#30363d"
   text: "#f3f4f5"
   muted: "#a5adb6"
@@ -25,6 +26,8 @@ typography:
     fontSize: ".72rem"
     fontWeight: 800
     letterSpacing: ".15em"
+spacing:
+  compact-grid: "8px"
 rounded:
   card: "22px"
   button: "15px"
@@ -78,6 +81,7 @@ The incumbent palette uses one accent against layered near-black surfaces, with 
 - **Canvas Background** (`background`): Page background.
 - **Base Surface** (`surface`): Core surface family.
 - **Raised Surface** (`surface-raised`): Default button surface.
+- **Inset Surface** (`surface-inset`): Metadata chips and form-control wells.
 - **Structural Line** (`line`): Borders and separators.
 - **Primary Text** (`text`): Main text and strong labels.
 - **Muted Text** (`muted`): Supporting copy, metadata, status, and secondary labels.
@@ -107,7 +111,7 @@ The incumbent palette uses one accent against layered near-black surfaces, with 
 
 The interface is mobile-first. The application shell is centered with a maximum width of `880px`, using compact horizontal padding and vertically stacked cards. Most editing sections remain single-column on mobile.
 
-At `720px` and above, the controls section becomes a two-column grid while upload and metadata span the full width. Repeated `8px` gaps appear in compact tool/action grids, while cards use `18px` internal padding in the incumbent implementation.
+At `720px` and above, the controls section becomes a two-column grid while upload and metadata span the full width. Compact metadata, tool, and action grids share the extracted `compact-grid` spacing token (`8px`), while cards use `18px` internal padding in the incumbent implementation.
 
 The top bar is sticky and accounts for device safe-area insets. The workspace and comparison surfaces scale media to the container width, preserving a direct editing relationship between source, mask, and result.
 
@@ -142,7 +146,7 @@ Cards use the broadest corners (`22px`). Buttons use `15px`, form fields `14px`,
 - **Internal Padding:** `18px` by default; the media workspace card reduces this to `8px`.
 
 ### Inputs / Fields
-- **Style:** Full-width dark inset field, structural border, and `14px` corners.
+- **Style:** Full-width dark inset field using `surface-inset`, structural border, and `14px` corners.
 - **Select / Color Field Height:** `48px`.
 - **Textarea:** Same visual family with internal `12px` padding and vertical resizing.
 
