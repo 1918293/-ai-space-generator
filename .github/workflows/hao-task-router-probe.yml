@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify routing matrix
+      - name: Verify routing and admission matrix
         shell: bash
         run: |
           set -euo pipefail
@@ -28,16 +28,49 @@ jobs:
           import { routeTask, ROUTER_POLICY } from './hao-cloud-runtime/task-router.mjs';
           import fs from 'node:fs';
 
+          const none = { checked: true, status: 'NONE', relation: 'NONE', source: 'PROVIDER_CURRENT' };
+          const plan = { validationPlanReady: true, selectedValidationEvidence: ['PROVIDER_READBACK'] };
+          const formalPreflight = {
+            provider: 'DRIVE',
+            action: 'FORMAL_WRITE',
+            freshStateRead: true,
+            currentStateResolved: true,
+            targetIdentityVerified: true,
+            formalMutation: true,
+            necessityEstablished: true,
+            activeWork: none,
+            currentFingerprint: 'v1',
+            desiredFingerprint: 'v2',
+            ...plan,
+          };
+          const computePreflight = {
+            provider: 'GITHUB',
+            action: 'RUN_COMPUTE',
+            freshStateRead: true,
+            currentStateResolved: true,
+            targetIdentityVerified: true,
+            consequential: true,
+            necessityEstablished: true,
+            activeWork: none,
+            currentFingerprint: 'old',
+            desiredFingerprint: 'new',
+            ...plan,
+          };
+
           const cases = [
             ['synthetic image pixel QA', { deterministicCompute: true }, 'GITHUB_ACTIONS_PUBLIC'],
             ['private portrait QA', { deterministicCompute: true, privateData: true, personalData: true }, 'CHATGPT_PRIVATE_LANE'],
-            ['formal canonical Drive write', { formalMutation: true, privateData: true }, 'SINGLE_WRITE_GATEWAY'],
+            ['formal canonical Drive write with preflight', { formalMutation: true, privateData: true, maintenancePreflight: formalPreflight }, 'SINGLE_WRITE_GATEWAY'],
+            ['formal write without preflight fails closed', { formalMutation: true, privateData: true }, 'BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED'],
+            ['declared mutating compute without preflight fails closed', { mutating: true, deterministicCompute: true }, 'BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED'],
+            ['declared consequential compute with preflight', { consequential: true, deterministicCompute: true, maintenancePreflight: computePreflight }, 'GITHUB_ACTIONS_PUBLIC'],
             ['public read-only MCP control', { publicReadOnlyService: true }, 'RENDER_READ_ONLY'],
             ['public research synthesis', {}, 'CHATGPT_NATIVE'],
             ['connected app long browser workflow', { connectedApps: true, longRunningBrowser: true }, 'CHATGPT_PRIVATE_LANE'],
             ['secret-bearing deterministic build', { deterministicCompute: true, containsSecrets: true }, 'CHATGPT_PRIVATE_LANE'],
             ['local terminal only workflow', { requiresLocalDevice: true }, 'BLOCKED_LOCAL_DEVICE'],
-            ['formal write must outrank read-only service', { formalMutation: true, publicReadOnlyService: true }, 'SINGLE_WRITE_GATEWAY'],
+            ['local-device block outranks missing preflight', { requiresLocalDevice: true, mutating: true }, 'BLOCKED_LOCAL_DEVICE'],
+            ['formal write with preflight outranks read-only service', { formalMutation: true, publicReadOnlyService: true, maintenancePreflight: formalPreflight }, 'SINGLE_WRITE_GATEWAY'],
             ['public PDF batch transform', { deterministicCompute: true }, 'GITHUB_ACTIONS_PUBLIC'],
           ];
 
@@ -45,10 +78,11 @@ jobs:
           let pass = 0;
           for (const [name, task, expected] of cases) {
             const routed = routeTask(task);
-            const ok = routed.lane === expected;
+            const actual = routed.lane ?? routed.disposition ?? 'UNRESOLVED';
+            const ok = actual === expected;
             if (ok) pass++;
-            results.push({ name, expected, actual: routed.lane, ok, reasons: routed.reasons, safeguards: routed.safeguards });
-            console.log(`${ok ? 'PASS' : 'FAIL'} | ${name} | expected=${expected} actual=${routed.lane}`);
+            results.push({ name, expected, actual, lane: routed.lane ?? null, disposition: routed.disposition ?? null, ok, reasons: routed.reasons, safeguards: routed.safeguards });
+            console.log(`${ok ? 'PASS' : 'FAIL'} | ${name} | expected=${expected} actual=${actual}`);
           }
 
           const report = {
@@ -64,7 +98,7 @@ jobs:
           if (pass !== cases.length) process.exit(1);
           NODE
 
-      - name: Verify no-computer and authority invariants
+      - name: Verify no-computer, authority, and fail-closed invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -74,6 +108,9 @@ jobs:
           if (ROUTER_POLICY.formalAuthority !== 'Google Drive') process.exit(1);
           if (ROUTER_POLICY.publicComputeRule !== 'NON_SENSITIVE_ONLY') process.exit(1);
           if (ROUTER_POLICY.formalWriteRule !== 'EXISTING_SINGLE_WRITE_GATEWAY_ONLY') process.exit(1);
+          if (ROUTER_POLICY.consequentialPreflightRule !== 'REQUIRED_WHEN_FORMAL_MUTATION_OR_MUTATING_OR_CONSEQUENTIAL') process.exit(1);
+          if (ROUTER_POLICY.missingPreflightDisposition !== 'BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED') process.exit(1);
+          if (ROUTER_POLICY.maintenancePreflight.ruleOrder[8] !== 'VALIDATION_PLAN') process.exit(1);
           console.log('router_invariants=PASS');
           NODE
 
