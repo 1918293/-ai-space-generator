@@ -12,6 +12,8 @@ on:
       - 'hao-cloud-runtime/maintenance-preflight.adversarial.test.mjs'
       - 'hao-cloud-runtime/formal-write-stability.mjs'
       - 'hao-cloud-runtime/formal-write-stability.test.mjs'
+      - 'hao-cloud-runtime/activepieces-active-work.mjs'
+      - 'hao-cloud-runtime/activepieces-active-work.test.mjs'
       - 'hao-cloud-runtime/task-router.mjs'
       - '.github/workflows/hao-maintenance-preflight.yml'
   workflow_dispatch:
@@ -29,6 +31,8 @@ jobs:
         run: node hao-cloud-runtime/maintenance-preflight.test.mjs
       - name: Adversarial validation without natural use
         run: node hao-cloud-runtime/maintenance-preflight.adversarial.test.mjs
+      - name: Validate Activepieces provider-native active-work compatibility
+        run: node hao-cloud-runtime/activepieces-active-work.test.mjs
       - name: Validate formal write post-release stability detector
         run: node hao-cloud-runtime/formal-write-stability.test.mjs
       - name: Validate router consumes Current and active-work preflight before lane selection
