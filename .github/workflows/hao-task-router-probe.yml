@@ -1,0 +1,85 @@
+name: Hao Task Router Probe
+
+on:
+  push:
+    branches:
+      - exp/hao-system-control-render
+    paths:
+      - 'hao-cloud-runtime/task-router.mjs'
+      - '.github/workflows/hao-task-router-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-router:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify routing matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p router-output
+          node --input-type=module <<'NODE'
+          import { routeTask, ROUTER_POLICY } from './hao-cloud-runtime/task-router.mjs';
+          import fs from 'node:fs';
+
+          const cases = [
+            ['synthetic image pixel QA', { deterministicCompute: true }, 'GITHUB_ACTIONS_PUBLIC'],
+            ['private portrait QA', { deterministicCompute: true, privateData: true, personalData: true }, 'CHATGPT_PRIVATE_LANE'],
+            ['formal canonical Drive write', { formalMutation: true, privateData: true }, 'SINGLE_WRITE_GATEWAY'],
+            ['public read-only MCP control', { publicReadOnlyService: true }, 'RENDER_READ_ONLY'],
+            ['public research synthesis', {}, 'CHATGPT_NATIVE'],
+            ['connected app long browser workflow', { connectedApps: true, longRunningBrowser: true }, 'CHATGPT_PRIVATE_LANE'],
+            ['secret-bearing deterministic build', { deterministicCompute: true, containsSecrets: true }, 'CHATGPT_PRIVATE_LANE'],
+            ['local terminal only workflow', { requiresLocalDevice: true }, 'BLOCKED_LOCAL_DEVICE'],
+            ['formal write must outrank read-only service', { formalMutation: true, publicReadOnlyService: true }, 'SINGLE_WRITE_GATEWAY'],
+            ['public PDF batch transform', { deterministicCompute: true }, 'GITHUB_ACTIONS_PUBLIC'],
+          ];
+
+          const results = [];
+          let pass = 0;
+          for (const [name, task, expected] of cases) {
+            const routed = routeTask(task);
+            const ok = routed.lane === expected;
+            if (ok) pass++;
+            results.push({ name, expected, actual: routed.lane, ok, reasons: routed.reasons, safeguards: routed.safeguards });
+            console.log(`${ok ? 'PASS' : 'FAIL'} | ${name} | expected=${expected} actual=${routed.lane}`);
+          }
+
+          const report = {
+            policy: ROUTER_POLICY,
+            total: cases.length,
+            pass,
+            fail: cases.length - pass,
+            result: pass === cases.length ? 'PASS' : 'FAIL',
+            results,
+          };
+          fs.writeFileSync('router-output/router-report.json', JSON.stringify(report, null, 2));
+          console.log(`router_matrix=${pass}/${cases.length}`);
+          if (pass !== cases.length) process.exit(1);
+          NODE
+
+      - name: Verify no-computer and authority invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { ROUTER_POLICY } from './hao-cloud-runtime/task-router.mjs';
+          if (ROUTER_POLICY.deviceAssumption !== 'NO_COMPUTER') process.exit(1);
+          if (ROUTER_POLICY.formalAuthority !== 'Google Drive') process.exit(1);
+          if (ROUTER_POLICY.publicComputeRule !== 'NON_SENSITIVE_ONLY') process.exit(1);
+          if (ROUTER_POLICY.formalWriteRule !== 'EXISTING_SINGLE_WRITE_GATEWAY_ONLY') process.exit(1);
+          console.log('router_invariants=PASS');
+          NODE
+
+      - name: Upload routing evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-task-router-evidence-${{ github.run_id }}
+          path: router-output/router-report.json
+          retention-days: 1
