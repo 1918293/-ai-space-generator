@@ -15,3 +15,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate package contract
         run: node hao-live-current-apps-script-exp/package-contract.test.mjs
+      - name: Validate runtime behavior
+        run: node hao-live-current-apps-script-exp/runtime-behavior.test.mjs
