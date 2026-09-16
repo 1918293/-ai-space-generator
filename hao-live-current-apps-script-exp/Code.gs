@@ -1,4 +1,4 @@
-const HAO_SCHEMA_VERSION = '0.1.0-exp';
+const HAO_SCHEMA_VERSION = '0.2.0-exp';
 const HAO_SPREADSHEET_PROPERTY = 'HAO_SYSTEM_SPREADSHEET_ID';
 
 const CURRENT_POINTERS = Object.freeze({
@@ -17,8 +17,7 @@ function doGet() {
 }
 
 function getPrivateFormalCurrent() {
-  const spreadsheetId = getRequiredScriptProperty_(HAO_SPREADSHEET_PROPERTY);
-  const ss = SpreadsheetApp.openById(spreadsheetId);
+  const ss = openHaoSpreadsheet_();
   const dashboard = ss.getSheetByName('00_Dashboard');
   const config = ss.getSheetByName('06_Config');
   if (!dashboard || !config) throw new Error('HAO_REQUIRED_SHEET_MISSING');
@@ -47,6 +46,63 @@ function getPrivateFormalCurrent() {
       credentialsExposedToClient: false
     }
   };
+}
+
+function getPrivateProjectIndex(indexId) {
+  if (!/^IDX-\d{3}$/.test(String(indexId || ''))) {
+    throw new Error('HAO_PROJECT_INDEX_ID_INVALID');
+  }
+
+  const ss = openHaoSpreadsheet_();
+  const indexSheet = ss.getSheetByName('07_System_Index');
+  if (!indexSheet) throw new Error('HAO_SYSTEM_INDEX_SHEET_MISSING');
+
+  const lastRow = Math.max(indexSheet.getLastRow(), 2);
+  const matches = indexSheet.getRange(`A1:A${lastRow}`)
+    .createTextFinder(indexId)
+    .matchEntireCell(true)
+    .findAll();
+
+  if (matches.length === 0) throw new Error(`HAO_PROJECT_INDEX_NOT_FOUND:${indexId}`);
+  if (matches.length > 1) throw new Error(`HAO_PROJECT_INDEX_AMBIGUOUS:${indexId}`);
+
+  const resolvedRow = matches[0].getRow();
+  const row = indexSheet.getRange(resolvedRow, 1, 1, 12).getDisplayValues()[0];
+  if (row[0] !== indexId) throw new Error(`HAO_PROJECT_INDEX_MISMATCH:${indexId}`);
+
+  return {
+    schemaVersion: HAO_SCHEMA_VERSION,
+    artifactRole: 'PRIVATE_PROJECT_INDEX_PROJECTION',
+    formalAuthority: 'Google Drive',
+    authorityMutation: false,
+    project: {
+      indexId: row[0],
+      title: row[1],
+      primaryDomain: row[3],
+      secondaryRole: row[4],
+      authorityLevel: row[5],
+      lifecycleState: row[6],
+      evidenceClass: row[7],
+      action: row[8],
+      url: row[9],
+      indexedAt: row[11],
+      resolvedRow,
+    },
+    privacy: {
+      fileIdExposedToClient: false,
+      rawNotesExposedToClient: false,
+      credentialsExposedToClient: false,
+    },
+    freshness: {
+      readAt: new Date().toISOString(),
+      source: 'GOOGLE_APPS_SCRIPT_DIRECT_PRIVATE_READ'
+    }
+  };
+}
+
+function openHaoSpreadsheet_() {
+  const spreadsheetId = getRequiredScriptProperty_(HAO_SPREADSHEET_PROPERTY);
+  return SpreadsheetApp.openById(spreadsheetId);
 }
 
 function readCurrentControl_(sheet, expectedKey, expectedRow) {
