@@ -7,7 +7,7 @@ const PORT = Number(process.env.PORT || 10000);
 const HOST = "0.0.0.0";
 const RESOURCE_URI = "ui://widget/hao-system-control-v3.html";
 const RESOURCE_MIME = "text/html;profile=mcp-app";
-const VERSION = "0.4.5-active-work-awareness-exp";
+const VERSION = "0.4.6-validation-plan-admission-exp";
 const RELEASE_COMMIT = process.env.RENDER_GIT_COMMIT || "unknown";
 const EXPECTED_WIDGET_BYTES = 18232;
 const EXPECTED_WIDGET_SHA256 = "6f96846097c3b6e119febca10e53b54c0996d78405c23b2f3795829d7f57a394";
@@ -29,10 +29,10 @@ const SNAPSHOT = {
   releaseVersion: VERSION,
   releaseCommit: RELEASE_COMMIT,
   purpose: "提供 Hao System 的手機優先、唯讀控制面：查看部署、路由與系統邊界，不直接修改正式 Authority。",
-  coreProblem: "把 ChatGPT、雲端執行與正式 Authority 分離，讓 Auto 能選擇正確 execution lane，同時避免 stale Current、重工與 public MCP 繞過正式寫入控制。",
-  currentFocus: "No-computer Hao Control Surface：Shared Maintenance Preflight 已加入 Resolved Current 與 Active Work Awareness。",
-  nextAction: "只在 fresh Current、target identity、active-work relation、material delta 與 necessity 都充分時執行 consequential action。",
-  desiredOutcome: "Hao 只需提出目標；系統先辨識已完成、進行中、等待依賴或真正需要執行，再選 execution lane。",
+  coreProblem: "把 ChatGPT、雲端執行與正式 Authority 分離，讓 Auto 能選擇正確 execution lane，同時避免 stale Current、重工、未定義驗證方式與 public MCP 繞過正式寫入控制。",
+  currentFocus: "No-computer Hao Control Surface：Shared Maintenance Preflight 已連接 Resolved Current、Active Work Awareness、pre-execution Validation Plan 與 declared consequential fail-closed admission。",
+  nextAction: "只有在 fresh Current、target identity、active-work relation、material delta、necessity 與 validation plan 都充分時，才為 declared consequential action 選擇 execution lane。",
+  desiredOutcome: "Hao 只需提出目標；系統先辨識已完成、進行中、等待依賴、真正需要執行與如何驗證，再選 execution lane。",
   doNotBuild: "不把 public Render 變成正式 Authority、不加入任意寫入、不公開私人 Drive 資料、不建立第二套 Gateway／工作資料庫／Agent runtime。",
   systemAdmin: {
     surfaceScope: "PUBLIC_NON_AUTHORITY_STATIC",
@@ -43,7 +43,9 @@ const SNAPSHOT = {
     maintenanceMutation: "DISABLED",
     maintenancePreflight: "SHARED_PREFLIGHT_BEFORE_EXECUTION",
     currentResolution: "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT",
-    activeWorkAwareness: "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT"
+    activeWorkAwareness: "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT",
+    validationPlan: "REQUIRED_BEFORE_DECLARED_CONSEQUENTIAL_PROCEED",
+    admissionFailClosed: "MISSING_PREFLIGHT_BLOCKS_DECLARED_CONSEQUENTIAL"
   },
   architecture: [
     { level: 3, label: "Private Lane", role: "ChatGPT / Work + Google Drive；私人資料與 connected-app 工作。" },
@@ -81,6 +83,17 @@ const ACTIVE_WORK_SCHEMA = {
   additionalProperties: false
 };
 
+const VALIDATION_EVIDENCE_ENUM = [
+  "REGRESSION_OR_HISTORY_REPLAY",
+  "SYNTHETIC_OR_ADVERSARIAL_MATRIX",
+  "DETERMINISTIC_PROPERTY_OR_FUZZ",
+  "MUTATION_TESTING",
+  "FAULT_INJECTION",
+  "CONCURRENCY_OR_STATE_TRANSITION_REPLAY",
+  "PROVIDER_READBACK",
+  "POST_RELEASE_STABILITY"
+];
+
 const PREFLIGHT_SCHEMA = {
   type: "object",
   properties: {
@@ -99,7 +112,13 @@ const PREFLIGHT_SCHEMA = {
     objectiveSatisfied: { type: "boolean" },
     necessityEstablished: { type: "boolean" },
     currentFingerprint: { type: "string" },
-    desiredFingerprint: { type: "string" }
+    desiredFingerprint: { type: "string" },
+    validationPlanReady: { type: "boolean" },
+    selectedValidationEvidence: {
+      type: "array",
+      items: { type: "string", enum: VALIDATION_EVIDENCE_ENUM },
+      uniqueItems: true
+    }
   },
   additionalProperties: false
 };
@@ -107,6 +126,8 @@ const PREFLIGHT_SCHEMA = {
 const ROUTE_PROPERTIES = {
   requiresLocalDevice: { type: "boolean" },
   formalMutation: { type: "boolean" },
+  mutating: { type: "boolean" },
+  consequential: { type: "boolean" },
   privateData: { type: "boolean" },
   personalData: { type: "boolean" },
   containsSecrets: { type: "boolean" },
@@ -133,7 +154,7 @@ const TOOLS = [
   },
   {
     name: "route_hao_task",
-    description: "Run resolved-Current and active-work-aware maintenance preflight when supplied, then classify a task into the Hao no-computer execution lane. Read-only classification only; this tool never performs the routed action.",
+    description: "Classify a task into the Hao no-computer execution lane. Tasks declared formalMutation, mutating, or consequential must include resolved maintenance preflight evidence and a validation plan or routing fails closed. Read-only classification only; this tool never performs the routed action.",
     inputSchema: { type: "object", properties: ROUTE_PROPERTIES, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
   }
@@ -197,6 +218,8 @@ const server = http.createServer((req, res) => {
       maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
       maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
       activeWorkAwareness: SNAPSHOT.systemAdmin.activeWorkAwareness,
+      validationPlan: SNAPSHOT.systemAdmin.validationPlan,
+      admissionFailClosed: SNAPSHOT.systemAdmin.admissionFailClosed,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -219,6 +242,8 @@ const server = http.createServer((req, res) => {
       maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
       maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
       activeWorkAwareness: SNAPSHOT.systemAdmin.activeWorkAwareness,
+      validationPlan: SNAPSHOT.systemAdmin.validationPlan,
+      admissionFailClosed: SNAPSHOT.systemAdmin.admissionFailClosed,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -316,6 +341,8 @@ server.listen(PORT, HOST, () => {
     maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
     maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
     activeWorkAwareness: SNAPSHOT.systemAdmin.activeWorkAwareness,
+    validationPlan: SNAPSHOT.systemAdmin.validationPlan,
+    admissionFailClosed: SNAPSHOT.systemAdmin.admissionFailClosed,
     taskRouter: "READ_ONLY",
     widgetBytes: WIDGET_BYTES,
     widgetSha256: WIDGET_SHA256,
