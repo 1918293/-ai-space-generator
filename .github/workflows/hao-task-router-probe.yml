@@ -6,6 +6,9 @@ on:
       - exp/hao-system-control-render
     paths:
       - 'hao-cloud-runtime/task-router.mjs'
+      - 'hao-cloud-runtime/maintenance-preflight.mjs'
+      - 'hao-render-exp/server.mjs'
+      - 'hao-render-exp/selftest.mjs'
       - '.github/workflows/hao-task-router-probe.yml'
   workflow_dispatch:
 
@@ -114,9 +117,38 @@ jobs:
           console.log('router_invariants=PASS');
           NODE
 
+      - name: Verify Render control consumer integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check hao-render-exp/server.mjs
+          node --check hao-render-exp/selftest.mjs
+          PORT=10000 RENDER_GIT_COMMIT="${GITHUB_SHA}" node hao-render-exp/server.mjs > router-output/render-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:10000/healthz >/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+          curl -fsS http://127.0.0.1:10000/healthz > router-output/render-health.json
+          PORT=10000 node hao-render-exp/selftest.mjs | tee router-output/render-selftest.log
+          grep -F '"event":"hao_mcp_selftest_summary"' router-output/render-selftest.log | grep -F '"result":"PASS"'
+          grep -F '"version":"0.4.6-validation-plan-admission-exp"' router-output/render-health.json
+          grep -F '"admissionFailClosed":"MISSING_PREFLIGHT_BLOCKS_DECLARED_CONSEQUENTIAL"' router-output/render-health.json
+          grep -F '"validationPlan":"REQUIRED_BEFORE_DECLARED_CONSEQUENTIAL_PROCEED"' router-output/render-health.json
+          kill "$SERVER_PID" 2>/dev/null || true
+          wait "$SERVER_PID" 2>/dev/null || true
+          trap - EXIT
+
       - name: Upload routing evidence
         uses: actions/upload-artifact@v4
         with:
           name: hao-task-router-evidence-${{ github.run_id }}
-          path: router-output/router-report.json
+          path: |
+            router-output/router-report.json
+            router-output/render-health.json
+            router-output/render-selftest.log
+            router-output/render-server.log
           retention-days: 1
