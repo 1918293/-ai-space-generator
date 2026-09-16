@@ -5,12 +5,15 @@ const HOST = "0.0.0.0";
 const RESOURCE_URI = "ui://widget/hao-system-control-v3.html";
 const RESOURCE_MIME = "text/html;profile=mcp-app";
 const VERSION = "0.3.0-recovery-r1-render-exp";
+const RELEASE_COMMIT = process.env.RENDER_GIT_COMMIT || "unknown";
 
 const SNAPSHOT = {
   artifactRole: "READ_ONLY_WORKING_PROJECTION",
   formalAuthority: "Google Drive",
   lifecycle: "EXP",
   owner: "Hao",
+  releaseVersion: VERSION,
+  releaseCommit: RELEASE_COMMIT,
   currentFocus: "Free Render public HTTPS MCP E2E pilot",
   nextAction: "Verify healthz, initialize, tools/list, resources/read, and tools/call.",
   architecture: [],
@@ -76,6 +79,7 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, {
       ok: true,
       version: VERSION,
+      releaseCommit: RELEASE_COMMIT,
       artifactRole: SNAPSHOT.artifactRole,
       formalAuthority: SNAPSHOT.formalAuthority
     });
@@ -86,6 +90,7 @@ const server = http.createServer((req, res) => {
       name: "hao-system-control",
       title: "Hao System Control",
       version: VERSION,
+      releaseCommit: RELEASE_COMMIT,
       mcp: "/mcp",
       health: "/healthz",
       artifactRole: SNAPSHOT.artifactRole,
@@ -173,6 +178,7 @@ server.listen(PORT, HOST, () => {
     event: "startup",
     port: PORT,
     host: HOST,
+    releaseCommit: RELEASE_COMMIT,
     artifactRole: SNAPSHOT.artifactRole,
     formalAuthority: SNAPSHOT.formalAuthority
   }));
