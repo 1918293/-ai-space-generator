@@ -58,4 +58,4 @@ async function run() {
   }
 }
 
-setTimeout(run, 2000);
+if (!process.execArgv.includes("--check")) setTimeout(run, 2000);
