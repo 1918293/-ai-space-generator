@@ -9,14 +9,46 @@ export const LANES = Object.freeze({
   CHATGPT_NATIVE: 'CHATGPT_NATIVE',
 });
 
+export const ROUTER_DISPOSITIONS = Object.freeze({
+  BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED: 'BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED',
+});
+
+function isPreflightObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function routeTask(task = {}) {
   const reasons = [];
   const safeguards = [];
 
-  if (task.maintenancePreflight && typeof task.maintenancePreflight === 'object') {
+  // A local-device-only task cannot execute in Hao's current no-computer runtime,
+  // so stop before asking for heavier maintenance evidence.
+  if (task.requiresLocalDevice === true) {
+    reasons.push('Task requires a user-owned local device, but Hao runtime is no-computer by default.');
+    safeguards.push('Do not route to Desktop Commander or local daemon workflows.');
+    return { lane: LANES.BLOCKED_LOCAL_DEVICE, reasons, safeguards };
+  }
+
+  const declaredConsequential = task.formalMutation === true || task.mutating === true || task.consequential === true;
+  const hasPreflight = isPreflightObject(task.maintenancePreflight);
+
+  if (declaredConsequential && !hasPreflight) {
+    reasons.push('Consequential or mutating work was declared without the required maintenance preflight evidence.');
+    safeguards.push('Do not select an execution lane until fresh Current, target identity, active-work awareness, material delta/necessity, and validation plan are resolved.');
+    return {
+      lane: null,
+      disposition: ROUTER_DISPOSITIONS.BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED,
+      reasons,
+      safeguards,
+    };
+  }
+
+  if (hasPreflight) {
     const preflight = evaluateMaintenancePreflight({
       ...task.maintenancePreflight,
       formalMutation: task.formalMutation === true || task.maintenancePreflight.formalMutation === true,
+      mutating: task.mutating === true || task.maintenancePreflight.mutating === true,
+      consequential: task.consequential === true || task.maintenancePreflight.consequential === true,
     });
     if (!preflight.shouldExecute) {
       reasons.push(`Preflight stopped downstream execution: ${preflight.decision}.`);
@@ -26,16 +58,10 @@ export function routeTask(task = {}) {
     }
   }
 
-  if (task.requiresLocalDevice === true) {
-    reasons.push('Task requires a user-owned local device, but Hao runtime is no-computer by default.');
-    safeguards.push('Do not route to Desktop Commander or local daemon workflows.');
-    return { lane: LANES.BLOCKED_LOCAL_DEVICE, reasons, safeguards };
-  }
-
   if (task.formalMutation === true) {
     reasons.push('Task changes formal Hao System authority or another governed canonical target.');
     safeguards.push('Route through the existing Single Write Gateway only.');
-    safeguards.push('Require target pre-read, dedupe/idempotency check, material-delta/necessity preflight, write, same-target readback, verify.');
+    safeguards.push('Require target pre-read, dedupe/idempotency check, material-delta/necessity preflight, declared validation plan, write, same-target readback, verify.');
     return { lane: LANES.SINGLE_WRITE_GATEWAY, reasons, safeguards };
   }
 
@@ -74,5 +100,7 @@ export const ROUTER_POLICY = Object.freeze({
   formalAuthority: 'Google Drive',
   publicComputeRule: 'NON_SENSITIVE_ONLY',
   formalWriteRule: 'EXISTING_SINGLE_WRITE_GATEWAY_ONLY',
+  consequentialPreflightRule: 'REQUIRED_WHEN_FORMAL_MUTATION_OR_MUTATING_OR_CONSEQUENTIAL',
+  missingPreflightDisposition: ROUTER_DISPOSITIONS.BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED,
   maintenancePreflight: MAINTENANCE_PREFLIGHT_POLICY,
 });
