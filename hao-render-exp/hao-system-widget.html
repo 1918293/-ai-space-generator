@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Hao System 控制台</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--panel:#fff;--text:#17191d;--muted:#68707c;--line:#dfe3e8;--accent:#315efb;--soft:#eaf0ff;--good:#16794b;--goodsoft:#e8f6ee;--warn:#9a6700;--warnsoft:#fff4d6;--danger:#b42318}
+@media(prefers-color-scheme:dark){:root{--bg:#101216;--panel:#1a1d22;--text:#f4f5f6;--muted:#aab1bb;--line:#333840;--accent:#8aa7ff;--soft:#222d49;--good:#71d7a5;--goodsoft:#173729;--warn:#ffd166;--warnsoft:#40351c;--danger:#ff938a}}
+*{box-sizing:border-box}body{margin:0;padding:12px;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif}button,input,textarea,select{font:inherit}.app{max-width:760px;margin:auto}.hero,.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:15px}.hero{background:linear-gradient(135deg,var(--panel),var(--soft))}.eyebrow{font-size:11px;font-weight:800;letter-spacing:.08em;color:var(--accent)}h1{font-size:22px;line-height:1.2;margin:4px 0}h2{font-size:17px;margin:0 0 10px}p{margin:5px 0}.muted{color:var(--muted)}.notice{margin-top:10px;padding:10px;border-radius:11px;background:var(--warnsoft);font-size:13px}.tabs{display:flex;gap:7px;overflow:auto;padding:10px 0;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tab{white-space:nowrap;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:999px;padding:8px 11px;font-weight:750}.tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}.view{display:none}.view.active{display:block}.grid{display:grid;gap:9px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:12px}.metric b{font-size:17px;display:block}.label{font-size:11px;color:var(--muted);font-weight:750}.card{margin-bottom:10px}.field{display:grid;gap:5px;margin-top:9px}.field label{font-size:12px;color:var(--muted);font-weight:750}textarea,input,select{width:100%;border:1px solid var(--line);border-radius:11px;padding:10px;background:var(--bg);color:var(--text)}textarea{min-height:78px;resize:vertical}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px}.btn{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:11px;padding:9px 11px;font-weight:750}.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}.flow{display:grid;gap:7px}.node{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;text-align:center}.node.main{border:2px solid var(--accent);font-weight:800}.node.authority{background:var(--goodsoft);border-color:var(--good)}.arrow{text-align:center;color:var(--muted);font-weight:900}.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}.modules{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.module{border:1px solid var(--line);border-radius:11px;padding:9px;background:var(--panel)}.module small{display:block;color:var(--muted)}.checks{display:grid;gap:7px}.check{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:11px;padding:9px}.check input{width:auto;margin-top:4px}.result{padding:10px;border-radius:11px;background:var(--soft);font-weight:750}.issue{border-left:3px solid var(--accent);padding:8px 10px;background:var(--panel);border-radius:0 10px 10px 0;margin-top:7px}.issue small{color:var(--muted)}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:var(--goodsoft);color:var(--good);font-size:11px;font-weight:800}.status{min-height:20px;font-size:12px;color:var(--muted);margin-top:7px}.source{font-size:12px;color:var(--muted);padding-left:17px}@media(max-width:520px){.metrics,.two,.modules{grid-template-columns:1fr}.app{max-width:none}body{padding:8px}}
+</style>
+</head>
+<body>
+<main class="app">
+  <header class="hero">
+    <div class="eyebrow">HAO SYSTEM · IN-CHAT CONTROL</div>
+    <h1>系統設計與核心方向控制台</h1>
+    <p class="muted">快速閱讀架構、形成方向草稿、記錄真實問題，再送回對話共同分析。</p>
+    <div class="notice"><strong>安全邊界：</strong>這是唯讀正式資料＋互動草稿。介面操作不會直接更新 Google Drive。</div>
+  </header>
+
+  <nav class="tabs" aria-label="控制台頁籤">
+    <button class="tab active" data-view="overview">總覽</button>
+    <button class="tab" data-view="architecture">架構</button>
+    <button class="tab" data-view="direction">核心方向</button>
+    <button class="tab" data-view="issues">問題與調整</button>
+  </nav>
+
+  <section id="overview" class="view active">
+    <div class="grid metrics">
+      <div class="metric"><span class="label">狀態</span><b id="lifecycle">ACTIVE</b><span class="pill">正常使用</span></div>
+      <div class="metric"><span class="label">WIP</span><b id="wip">0</b><span class="muted">真實問題出現才啟動</span></div>
+      <div class="metric"><span class="label">最終決策權</span><b id="owner">Hao</b></div>
+      <div class="metric"><span class="label">正式權威</span><b id="authority">Google Drive</b></div>
+    </div>
+    <article class="card">
+      <h2>目前焦點</h2>
+      <p id="focusText"></p>
+      <h2 style="margin-top:13px">唯一下一步</h2>
+      <p id="nextText"></p>
+      <div class="actions">
+        <button class="btn" id="reloadBtn">重新讀取基線</button>
+        <button class="btn" id="fullscreenBtn">展開檢視</button>
+      </div>
+      <div class="status" id="overviewStatus"></div>
+    </article>
+  </section>
+
+  <section id="architecture" class="view">
+    <article class="card">
+      <h2>主關係</h2>
+      <div class="flow">
+        <div class="node main">Hao<br><small>最新意圖與最終決策權</small></div>
+        <div class="arrow">↓</div>
+        <div class="two">
+          <div class="node"><strong>Hao System Project</strong><br><small>日常工作與專案上下文</small></div>
+          <div class="node"><strong>Hao System GPT</strong><br><small>可攜式互動介面</small></div>
+        </div>
+        <div class="arrow">↓</div>
+        <div class="node main">協作核心<br><small>理解 → 記錄 → 研究 → 建構 → 驗證 → 迭代</small></div>
+        <div class="arrow">↓</div>
+        <div class="modules" id="moduleList"></div>
+        <div class="arrow">↓</div>
+        <div class="node authority">Google Drive<br><small>持久正式權威、可追溯、可回復</small></div>
+      </div>
+    </article>
+  </section>
+
+  <section id="direction" class="view">
+    <article class="card">
+      <h2>方向草稿</h2>
+      <p class="muted">編輯後先保存為 Widget 草稿，再送回對話分析。</p>
+      <div class="field"><label for="purpose">系統目的</label><textarea id="purpose"></textarea></div>
+      <div class="field"><label for="coreProblem">核心問題</label><textarea id="coreProblem"></textarea></div>
+      <div class="field"><label for="currentFocus">目前焦點</label><textarea id="currentFocus"></textarea></div>
+      <div class="field"><label for="nextAction">唯一下一步</label><textarea id="nextAction"></textarea></div>
+      <div class="field"><label for="desiredOutcome">期望改變</label><textarea id="desiredOutcome"></textarea></div>
+      <div class="field"><label for="doNotBuild">停止擴張範圍</label><textarea id="doNotBuild"></textarea></div>
+      <div class="actions">
+        <button class="btn primary" id="sendDirectionBtn">送回對話分析</button>
+        <button class="btn" id="resetDirectionBtn">還原基線</button>
+      </div>
+      <div class="status" id="directionStatus"></div>
+    </article>
+  </section>
+
+  <section id="issues" class="view">
+    <article class="card">
+      <h2>記錄真實問題</h2>
+      <div class="field"><label for="issueTitle">問題</label><input id="issueTitle" placeholder="例如：新問題被舊任務覆蓋"></div>
+      <div class="field"><label for="issueSeverity">影響</label><select id="issueSeverity"><option>低</option><option selected>中</option><option>高</option></select></div>
+      <div class="field"><label for="issueEvidence">原始案例／證據</label><textarea id="issueEvidence" placeholder="保留原始描述或可重現步驟"></textarea></div>
+      <div class="actions"><button class="btn" id="addIssueBtn">加入草稿</button></div>
+      <div id="issueList"></div>
+    </article>
+    <article class="card">
+      <h2>是否值得改系統？</h2>
+      <div class="checks">
+        <label class="check"><input type="checkbox"><span>問題已在真實使用中出現。</span></label>
+        <label class="check"><input type="checkbox"><span>已有可回查原始案例或可重現步驟。</span></label>
+        <label class="check"><input type="checkbox"><span>不修正會持續造成錯誤、重工或資訊流失。</span></label>
+        <label class="check"><input type="checkbox"><span>無法只靠修正既有流程、指令或工具解決。</span></label>
+        <label class="check"><input type="checkbox"><span>修補可逆、範圍小，且不修改 Evidence。</span></label>
+        <label class="check"><input type="checkbox"><span>具備停止條件與必要驗證方法。</span></label>
+      </div>
+      <div class="result" id="diagnosis">目前建議：先記錄，不修改正式系統。</div>
+      <div class="actions"><button class="btn primary" id="sendIssueBtn">送回對話檢討</button></div>
+      <div class="status" id="issueStatus"></div>
+    </article>
+    <article class="card">
+      <h2>來源基線</h2>
+      <ul class="source" id="sourceList"></ul>
+    </article>
+  </section>
+</main>
+
+<script type="module">
+const DEFAULT = {
+  lifecycle:"ACTIVE", formalAuthority:"Google Drive", owner:"Hao", wip:0,
+  purpose:"建立一個由 Hao 保留最終決策權、由 AI 主動協助理解、整理、研究、設計、執行與持續迭代的個人協作系統。",
+  coreProblem:"避免想法與工作脈絡流失，同時防止系統因過度規則、驗證與架構而停止推進。",
+  currentFocus:"正常使用 Hao System Project 與 Hao System GPT v2.2，不追加形式化壓力測試。",
+  nextAction:"若真實使用出現可重現的問題，先保存原始案例，再進行最小修補與必要回歸驗證。",
+  desiredOutcome:"自然語言即可開始；快速看見目前目標、阻塞與下一步；只在真實需求出現時進行最小演進。",
+  doNotBuild:"不建立無直接價值的複雜模組、多套重複資料庫、未經真實案例證明必要的治理層，以及不必要的形式化測試。",
+  architecture:[], sources:[]
+};
+let snapshot = structuredClone(DEFAULT);
+let draft = {fields:{},issues:[]};
+let bridgeReady = Promise.resolve();
+let rpcId = 0;
+const pending = new Map();
+const $ = (id) => document.getElementById(id);
+const esc = (s="") => String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+
+function rpcRequest(method, params){
+  return new Promise((resolve,reject)=>{
+    const id=++rpcId; pending.set(id,{resolve,reject});
+    window.parent.postMessage({jsonrpc:"2.0",id,method,params},"*");
+  });
+}
+function rpcNotify(method, params){
+  window.parent.postMessage({jsonrpc:"2.0",method,params},"*");
+}
+window.addEventListener("message",(event)=>{
+  if(event.source!==window.parent)return;
+  const m=event.data;
+  if(!m||m.jsonrpc!=="2.0")return;
+  if(m.id!==undefined&&pending.has(m.id)){
+    const p=pending.get(m.id);pending.delete(m.id);
+    m.error?p.reject(m.error):p.resolve(m.result);return;
+  }
+  if(m.method==="ui/notifications/tool-result") applyResponse(m.params);
+},{passive:true});
+
+async function initBridge(){
+  try{
+    await rpcRequest("ui/initialize",{appInfo:{name:"hao-system-control",version:"0.1.0"},appCapabilities:{},protocolVersion:"2026-01-26"});
+    rpcNotify("ui/notifications/initialized",{});
+  }catch(e){console.warn("MCP Apps bridge unavailable; standalone preview mode.",e)}
+}
+bridgeReady=initBridge();
+
+function readPersisted(){
+  try{
+    if(window.openai?.widgetState)return window.openai.widgetState;
+    return JSON.parse(sessionStorage.getItem("hao-widget-draft")||"null");
+  }catch{return null}
+}
+function persist(){
+  const state={draft};
+  try{
+    if(window.openai?.setWidgetState) window.openai.setWidgetState(state);
+    else sessionStorage.setItem("hao-widget-draft",JSON.stringify(state));
+  }catch{}
+}
+function applyResponse(response){
+  const data=response?.structuredContent?.snapshot ?? response?.snapshot;
+  if(data){snapshot={...snapshot,...data};hydrate()}
+}
+function fieldValue(id){return draft.fields[id] ?? snapshot[id] ?? ""}
+function hydrate(){
+  $("lifecycle").textContent=snapshot.lifecycle;
+  $("wip").textContent=String(snapshot.wip);
+  $("owner").textContent=snapshot.owner;
+  $("authority").textContent=snapshot.formalAuthority;
+  $("focusText").textContent=fieldValue("currentFocus");
+  $("nextText").textContent=fieldValue("nextAction");
+  ["purpose","coreProblem","currentFocus","nextAction","desiredOutcome","doNotBuild"].forEach(id=>{$(id).value=fieldValue(id)});
+  const modules=(snapshot.architecture||[]).filter(n=>n.level===3);
+  $("moduleList").innerHTML=modules.map(n=>`<div class="module"><strong>${esc(n.label)}</strong><small>${esc(n.role)}</small></div>`).join("");
+  $("sourceList").innerHTML=(snapshot.sources||[]).map(s=>`<li>${esc(s)}</li>`).join("");
+  renderIssues();
+}
+function renderIssues(){
+  $("issueList").innerHTML=draft.issues.length?draft.issues.map((x,i)=>`<div class="issue"><strong>${esc(x.title)}</strong><br><small>${esc(x.severity)}影響</small><p>${esc(x.evidence)}</p><button class="btn" data-remove="${i}">移除</button></div>`).join(""):`<p class="muted">尚無問題草稿。</p>`;
+  document.querySelectorAll("[data-remove]").forEach(btn=>btn.onclick=()=>{draft.issues.splice(Number(btn.dataset.remove),1);persist();renderIssues()});
+}
+function saveFields(){
+  ["purpose","coreProblem","currentFocus","nextAction","desiredOutcome","doNotBuild"].forEach(id=>draft.fields[id]=$(id).value.trim());
+  $("focusText").textContent=fieldValue("currentFocus");
+  $("nextText").textContent=fieldValue("nextAction");
+  persist();
+}
+async function sendPrompt(prompt,statusEl){
+  saveFields();
+  try{
+    if(window.openai?.sendFollowUpMessage){
+      await window.openai.sendFollowUpMessage({prompt,scrollToBottom:true});
+      statusEl.textContent="已送回對話。";
+    }else{
+      await navigator.clipboard?.writeText(prompt);
+      statusEl.textContent="目前環境不支援送回對話；內容已嘗試複製。";
+    }
+  }catch(e){statusEl.textContent="送出失敗，草稿仍已保存。"}
+}
+
+document.querySelectorAll(".tab").forEach(btn=>btn.onclick=()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
+  document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
+  btn.classList.add("active");$(btn.dataset.view).classList.add("active");
+});
+["purpose","coreProblem","currentFocus","nextAction","desiredOutcome","doNotBuild"].forEach(id=>$(id).addEventListener("input",saveFields));
+$("reloadBtn").onclick=async()=>{
+  $("overviewStatus").textContent="讀取中…";
+  try{
+    await bridgeReady;
+    const r=window.openai?.callTool?await window.openai.callTool("get_hao_system_snapshot",{}):await rpcRequest("tools/call",{name:"get_hao_system_snapshot",arguments:{}});
+    applyResponse(r);$("overviewStatus").textContent="已重新讀取基線；草稿仍保留。";
+  }catch{$("overviewStatus").textContent="無法重新讀取，維持目前快照。"}
+};
+$("fullscreenBtn").onclick=async()=>{
+  if(window.openai?.requestDisplayMode) await window.openai.requestDisplayMode({mode:"fullscreen"});
+  else $("overviewStatus").textContent="目前環境不支援全螢幕。";
+};
+$("resetDirectionBtn").onclick=()=>{draft.fields={};persist();hydrate();$("directionStatus").textContent="已還原基線。"};
+$("sendDirectionBtn").onclick=()=>sendPrompt(
+`請依 Hao System 原則檢討以下方向草稿。請區分已知事實、描述性觀察、合理推論與待驗證假設；優先沿用、修正、合併或刪除既有成果，不要直接新增複雜模組。
+
+系統目的：${$("purpose").value}
+核心問題：${$("coreProblem").value}
+目前焦點：${$("currentFocus").value}
+唯一下一步：${$("nextAction").value}
+期望改變：${$("desiredOutcome").value}
+停止擴張：${$("doNotBuild").value}`,
+$("directionStatus"));
+$("addIssueBtn").onclick=()=>{
+  const title=$("issueTitle").value.trim();if(!title){$("issueTitle").focus();return}
+  draft.issues.push({title,severity:$("issueSeverity").value,evidence:$("issueEvidence").value.trim()});
+  $("issueTitle").value="";$("issueEvidence").value="";persist();renderIssues();
+};
+document.querySelectorAll(".check input").forEach(x=>x.onchange=()=>{
+  const n=[...document.querySelectorAll(".check input")].filter(c=>c.checked).length;
+  $("diagnosis").textContent=n<=2?"目前建議：先記錄，不修改正式系統。":n<=4?"目前建議：先修正既有流程、指令或工具。":n===5?"目前建議：可設計最小可逆修補，但先補齊停止條件或驗證。":"目前建議：具備最小修補條件；保留原始案例並做必要回歸驗證。";
+});
+$("sendIssueBtn").onclick=()=>sendPrompt(
+`請以 Hao System 的檢討模式分析以下真實問題草稿。先確認證據，再區分事實、推論、原因假設與替代解釋；先嘗試修正既有流程或指令，只有無法解決時才提出最小、可逆修補。
+
+問題清單：
+${draft.issues.length?draft.issues.map((x,i)=>`${i+1}. ${x.title}｜${x.severity}影響｜證據：${x.evidence||"未填"}`).join("\n"):"尚未建立問題草稿"}
+
+目前判斷：${$("diagnosis").textContent}`,
+$("issueStatus"));
+
+const persisted=readPersisted();
+if(persisted?.draft)draft=persisted.draft;
+const initial=window.openai?.toolOutput?.snapshot;
+if(initial)snapshot={...snapshot,...initial};
+hydrate();
+</script>
+</body>
+</html>
