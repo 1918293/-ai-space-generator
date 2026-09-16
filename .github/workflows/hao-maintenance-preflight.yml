@@ -1,0 +1,65 @@
+name: Hao Maintenance Preflight
+
+on:
+  push:
+    branches:
+      - exp/hao-system-control-render
+      - exp/hao-maintenance-preflight-gate
+    paths:
+      - 'hao-cloud-runtime/maintenance-preflight.mjs'
+      - 'hao-cloud-runtime/maintenance-preflight.test.mjs'
+      - 'hao-cloud-runtime/task-router.mjs'
+      - '.github/workflows/hao-maintenance-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-maintenance-preflight:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shared maintenance preflight
+        run: node hao-cloud-runtime/maintenance-preflight.test.mjs
+      - name: Validate router consumes preflight before lane selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { routeTask, ROUTER_POLICY } from './hao-cloud-runtime/task-router.mjs';
+
+          const noOp = routeTask({
+            deterministicCompute: true,
+            maintenancePreflight: {
+              provider: 'GITHUB',
+              action: 'UPDATE_FILE',
+              freshStateRead: true,
+              targetIdentityVerified: true,
+              mutating: true,
+              necessityEstablished: true,
+              currentFingerprint: 'same',
+              desiredFingerprint: 'same',
+            }
+          });
+          if (noOp.lane !== null) process.exit(1);
+          if (noOp.disposition !== 'NO_OP_NO_MATERIAL_DELTA') process.exit(1);
+
+          const proceed = routeTask({
+            deterministicCompute: true,
+            maintenancePreflight: {
+              provider: 'GITHUB',
+              action: 'RUN_COMPUTE',
+              freshStateRead: true,
+              targetIdentityVerified: true,
+              consequential: true,
+              necessityEstablished: true,
+              currentFingerprint: 'old',
+              desiredFingerprint: 'new',
+            }
+          });
+          if (proceed.lane !== 'GITHUB_ACTIONS_PUBLIC') process.exit(1);
+          if (ROUTER_POLICY.maintenancePreflight.noOpIsValidOutcome !== true) process.exit(1);
+          console.log('preflight_before_routing=PASS');
+          NODE

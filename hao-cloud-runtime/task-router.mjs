@@ -1,3 +1,5 @@
+import { evaluateMaintenancePreflight, MAINTENANCE_PREFLIGHT_POLICY } from './maintenance-preflight.mjs';
+
 export const LANES = Object.freeze({
   BLOCKED_LOCAL_DEVICE: 'BLOCKED_LOCAL_DEVICE',
   SINGLE_WRITE_GATEWAY: 'SINGLE_WRITE_GATEWAY',
@@ -11,6 +13,19 @@ export function routeTask(task = {}) {
   const reasons = [];
   const safeguards = [];
 
+  if (task.maintenancePreflight && typeof task.maintenancePreflight === 'object') {
+    const preflight = evaluateMaintenancePreflight({
+      ...task.maintenancePreflight,
+      formalMutation: task.formalMutation === true || task.maintenancePreflight.formalMutation === true,
+    });
+    if (!preflight.shouldExecute) {
+      reasons.push(`Preflight stopped downstream execution: ${preflight.decision}.`);
+      reasons.push(preflight.reason);
+      safeguards.push('Treat NO_OP / WAIT_TRIGGER / BLOCKED as valid pre-execution outcomes; do not mutate downstream systems.');
+      return { lane: null, disposition: preflight.decision, preflight, reasons, safeguards };
+    }
+  }
+
   if (task.requiresLocalDevice === true) {
     reasons.push('Task requires a user-owned local device, but Hao runtime is no-computer by default.');
     safeguards.push('Do not route to Desktop Commander or local daemon workflows.');
@@ -20,7 +35,7 @@ export function routeTask(task = {}) {
   if (task.formalMutation === true) {
     reasons.push('Task changes formal Hao System authority or another governed canonical target.');
     safeguards.push('Route through the existing Single Write Gateway only.');
-    safeguards.push('Require target pre-read, dedupe/idempotency check, write, same-target readback, verify.');
+    safeguards.push('Require target pre-read, dedupe/idempotency check, material-delta/necessity preflight, write, same-target readback, verify.');
     return { lane: LANES.SINGLE_WRITE_GATEWAY, reasons, safeguards };
   }
 
@@ -59,4 +74,5 @@ export const ROUTER_POLICY = Object.freeze({
   formalAuthority: 'Google Drive',
   publicComputeRule: 'NON_SENSITIVE_ONLY',
   formalWriteRule: 'EXISTING_SINGLE_WRITE_GATEWAY_ONLY',
+  maintenancePreflight: MAINTENANCE_PREFLIGHT_POLICY,
 });
