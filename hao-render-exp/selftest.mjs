@@ -41,11 +41,12 @@ async function run() {
       hb.projectionFreshness === "STATIC_DEPLOYMENT_SNAPSHOT" &&
       hb.systemAdminScope === "PUBLIC_NON_AUTHORITY_STATIC" &&
       hb.maintenanceMutation === "DISABLED" &&
+      hb.maintenancePreflight === "SHARED_PREFLIGHT_BEFORE_EXECUTION" &&
       hb.taskRouter === "READ_ONLY" &&
       hb.widgetFidelity === "PASS" &&
       hb.widgetBytes === EXPECTED_WIDGET_BYTES &&
       hb.widgetSha256 === EXPECTED_WIDGET_SHA256,
-      { status: health.status, version: hb.version, projectionFreshness: hb.projectionFreshness, systemAdminScope: hb.systemAdminScope, maintenanceMutation: hb.maintenanceMutation, widgetBytes: hb.widgetBytes, widgetSha256: hb.widgetSha256 }
+      { status: health.status, version: hb.version, projectionFreshness: hb.projectionFreshness, systemAdminScope: hb.systemAdminScope, maintenanceMutation: hb.maintenanceMutation, maintenancePreflight: hb.maintenancePreflight, widgetBytes: hb.widgetBytes, widgetSha256: hb.widgetSha256 }
     ));
 
     const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "render-selftest", version: "0.4" } } });
@@ -53,7 +54,8 @@ async function run() {
 
     const tools = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const ts = tools.body?.result?.tools ?? [];
-    results.push(check("tools/list", tools.status === 200 && ts.length === 3 && ts.every(t => t.annotations?.readOnlyHint === true) && ts.some(t => t.name === "get_hao_system_snapshot") && ts.some(t => t.name === "render_hao_system_control") && ts.some(t => t.name === "route_hao_task"), { status: tools.status, count: ts.length }));
+    const routeTool = ts.find(t => t.name === "route_hao_task");
+    results.push(check("tools/list", tools.status === 200 && ts.length === 3 && ts.every(t => t.annotations?.readOnlyHint === true) && ts.some(t => t.name === "get_hao_system_snapshot") && ts.some(t => t.name === "render_hao_system_control") && routeTool?.inputSchema?.properties?.maintenancePreflight?.type === "object", { status: tools.status, count: ts.length }));
 
     const rl = await post({ jsonrpc: "2.0", id: 3, method: "resources/list", params: {} });
     const resources = rl.body?.result?.resources ?? [];
@@ -100,7 +102,10 @@ async function run() {
       admin.runtimeHealth === "FRESH_PROVIDER_READ_REQUIRED" &&
       admin.ciHealth === "FRESH_PROVIDER_READ_REQUIRED" &&
       admin.maintenanceMutation === "DISABLED" &&
+      admin.maintenancePreflight === "SHARED_PREFLIGHT_BEFORE_EXECUTION" &&
       s?.routerPolicy?.deviceAssumption === "NO_COMPUTER" &&
+      s?.routerPolicy?.maintenancePreflight?.noOpIsValidOutcome === true &&
+      s?.routerPolicy?.maintenancePreflight?.formalMutationBoundary === "SINGLE_WRITE_GATEWAY" &&
       typeof s?.purpose === "string" && s.purpose.length > 0 &&
       typeof s?.coreProblem === "string" && s.coreProblem.length > 0 &&
       architecture.length === 4 &&
@@ -108,7 +113,7 @@ async function run() {
       s?.widgetArtifact?.bytes === EXPECTED_WIDGET_BYTES &&
       s?.widgetArtifact?.sha256 === EXPECTED_WIDGET_SHA256 &&
       s?.widgetArtifact?.fidelity === "PASS",
-      { status: snap.status, architectureCount: architecture.length, projectionFreshness: s?.projectionFreshness, systemAdminScope: admin.surfaceScope, maintenanceMutation: admin.maintenanceMutation }
+      { status: snap.status, architectureCount: architecture.length, projectionFreshness: s?.projectionFreshness, systemAdminScope: admin.surfaceScope, maintenanceMutation: admin.maintenanceMutation, maintenancePreflight: admin.maintenancePreflight }
     ));
 
     const render = await post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "render_hao_system_control", arguments: {} } });
@@ -121,6 +126,26 @@ async function run() {
     const routeFormal = await post({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "route_hao_task", arguments: { formalMutation: true, publicReadOnlyService: true } } });
     const rf = routeFormal.body?.result?.structuredContent;
     results.push(check("tools/call route formal", routeFormal.status === 200 && rf?.route?.lane === "SINGLE_WRITE_GATEWAY", { status: routeFormal.status, lane: rf?.route?.lane }));
+
+    const routeNoOp = await post({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "route_hao_task", arguments: {
+      deterministicCompute: true,
+      maintenancePreflight: {
+        provider: "GITHUB",
+        action: "UPDATE_FILE",
+        freshStateRead: true,
+        targetIdentityVerified: true,
+        mutating: true,
+        necessityEstablished: true,
+        currentFingerprint: "same",
+        desiredFingerprint: "same"
+      }
+    } } });
+    const rn = routeNoOp.body?.result?.structuredContent?.route;
+    results.push(check(
+      "tools/call maintenance no-op before routing",
+      routeNoOp.status === 200 && rn?.lane === null && rn?.disposition === "NO_OP_NO_MATERIAL_DELTA" && rn?.preflight?.shouldExecute === false,
+      { status: routeNoOp.status, disposition: rn?.disposition, lane: rn?.lane }
+    ));
 
     const notification = await fetch(`${BASE}/mcp`, {
       method: "POST",

@@ -7,7 +7,7 @@ const PORT = Number(process.env.PORT || 10000);
 const HOST = "0.0.0.0";
 const RESOURCE_URI = "ui://widget/hao-system-control-v3.html";
 const RESOURCE_MIME = "text/html;profile=mcp-app";
-const VERSION = "0.4.3-system-admin-exp";
+const VERSION = "0.4.4-maintenance-preflight-exp";
 const RELEASE_COMMIT = process.env.RENDER_GIT_COMMIT || "unknown";
 const EXPECTED_WIDGET_BYTES = 18232;
 const EXPECTED_WIDGET_SHA256 = "6f96846097c3b6e119febca10e53b54c0996d78405c23b2f3795829d7f57a394";
@@ -40,7 +40,8 @@ const SNAPSHOT = {
     currentActionableWorkload: "EXTERNAL_RESOLUTION_REQUIRED",
     runtimeHealth: "FRESH_PROVIDER_READ_REQUIRED",
     ciHealth: "FRESH_PROVIDER_READ_REQUIRED",
-    maintenanceMutation: "DISABLED"
+    maintenanceMutation: "DISABLED",
+    maintenancePreflight: "SHARED_PREFLIGHT_BEFORE_EXECUTION"
   },
   architecture: [
     { level: 3, label: "Private Lane", role: "ChatGPT / Work + Google Drive；私人資料與 connected-app 工作。" },
@@ -63,6 +64,26 @@ const SNAPSHOT = {
   }
 };
 
+const PREFLIGHT_SCHEMA = {
+  type: "object",
+  properties: {
+    provider: { type: "string", enum: ["GITHUB", "RENDER", "DRIVE", "APPS_SCRIPT", "IMAGE_PIPELINE", "GENERIC"] },
+    action: { type: "string" },
+    freshStateRead: { type: "boolean" },
+    targetIdentityVerified: { type: "boolean" },
+    mutating: { type: "boolean" },
+    consequential: { type: "boolean" },
+    formalMutation: { type: "boolean" },
+    blockerKnown: { type: "boolean" },
+    blockerChanged: { type: "boolean" },
+    objectiveSatisfied: { type: "boolean" },
+    necessityEstablished: { type: "boolean" },
+    currentFingerprint: { type: "string" },
+    desiredFingerprint: { type: "string" }
+  },
+  additionalProperties: false
+};
+
 const ROUTE_PROPERTIES = {
   requiresLocalDevice: { type: "boolean" },
   formalMutation: { type: "boolean" },
@@ -72,7 +93,8 @@ const ROUTE_PROPERTIES = {
   connectedApps: { type: "boolean" },
   longRunningBrowser: { type: "boolean" },
   publicReadOnlyService: { type: "boolean" },
-  deterministicCompute: { type: "boolean" }
+  deterministicCompute: { type: "boolean" },
+  maintenancePreflight: PREFLIGHT_SCHEMA
 };
 
 const TOOLS = [
@@ -91,7 +113,7 @@ const TOOLS = [
   },
   {
     name: "route_hao_task",
-    description: "Classify a task into the Hao no-computer execution lane. Read-only classification only; this tool never performs the routed action.",
+    description: "Run shared maintenance preflight when supplied, then classify a task into the Hao no-computer execution lane. Read-only classification only; this tool never performs the routed action.",
     inputSchema: { type: "object", properties: ROUTE_PROPERTIES, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
   }
@@ -127,8 +149,9 @@ function snapshotResult() {
 
 function routeResult(args = {}) {
   const route = routeTask(args);
+  const label = route.lane ?? route.disposition ?? "UNRESOLVED";
   return {
-    content: [{ type: "text", text: `Recommended lane: ${route.lane}` }],
+    content: [{ type: "text", text: `Routing result: ${label}` }],
     structuredContent: { route, policy: ROUTER_POLICY }
   };
 }
@@ -152,6 +175,7 @@ const server = http.createServer((req, res) => {
       projectionFreshness: SNAPSHOT.projectionFreshness,
       systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
       maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
+      maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -172,6 +196,7 @@ const server = http.createServer((req, res) => {
       projectionFreshness: SNAPSHOT.projectionFreshness,
       systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
       maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
+      maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -267,6 +292,7 @@ server.listen(PORT, HOST, () => {
     projectionFreshness: SNAPSHOT.projectionFreshness,
     systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
     maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
+    maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
     taskRouter: "READ_ONLY",
     widgetBytes: WIDGET_BYTES,
     widgetSha256: WIDGET_SHA256,
