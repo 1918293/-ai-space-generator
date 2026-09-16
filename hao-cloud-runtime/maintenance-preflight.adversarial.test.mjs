@@ -19,6 +19,8 @@ const base = {
   activeWork: none,
   currentFingerprint: 'old',
   desiredFingerprint: 'new',
+  validationPlanReady: true,
+  selectedValidationEvidence: ['PROVIDER_READBACK'],
 };
 
 const matrix = [
@@ -34,6 +36,7 @@ const matrix = [
   ['unchanged blocker waits', { blockerKnown: true, blockerChanged: false }, PREFLIGHT_DECISIONS.WAIT_TRIGGER_UNCHANGED_BLOCKER],
   ['objective satisfied no-op', { objectiveSatisfied: true }, PREFLIGHT_DECISIONS.NO_OP_ALREADY_SATISFIED],
   ['identical fingerprint no-op', { currentFingerprint: 'same', desiredFingerprint: 'same' }, PREFLIGHT_DECISIONS.NO_OP_NO_MATERIAL_DELTA],
+  ['missing validation plan blocks', { validationPlanReady: false, selectedValidationEvidence: [] }, PREFLIGHT_DECISIONS.BLOCKED_VALIDATION_PLAN_REQUIRED],
   ['independent active work permits material delta', { activeWork: { checked: true, status: 'ACTIVE', relation: 'INDEPENDENT', source: 'SYNTHETIC', runKey: 'A' } }, PREFLIGHT_DECISIONS.PROCEED],
 ];
 
@@ -78,6 +81,23 @@ const transitionReplay = [];
   transitionReplay.push('UNKNOWN_VISIBILITY->BLOCK->RESOLVED_NONE->PROCEED');
 }
 {
+  const noPlan = evaluateMaintenancePreflight({
+    ...base,
+    provider: 'GITHUB',
+    validationPlanReady: false,
+    selectedValidationEvidence: [],
+  });
+  assert.equal(noPlan.decision, PREFLIGHT_DECISIONS.BLOCKED_VALIDATION_PLAN_REQUIRED);
+  const planned = evaluateMaintenancePreflight({
+    ...base,
+    provider: 'GITHUB',
+    validationPlanReady: true,
+    selectedValidationEvidence: ['SYNTHETIC_OR_ADVERSARIAL_MATRIX', 'PROVIDER_READBACK'],
+  });
+  assert.equal(planned.decision, PREFLIGHT_DECISIONS.PROCEED);
+  transitionReplay.push('NO_VALIDATION_PLAN->BLOCK->DECLARED_EVIDENCE->PROCEED');
+}
+{
   const conflict = evaluateMaintenancePreflight({
     ...base,
     provider: 'GITHUB',
@@ -111,6 +131,7 @@ for (let i = 0; i < 1000; i += 1) {
   const blockerChanged = rnd() > 0.5;
   const objectiveSatisfied = rnd() > 0.85;
   const sameFingerprint = rnd() > 0.75;
+  const validationPlanReady = rnd() > 0.2;
   const awRoll = Math.floor(rnd() * 6);
   const activeVariants = [
     none,
@@ -134,6 +155,8 @@ for (let i = 0; i < 1000; i += 1) {
     activeWork: activeVariants[awRoll],
     currentFingerprint: sameFingerprint ? 'same' : 'old',
     desiredFingerprint: sameFingerprint ? 'same' : 'new',
+    validationPlanReady,
+    selectedValidationEvidence: validationPlanReady ? ['PROVIDER_READBACK'] : [],
   };
   const actual = evaluateMaintenancePreflight(input);
   if (actual.shouldExecute) {
@@ -147,6 +170,8 @@ for (let i = 0; i < 1000; i += 1) {
     assert.equal(blockerKnown && !blockerChanged, false, 'PROCEED escaped unchanged blocker');
     assert.equal(objectiveSatisfied, false, 'PROCEED escaped satisfied objective');
     assert.equal(sameFingerprint, false, 'PROCEED escaped no-material-delta gate');
+    assert.equal(validationPlanReady, true, 'PROCEED escaped validation-plan gate');
+    assert.ok(input.selectedValidationEvidence.length >= 1, 'PROCEED escaped declared evidence requirement');
   }
   fuzzCases += 1;
 }
@@ -183,6 +208,13 @@ const mutations = [
     to: 'if (false) {',
     input: { ...base, currentFingerprint: 'same', desiredFingerprint: 'same' },
     expected: PREFLIGHT_DECISIONS.NO_OP_NO_MATERIAL_DELTA,
+  },
+  {
+    name: 'remove validation-plan guard',
+    from: 'if (consequential && !validationPlan.ready) {',
+    to: 'if (false) {',
+    input: { ...base, validationPlanReady: false, selectedValidationEvidence: [] },
+    expected: PREFLIGHT_DECISIONS.BLOCKED_VALIDATION_PLAN_REQUIRED,
   },
 ];
 let mutantsKilled = 0;
