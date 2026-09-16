@@ -21,14 +21,14 @@ async function run() {
   try {
     const health = await fetch(`${BASE}/healthz`);
     const hb = await health.json();
-    results.push(check("healthz", health.status === 200 && hb.ok === true && hb.formalAuthority === "Google Drive", { status: health.status }));
+    results.push(check("healthz", health.status === 200 && hb.ok === true && hb.formalAuthority === "Google Drive" && hb.taskRouter === "READ_ONLY", { status: health.status, version: hb.version }));
 
-    const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "render-selftest", version: "0.1" } } });
+    const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "render-selftest", version: "0.2" } } });
     results.push(check("initialize", init.status === 200 && init.body?.result?.protocolVersion === "2025-06-18" && init.body?.result?.serverInfo?.name === "hao-system-control", { status: init.status }));
 
     const tools = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const ts = tools.body?.result?.tools ?? [];
-    results.push(check("tools/list", tools.status === 200 && ts.length === 2 && ts.every(t => t.annotations?.readOnlyHint === true) && ts.some(t => t.name === "get_hao_system_snapshot") && ts.some(t => t.name === "render_hao_system_control"), { status: tools.status, count: ts.length }));
+    results.push(check("tools/list", tools.status === 200 && ts.length === 3 && ts.every(t => t.annotations?.readOnlyHint === true) && ts.some(t => t.name === "get_hao_system_snapshot") && ts.some(t => t.name === "render_hao_system_control") && ts.some(t => t.name === "route_hao_task"), { status: tools.status, count: ts.length }));
 
     const rl = await post({ jsonrpc: "2.0", id: 3, method: "resources/list", params: {} });
     const resources = rl.body?.result?.resources ?? [];
@@ -40,10 +40,18 @@ async function run() {
 
     const snap = await post({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "get_hao_system_snapshot", arguments: {} } });
     const s = snap.body?.result?.structuredContent?.snapshot;
-    results.push(check("tools/call snapshot", snap.status === 200 && s?.artifactRole === "READ_ONLY_WORKING_PROJECTION" && s?.formalAuthority === "Google Drive", { status: snap.status }));
+    results.push(check("tools/call snapshot", snap.status === 200 && s?.artifactRole === "READ_ONLY_WORKING_PROJECTION" && s?.formalAuthority === "Google Drive" && s?.routerPolicy?.deviceAssumption === "NO_COMPUTER", { status: snap.status }));
 
     const render = await post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "render_hao_system_control", arguments: {} } });
     results.push(check("tools/call render", render.status === 200 && render.body?.result?._meta?.["openai/outputTemplate"] === "ui://widget/hao-system-control-v3.html", { status: render.status }));
+
+    const routePrivate = await post({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "route_hao_task", arguments: { deterministicCompute: true, privateData: true } } });
+    const rp = routePrivate.body?.result?.structuredContent;
+    results.push(check("tools/call route private", routePrivate.status === 200 && rp?.route?.lane === "CHATGPT_PRIVATE_LANE" && rp?.policy?.formalAuthority === "Google Drive", { status: routePrivate.status, lane: rp?.route?.lane }));
+
+    const routeFormal = await post({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "route_hao_task", arguments: { formalMutation: true, publicReadOnlyService: true } } });
+    const rf = routeFormal.body?.result?.structuredContent;
+    results.push(check("tools/call route formal", routeFormal.status === 200 && rf?.route?.lane === "SINGLE_WRITE_GATEWAY", { status: routeFormal.status, lane: rf?.route?.lane }));
 
     const notification = await fetch(`${BASE}/mcp`, {
       method: "POST",
