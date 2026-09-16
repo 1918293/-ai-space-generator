@@ -7,7 +7,7 @@ const PORT = Number(process.env.PORT || 10000);
 const HOST = "0.0.0.0";
 const RESOURCE_URI = "ui://widget/hao-system-control-v3.html";
 const RESOURCE_MIME = "text/html;profile=mcp-app";
-const VERSION = "0.4.2-widget-schema-exp";
+const VERSION = "0.4.3-system-admin-exp";
 const RELEASE_COMMIT = process.env.RENDER_GIT_COMMIT || "unknown";
 const EXPECTED_WIDGET_BYTES = 18232;
 const EXPECTED_WIDGET_SHA256 = "6f96846097c3b6e119febca10e53b54c0996d78405c23b2f3795829d7f57a394";
@@ -34,6 +34,14 @@ const SNAPSHOT = {
   nextAction: "只有在出現可信的 private-data / custom-app authentication surface 時，才接入動態私人 Current；在此之前保持 public control surface 不讀取私有 Authority。",
   desiredOutcome: "Hao 只需在 ChatGPT／手機端提出目標；系統依任務性質選擇 private、compute、control 或 formal-write lane，且每一條路都有可讀回的邊界。",
   doNotBuild: "不把 public Render 變成正式 Authority、不加入任意寫入、不公開私人 Drive 資料、不為了功能展示重建第二套 Gateway／資料庫／Agent runtime。",
+  systemAdmin: {
+    surfaceScope: "PUBLIC_NON_AUTHORITY_STATIC",
+    privateLifecycleCounts: "NOT_PUBLISHED",
+    currentActionableWorkload: "EXTERNAL_RESOLUTION_REQUIRED",
+    runtimeHealth: "FRESH_PROVIDER_READ_REQUIRED",
+    ciHealth: "FRESH_PROVIDER_READ_REQUIRED",
+    maintenanceMutation: "DISABLED"
+  },
   architecture: [
     { level: 3, label: "Private Lane", role: "ChatGPT / Work + Google Drive；私人資料與 connected-app 工作。" },
     { level: 3, label: "Compute Lane", role: "GitHub Actions；非敏感 deterministic compute、QA、build。" },
@@ -142,6 +150,8 @@ const server = http.createServer((req, res) => {
       artifactRole: SNAPSHOT.artifactRole,
       formalAuthority: SNAPSHOT.formalAuthority,
       projectionFreshness: SNAPSHOT.projectionFreshness,
+      systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
+      maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -160,6 +170,8 @@ const server = http.createServer((req, res) => {
       artifactRole: SNAPSHOT.artifactRole,
       formalAuthority: SNAPSHOT.formalAuthority,
       projectionFreshness: SNAPSHOT.projectionFreshness,
+      systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
+      maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -253,6 +265,8 @@ server.listen(PORT, HOST, () => {
     artifactRole: SNAPSHOT.artifactRole,
     formalAuthority: SNAPSHOT.formalAuthority,
     projectionFreshness: SNAPSHOT.projectionFreshness,
+    systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
+    maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
     taskRouter: "READ_ONLY",
     widgetBytes: WIDGET_BYTES,
     widgetSha256: WIDGET_SHA256,
