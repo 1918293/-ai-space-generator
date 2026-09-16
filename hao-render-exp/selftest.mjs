@@ -38,14 +38,15 @@ async function run() {
       health.status === 200 &&
       hb.ok === true &&
       hb.formalAuthority === "Google Drive" &&
+      hb.projectionFreshness === "STATIC_DEPLOYMENT_SNAPSHOT" &&
       hb.taskRouter === "READ_ONLY" &&
       hb.widgetFidelity === "PASS" &&
       hb.widgetBytes === EXPECTED_WIDGET_BYTES &&
       hb.widgetSha256 === EXPECTED_WIDGET_SHA256,
-      { status: health.status, version: hb.version, widgetBytes: hb.widgetBytes, widgetSha256: hb.widgetSha256 }
+      { status: health.status, version: hb.version, projectionFreshness: hb.projectionFreshness, widgetBytes: hb.widgetBytes, widgetSha256: hb.widgetSha256 }
     ));
 
-    const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "render-selftest", version: "0.3" } } });
+    const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "render-selftest", version: "0.4" } } });
     results.push(check("initialize", init.status === 200 && init.body?.result?.protocolVersion === "2025-06-18" && init.body?.result?.serverInfo?.name === "hao-system-control", { status: init.status }));
 
     const tools = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
@@ -83,16 +84,22 @@ async function run() {
 
     const snap = await post({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "get_hao_system_snapshot", arguments: {} } });
     const s = snap.body?.result?.structuredContent?.snapshot;
+    const architecture = Array.isArray(s?.architecture) ? s.architecture : [];
     results.push(check(
       "tools/call snapshot",
       snap.status === 200 &&
       s?.artifactRole === "READ_ONLY_WORKING_PROJECTION" &&
       s?.formalAuthority === "Google Drive" &&
+      s?.projectionFreshness === "STATIC_DEPLOYMENT_SNAPSHOT" &&
       s?.routerPolicy?.deviceAssumption === "NO_COMPUTER" &&
+      typeof s?.purpose === "string" && s.purpose.length > 0 &&
+      typeof s?.coreProblem === "string" && s.coreProblem.length > 0 &&
+      architecture.length === 4 &&
+      architecture.every(x => x?.level === 3 && typeof x?.label === "string" && typeof x?.role === "string") &&
       s?.widgetArtifact?.bytes === EXPECTED_WIDGET_BYTES &&
       s?.widgetArtifact?.sha256 === EXPECTED_WIDGET_SHA256 &&
       s?.widgetArtifact?.fidelity === "PASS",
-      { status: snap.status }
+      { status: snap.status, architectureCount: architecture.length, projectionFreshness: s?.projectionFreshness }
     ));
 
     const render = await post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "render_hao_system_control", arguments: {} } });
