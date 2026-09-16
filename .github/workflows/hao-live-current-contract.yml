@@ -1,0 +1,25 @@
+name: Hao Live Current Contract
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/hao-system-control-render
+    paths:
+      - 'hao-render-exp/live-current-contract.mjs'
+      - 'hao-render-exp/live-current-contract.test.mjs'
+      - '.github/workflows/hao-live-current-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-live-current-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate contract syntax
+        run: node --check hao-render-exp/live-current-contract.mjs
+      - name: Validate privacy boundary
+        run: node hao-render-exp/live-current-contract.test.mjs
