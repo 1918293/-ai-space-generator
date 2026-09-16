@@ -13,6 +13,8 @@ const base = {
   targetIdentityVerified: true,
   necessityEstablished: true,
   activeWork: none,
+  validationPlanReady: true,
+  selectedValidationEvidence: ['PROVIDER_READBACK'],
 };
 
 const cases = [
@@ -48,12 +50,17 @@ const cases = [
     boundary: 'SINGLE_WRITE_GATEWAY',
   },
   {
+    name: 'Consequential action without declared validation evidence blocks before execution',
+    input: { ...base, provider: 'DRIVE', action: 'FORMAL_WRITE', formalMutation: true, currentFingerprint: 'v1', desiredFingerprint: 'v2', validationPlanReady: false, selectedValidationEvidence: [] },
+    expected: PREFLIGHT_DECISIONS.BLOCKED_VALIDATION_PLAN_REQUIRED,
+  },
+  {
     name: 'Apps Script unchanged deployment blocker waits for trigger',
     input: { ...base, provider: 'APPS_SCRIPT', action: 'DEPLOY', mutating: true, blockerKnown: true, blockerChanged: false },
     expected: PREFLIGHT_DECISIONS.WAIT_TRIGGER_UNCHANGED_BLOCKER,
   },
   {
-    name: 'Apps Script changed blocker can proceed if necessity is established',
+    name: 'Apps Script changed blocker can proceed if necessity and validation plan are established',
     input: { ...base, provider: 'APPS_SCRIPT', action: 'DEPLOY', mutating: true, blockerKnown: true, blockerChanged: true },
     expected: PREFLIGHT_DECISIONS.PROCEED,
   },
@@ -131,6 +138,10 @@ for (const c of cases) {
   assert.equal(actual.decision, c.expected, c.name);
   assert.equal(actual.shouldExecute, c.expected === PREFLIGHT_DECISIONS.PROCEED, c.name);
   if (c.boundary) assert.equal(actual.executionBoundary, c.boundary, c.name);
+  if (c.expected === PREFLIGHT_DECISIONS.PROCEED) {
+    assert.equal(actual.validationPlan.ready, true, c.name);
+    assert.ok(actual.validationPlan.selectedEvidence.length >= 1, c.name);
+  }
   results.push({ name: c.name, decision: actual.decision, pass: true });
 }
 
@@ -139,6 +150,8 @@ assert.equal(MAINTENANCE_PREFLIGHT_POLICY.waitIsValidOutcome, true);
 assert.equal(MAINTENANCE_PREFLIGHT_POLICY.formalMutationBoundary, 'SINGLE_WRITE_GATEWAY');
 assert.equal(MAINTENANCE_PREFLIGHT_POLICY.ruleOrder[1], 'CURRENT_RESOLUTION');
 assert.equal(MAINTENANCE_PREFLIGHT_POLICY.ruleOrder[3], 'ACTIVE_WORK_AWARENESS');
+assert.equal(MAINTENANCE_PREFLIGHT_POLICY.ruleOrder[8], 'VALIDATION_PLAN');
+assert.ok(MAINTENANCE_PREFLIGHT_POLICY.validationEvidenceTypes.includes('PROVIDER_READBACK'));
 assert.deepEqual(MAINTENANCE_PREFLIGHT_POLICY.supportedProviders, ['GITHUB','RENDER','DRIVE','APPS_SCRIPT','IMAGE_PIPELINE','GENERIC']);
 
 console.log(JSON.stringify({
@@ -149,6 +162,7 @@ console.log(JSON.stringify({
   result: 'PASS',
   noOpIsValidOutcome: true,
   waitIsValidOutcome: true,
+  validationPlanRequiredBeforeConsequentialProceed: true,
   providers: MAINTENANCE_PREFLIGHT_POLICY.supportedProviders,
   results,
 }, null, 2));
