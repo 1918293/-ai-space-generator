@@ -1,12 +1,23 @@
 import http from "node:http";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { routeTask, ROUTER_POLICY } from "../hao-cloud-runtime/task-router.mjs";
 
 const PORT = Number(process.env.PORT || 10000);
 const HOST = "0.0.0.0";
 const RESOURCE_URI = "ui://widget/hao-system-control-v3.html";
 const RESOURCE_MIME = "text/html;profile=mcp-app";
-const VERSION = "0.4.0-router-exp";
+const VERSION = "0.4.1-widget-fidelity-exp";
 const RELEASE_COMMIT = process.env.RENDER_GIT_COMMIT || "unknown";
+const EXPECTED_WIDGET_BYTES = 18232;
+const EXPECTED_WIDGET_SHA256 = "6f96846097c3b6e119febca10e53b54c0996d78405c23b2f3795829d7f57a394";
+const WIDGET = readFileSync(new URL("./hao-system-widget.html", import.meta.url), "utf8");
+const WIDGET_BYTES = Buffer.byteLength(WIDGET, "utf8");
+const WIDGET_SHA256 = createHash("sha256").update(Buffer.from(WIDGET, "utf8")).digest("hex");
+
+if (WIDGET_BYTES !== EXPECTED_WIDGET_BYTES || WIDGET_SHA256 !== EXPECTED_WIDGET_SHA256) {
+  throw new Error(`Widget fidelity gate failed: bytes=${WIDGET_BYTES} sha256=${WIDGET_SHA256}`);
+}
 
 const SNAPSHOT = {
   artifactRole: "READ_ONLY_WORKING_PROJECTION",
@@ -15,14 +26,19 @@ const SNAPSHOT = {
   owner: "Hao",
   releaseVersion: VERSION,
   releaseCommit: RELEASE_COMMIT,
-  currentFocus: "No-computer unified task routing + free read-only control surface",
-  nextAction: "Route tasks by privacy, compute, hosting, and formal-write requirements without bypassing the existing Single Write Gateway.",
+  currentFocus: "No-computer unified task routing + exact recovered Hao control widget",
+  nextAction: "Use the read-only control surface for fresh projection and routing without bypassing the existing Single Write Gateway.",
   architecture: ["ChatGPT private lane", "GitHub Actions public compute", "Render read-only control", "Existing Single Write Gateway"],
   sources: ["Google Drive (formal authority)"],
-  routerPolicy: ROUTER_POLICY
+  routerPolicy: ROUTER_POLICY,
+  widgetArtifact: {
+    bytes: WIDGET_BYTES,
+    sha256: WIDGET_SHA256,
+    expectedBytes: EXPECTED_WIDGET_BYTES,
+    expectedSha256: EXPECTED_WIDGET_SHA256,
+    fidelity: "PASS"
+  }
 };
-
-const WIDGET = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hao System Control EXP</title></head><body><main><h1>Hao System Control</h1><p>READ_ONLY_WORKING_PROJECTION</p><p>Formal Authority: Google Drive</p><p>No-computer EXP control surface with read-only task routing.</p></main></body></html>`;
 
 const ROUTE_PROPERTIES = {
   requiresLocalDevice: { type: "boolean" },
@@ -110,7 +126,10 @@ const server = http.createServer((req, res) => {
       releaseCommit: RELEASE_COMMIT,
       artifactRole: SNAPSHOT.artifactRole,
       formalAuthority: SNAPSHOT.formalAuthority,
-      taskRouter: "READ_ONLY"
+      taskRouter: "READ_ONLY",
+      widgetBytes: WIDGET_BYTES,
+      widgetSha256: WIDGET_SHA256,
+      widgetFidelity: "PASS"
     });
   }
 
@@ -124,7 +143,10 @@ const server = http.createServer((req, res) => {
       health: "/healthz",
       artifactRole: SNAPSHOT.artifactRole,
       formalAuthority: SNAPSHOT.formalAuthority,
-      taskRouter: "READ_ONLY"
+      taskRouter: "READ_ONLY",
+      widgetBytes: WIDGET_BYTES,
+      widgetSha256: WIDGET_SHA256,
+      widgetFidelity: "PASS"
     });
   }
 
@@ -213,6 +235,9 @@ server.listen(PORT, HOST, () => {
     releaseCommit: RELEASE_COMMIT,
     artifactRole: SNAPSHOT.artifactRole,
     formalAuthority: SNAPSHOT.formalAuthority,
-    taskRouter: "READ_ONLY"
+    taskRouter: "READ_ONLY",
+    widgetBytes: WIDGET_BYTES,
+    widgetSha256: WIDGET_SHA256,
+    widgetFidelity: "PASS"
   }));
 });
