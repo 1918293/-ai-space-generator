@@ -43,21 +43,43 @@ async function run() {
       hb.maintenanceMutation === "DISABLED" &&
       hb.maintenancePreflight === "SHARED_PREFLIGHT_BEFORE_EXECUTION" &&
       hb.activeWorkAwareness === "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT" &&
+      hb.validationPlan === "REQUIRED_BEFORE_DECLARED_CONSEQUENTIAL_PROCEED" &&
+      hb.admissionFailClosed === "MISSING_PREFLIGHT_BLOCKS_DECLARED_CONSEQUENTIAL" &&
       hb.taskRouter === "READ_ONLY" &&
       hb.widgetFidelity === "PASS" &&
       hb.widgetBytes === EXPECTED_WIDGET_BYTES &&
       hb.widgetSha256 === EXPECTED_WIDGET_SHA256,
-      { status: health.status, version: hb.version, projectionFreshness: hb.projectionFreshness, systemAdminScope: hb.systemAdminScope, maintenanceMutation: hb.maintenanceMutation, maintenancePreflight: hb.maintenancePreflight, activeWorkAwareness: hb.activeWorkAwareness, widgetBytes: hb.widgetBytes, widgetSha256: hb.widgetSha256 }
+      { status: health.status, version: hb.version, projectionFreshness: hb.projectionFreshness, systemAdminScope: hb.systemAdminScope, maintenanceMutation: hb.maintenanceMutation, validationPlan: hb.validationPlan, admissionFailClosed: hb.admissionFailClosed, widgetBytes: hb.widgetBytes, widgetSha256: hb.widgetSha256 }
     ));
 
-    const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "render-selftest", version: "0.4" } } });
+    const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "render-selftest", version: "0.5" } } });
     results.push(check("initialize", init.status === 200 && init.body?.result?.protocolVersion === "2025-06-18" && init.body?.result?.serverInfo?.name === "hao-system-control", { status: init.status }));
 
     const tools = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const ts = tools.body?.result?.tools ?? [];
     const routeTool = ts.find(t => t.name === "route_hao_task");
-    const preflightSchema = routeTool?.inputSchema?.properties?.maintenancePreflight;
-    results.push(check("tools/list", tools.status === 200 && ts.length === 3 && ts.every(t => t.annotations?.readOnlyHint === true) && ts.some(t => t.name === "get_hao_system_snapshot") && ts.some(t => t.name === "render_hao_system_control") && preflightSchema?.type === "object" && preflightSchema?.properties?.currentStateResolved?.type === "boolean" && preflightSchema?.properties?.activeWork?.type === "object", { status: tools.status, count: ts.length }));
+    const routeProps = routeTool?.inputSchema?.properties ?? {};
+    const preflightSchema = routeProps?.maintenancePreflight;
+    const evidenceSchema = preflightSchema?.properties?.selectedValidationEvidence;
+    results.push(check(
+      "tools/list validation-plan admission schema",
+      tools.status === 200 &&
+      ts.length === 3 &&
+      ts.every(t => t.annotations?.readOnlyHint === true) &&
+      ts.some(t => t.name === "get_hao_system_snapshot") &&
+      ts.some(t => t.name === "render_hao_system_control") &&
+      routeProps?.mutating?.type === "boolean" &&
+      routeProps?.consequential?.type === "boolean" &&
+      preflightSchema?.type === "object" &&
+      preflightSchema?.properties?.currentStateResolved?.type === "boolean" &&
+      preflightSchema?.properties?.activeWork?.type === "object" &&
+      preflightSchema?.properties?.validationPlanReady?.type === "boolean" &&
+      evidenceSchema?.type === "array" &&
+      evidenceSchema?.uniqueItems === true &&
+      evidenceSchema?.items?.enum?.includes("PROVIDER_READBACK") &&
+      evidenceSchema?.items?.enum?.includes("POST_RELEASE_STABILITY"),
+      { status: tools.status, count: ts.length, evidenceTypes: evidenceSchema?.items?.enum?.length ?? 0 }
+    ));
 
     const rl = await post({ jsonrpc: "2.0", id: 3, method: "resources/list", params: {} });
     const resources = rl.body?.result?.resources ?? [];
@@ -107,10 +129,15 @@ async function run() {
       admin.maintenancePreflight === "SHARED_PREFLIGHT_BEFORE_EXECUTION" &&
       admin.currentResolution === "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT" &&
       admin.activeWorkAwareness === "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT" &&
+      admin.validationPlan === "REQUIRED_BEFORE_DECLARED_CONSEQUENTIAL_PROCEED" &&
+      admin.admissionFailClosed === "MISSING_PREFLIGHT_BLOCKS_DECLARED_CONSEQUENTIAL" &&
       s?.routerPolicy?.deviceAssumption === "NO_COMPUTER" &&
+      s?.routerPolicy?.consequentialPreflightRule === "REQUIRED_WHEN_FORMAL_MUTATION_OR_MUTATING_OR_CONSEQUENTIAL" &&
+      s?.routerPolicy?.missingPreflightDisposition === "BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED" &&
       s?.routerPolicy?.maintenancePreflight?.noOpIsValidOutcome === true &&
       s?.routerPolicy?.maintenancePreflight?.waitIsValidOutcome === true &&
       s?.routerPolicy?.maintenancePreflight?.ruleOrder?.[3] === "ACTIVE_WORK_AWARENESS" &&
+      s?.routerPolicy?.maintenancePreflight?.ruleOrder?.[8] === "VALIDATION_PLAN" &&
       s?.routerPolicy?.maintenancePreflight?.formalMutationBoundary === "SINGLE_WRITE_GATEWAY" &&
       typeof s?.purpose === "string" && s.purpose.length > 0 &&
       typeof s?.coreProblem === "string" && s.coreProblem.length > 0 &&
@@ -119,7 +146,7 @@ async function run() {
       s?.widgetArtifact?.bytes === EXPECTED_WIDGET_BYTES &&
       s?.widgetArtifact?.sha256 === EXPECTED_WIDGET_SHA256 &&
       s?.widgetArtifact?.fidelity === "PASS",
-      { status: snap.status, architectureCount: architecture.length, projectionFreshness: s?.projectionFreshness, systemAdminScope: admin.surfaceScope, maintenanceMutation: admin.maintenanceMutation, maintenancePreflight: admin.maintenancePreflight, activeWorkAwareness: admin.activeWorkAwareness }
+      { status: snap.status, architectureCount: architecture.length, validationPlan: admin.validationPlan, admissionFailClosed: admin.admissionFailClosed }
     ));
 
     const render = await post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "render_hao_system_control", arguments: {} } });
@@ -129,12 +156,72 @@ async function run() {
     const rp = routePrivate.body?.result?.structuredContent;
     results.push(check("tools/call route private", routePrivate.status === 200 && rp?.route?.lane === "CHATGPT_PRIVATE_LANE" && rp?.policy?.formalAuthority === "Google Drive", { status: routePrivate.status, lane: rp?.route?.lane }));
 
-    const routeFormal = await post({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "route_hao_task", arguments: { formalMutation: true, publicReadOnlyService: true } } });
-    const rf = routeFormal.body?.result?.structuredContent;
-    results.push(check("tools/call route formal", routeFormal.status === 200 && rf?.route?.lane === "SINGLE_WRITE_GATEWAY", { status: routeFormal.status, lane: rf?.route?.lane }));
+    const routeFormalMissing = await post({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "route_hao_task", arguments: { formalMutation: true, publicReadOnlyService: true } } });
+    const rfm = routeFormalMissing.body?.result?.structuredContent?.route;
+    results.push(check(
+      "tools/call formal mutation missing preflight fails closed",
+      routeFormalMissing.status === 200 && rfm?.lane === null && rfm?.disposition === "BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED",
+      { status: routeFormalMissing.status, lane: rfm?.lane, disposition: rfm?.disposition }
+    ));
 
     const none = { checked: true, status: "NONE", relation: "NONE", source: "PROVIDER_CURRENT" };
-    const routeNoOp = await post({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "route_hao_task", arguments: {
+    const routeFormalReady = await post({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "route_hao_task", arguments: {
+      formalMutation: true,
+      publicReadOnlyService: true,
+      maintenancePreflight: {
+        provider: "DRIVE",
+        action: "FORMAL_WRITE",
+        freshStateRead: true,
+        currentStateResolved: true,
+        targetIdentityVerified: true,
+        necessityEstablished: true,
+        activeWork: none,
+        currentFingerprint: "v1",
+        desiredFingerprint: "v2",
+        validationPlanReady: true,
+        selectedValidationEvidence: ["PROVIDER_READBACK", "POST_RELEASE_STABILITY"]
+      }
+    } } });
+    const rfr = routeFormalReady.body?.result?.structuredContent?.route;
+    results.push(check(
+      "tools/call formal mutation with preflight routes gateway",
+      routeFormalReady.status === 200 && rfr?.lane === "SINGLE_WRITE_GATEWAY" && rfr?.preflight === undefined,
+      { status: routeFormalReady.status, lane: rfr?.lane }
+    ));
+
+    const routeConsequentialMissing = await post({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "route_hao_task", arguments: { consequential: true, deterministicCompute: true } } });
+    const rcm = routeConsequentialMissing.body?.result?.structuredContent?.route;
+    results.push(check(
+      "tools/call consequential compute missing preflight fails closed",
+      routeConsequentialMissing.status === 200 && rcm?.lane === null && rcm?.disposition === "BLOCKED_MAINTENANCE_PREFLIGHT_REQUIRED",
+      { status: routeConsequentialMissing.status, lane: rcm?.lane, disposition: rcm?.disposition }
+    ));
+
+    const routeConsequentialReady = await post({ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "route_hao_task", arguments: {
+      consequential: true,
+      deterministicCompute: true,
+      maintenancePreflight: {
+        provider: "GITHUB",
+        action: "RUN_COMPUTE",
+        freshStateRead: true,
+        currentStateResolved: true,
+        targetIdentityVerified: true,
+        necessityEstablished: true,
+        activeWork: none,
+        currentFingerprint: "old",
+        desiredFingerprint: "new",
+        validationPlanReady: true,
+        selectedValidationEvidence: ["SYNTHETIC_OR_ADVERSARIAL_MATRIX", "PROVIDER_READBACK"]
+      }
+    } } });
+    const rcr = routeConsequentialReady.body?.result?.structuredContent?.route;
+    results.push(check(
+      "tools/call consequential compute with preflight routes public compute",
+      routeConsequentialReady.status === 200 && rcr?.lane === "GITHUB_ACTIONS_PUBLIC",
+      { status: routeConsequentialReady.status, lane: rcr?.lane }
+    ));
+
+    const routeNoOp = await post({ jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "route_hao_task", arguments: {
       deterministicCompute: true,
       maintenancePreflight: {
         provider: "GITHUB",
@@ -151,12 +238,12 @@ async function run() {
     } } });
     const rn = routeNoOp.body?.result?.structuredContent?.route;
     results.push(check(
-      "tools/call maintenance no-op before routing",
+      "tools/call maintenance no-op before validation-plan requirement",
       routeNoOp.status === 200 && rn?.lane === null && rn?.disposition === "NO_OP_NO_MATERIAL_DELTA" && rn?.preflight?.shouldExecute === false,
       { status: routeNoOp.status, disposition: rn?.disposition, lane: rn?.lane }
     ));
 
-    const routeActive = await post({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "route_hao_task", arguments: {
+    const routeActive = await post({ jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "route_hao_task", arguments: {
       formalMutation: true,
       maintenancePreflight: {
         provider: "DRIVE",
@@ -164,7 +251,6 @@ async function run() {
         freshStateRead: true,
         currentStateResolved: true,
         targetIdentityVerified: true,
-        formalMutation: true,
         necessityEstablished: true,
         activeWork: {
           checked: true,
@@ -179,7 +265,7 @@ async function run() {
     } } });
     const ra = routeActive.body?.result?.structuredContent?.route;
     results.push(check(
-      "tools/call active same-objective waits before routing",
+      "tools/call active same-objective waits before validation-plan requirement",
       routeActive.status === 200 && ra?.lane === null && ra?.disposition === "WAIT_ACTIVE_WORK_SAME_OBJECTIVE" && ra?.preflight?.shouldExecute === false,
       { status: routeActive.status, disposition: ra?.disposition, lane: ra?.lane }
     ));
