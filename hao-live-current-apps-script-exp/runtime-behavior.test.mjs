@@ -167,6 +167,14 @@ test('happy path returns private formal current without credential/id leakage', 
   assert.equal(serialized.includes('oauth'), false);
 });
 
+test('dashboard pending and blocked remain raw source counts only', () => {
+  const ctx = makeRuntime();
+  const out = ctx.getPrivateFormalCurrent();
+  assert.equal(out.system.counts.pending, 2);
+  assert.equal(out.system.counts.blocked, 6);
+  assert.equal(out.conversationCurrent.status, 'EXTERNAL_REQUIRED');
+});
+
 test('stale pointer re-resolves to the unique CURRENT Hao row even with historical duplicate', () => {
   const ctx = makeRuntime({
     rows: {
