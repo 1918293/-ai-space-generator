@@ -53,17 +53,33 @@ function readCurrentControl_(sheet, expectedKey, expectedRow) {
   let row = sheet.getRange(expectedRow, 1, 1, 6).getDisplayValues()[0];
   let resolvedRow = expectedRow;
 
-  if (row[0] !== expectedKey || row[2] !== 'CURRENT' || row[3] !== 'Hao') {
-    const match = sheet.getRange('A1:A560')
+  if (!isValidCurrentControlRow_(row, expectedKey)) {
+    const lastRow = Math.max(sheet.getLastRow(), expectedRow);
+    const matches = sheet.getRange(`A1:A${lastRow}`)
       .createTextFinder(expectedKey)
       .matchEntireCell(true)
-      .findNext();
-    if (!match) throw new Error(`HAO_CURRENT_CONTROL_NOT_FOUND:${expectedKey}`);
-    resolvedRow = match.getRow();
-    row = sheet.getRange(resolvedRow, 1, 1, 6).getDisplayValues()[0];
+      .findAll();
+
+    const currentCandidates = matches
+      .map((match) => {
+        const candidateRowNumber = match.getRow();
+        const candidateRow = sheet.getRange(candidateRowNumber, 1, 1, 6).getDisplayValues()[0];
+        return { candidateRowNumber, candidateRow };
+      })
+      .filter(({ candidateRow }) => isValidCurrentControlRow_(candidateRow, expectedKey));
+
+    if (currentCandidates.length === 0) {
+      throw new Error(`HAO_CURRENT_CONTROL_NOT_FOUND:${expectedKey}`);
+    }
+    if (currentCandidates.length > 1) {
+      throw new Error(`HAO_CURRENT_CONTROL_AMBIGUOUS:${expectedKey}`);
+    }
+
+    resolvedRow = currentCandidates[0].candidateRowNumber;
+    row = currentCandidates[0].candidateRow;
   }
 
-  if (row[0] !== expectedKey || row[2] !== 'CURRENT' || row[3] !== 'Hao') {
+  if (!isValidCurrentControlRow_(row, expectedKey)) {
     throw new Error(`HAO_CURRENT_CONTROL_INVALID:${expectedKey}`);
   }
 
@@ -75,6 +91,15 @@ function readCurrentControl_(sheet, expectedKey, expectedRow) {
     resolvedRow,
     pointerStatus: resolvedRow === expectedRow ? 'EXPECTED_POINTER' : 'TARGETED_RE_RESOLVED'
   };
+}
+
+function isValidCurrentControlRow_(row, expectedKey) {
+  return Boolean(
+    row &&
+    row[0] === expectedKey &&
+    row[2] === 'CURRENT' &&
+    row[3] === 'Hao'
+  );
 }
 
 function parseDashboard_(rows) {
