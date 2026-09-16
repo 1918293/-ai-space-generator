@@ -7,7 +7,7 @@ const PORT = Number(process.env.PORT || 10000);
 const HOST = "0.0.0.0";
 const RESOURCE_URI = "ui://widget/hao-system-control-v3.html";
 const RESOURCE_MIME = "text/html;profile=mcp-app";
-const VERSION = "0.4.4-maintenance-preflight-exp";
+const VERSION = "0.4.5-active-work-awareness-exp";
 const RELEASE_COMMIT = process.env.RENDER_GIT_COMMIT || "unknown";
 const EXPECTED_WIDGET_BYTES = 18232;
 const EXPECTED_WIDGET_SHA256 = "6f96846097c3b6e119febca10e53b54c0996d78405c23b2f3795829d7f57a394";
@@ -29,19 +29,21 @@ const SNAPSHOT = {
   releaseVersion: VERSION,
   releaseCommit: RELEASE_COMMIT,
   purpose: "提供 Hao System 的手機優先、唯讀控制面：查看部署、路由與系統邊界，不直接修改正式 Authority。",
-  coreProblem: "把 ChatGPT、雲端執行與正式 Authority 分離，讓 Auto 能選擇正確 execution lane，同時避免 public MCP 或工具便利性繞過正式寫入控制。",
-  currentFocus: "No-computer Hao Control Surface：完整 Widget fidelity 已驗證，Task Router 維持 read-only。",
-  nextAction: "只有在出現可信的 private-data / custom-app authentication surface 時，才接入動態私人 Current；在此之前保持 public control surface 不讀取私有 Authority。",
-  desiredOutcome: "Hao 只需在 ChatGPT／手機端提出目標；系統依任務性質選擇 private、compute、control 或 formal-write lane，且每一條路都有可讀回的邊界。",
-  doNotBuild: "不把 public Render 變成正式 Authority、不加入任意寫入、不公開私人 Drive 資料、不為了功能展示重建第二套 Gateway／資料庫／Agent runtime。",
+  coreProblem: "把 ChatGPT、雲端執行與正式 Authority 分離，讓 Auto 能選擇正確 execution lane，同時避免 stale Current、重工與 public MCP 繞過正式寫入控制。",
+  currentFocus: "No-computer Hao Control Surface：Shared Maintenance Preflight 已加入 Resolved Current 與 Active Work Awareness。",
+  nextAction: "只在 fresh Current、target identity、active-work relation、material delta 與 necessity 都充分時執行 consequential action。",
+  desiredOutcome: "Hao 只需提出目標；系統先辨識已完成、進行中、等待依賴或真正需要執行，再選 execution lane。",
+  doNotBuild: "不把 public Render 變成正式 Authority、不加入任意寫入、不公開私人 Drive 資料、不建立第二套 Gateway／工作資料庫／Agent runtime。",
   systemAdmin: {
     surfaceScope: "PUBLIC_NON_AUTHORITY_STATIC",
     privateLifecycleCounts: "NOT_PUBLISHED",
-    currentActionableWorkload: "EXTERNAL_RESOLUTION_REQUIRED",
+    currentActionableWorkload: "RESOLVED_CURRENT_REQUIRED",
     runtimeHealth: "FRESH_PROVIDER_READ_REQUIRED",
     ciHealth: "FRESH_PROVIDER_READ_REQUIRED",
     maintenanceMutation: "DISABLED",
-    maintenancePreflight: "SHARED_PREFLIGHT_BEFORE_EXECUTION"
+    maintenancePreflight: "SHARED_PREFLIGHT_BEFORE_EXECUTION",
+    currentResolution: "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT",
+    activeWorkAwareness: "REQUIRED_BEFORE_CONSEQUENTIAL_PREFLIGHT"
   },
   architecture: [
     { level: 3, label: "Private Lane", role: "ChatGPT / Work + Google Drive；私人資料與 connected-app 工作。" },
@@ -64,13 +66,31 @@ const SNAPSHOT = {
   }
 };
 
+const ACTIVE_WORK_SCHEMA = {
+  type: "object",
+  properties: {
+    checked: { type: "boolean" },
+    status: { type: "string", enum: ["NONE", "ACTIVE", "COMPLETED", "BLOCKED", "UNKNOWN"] },
+    relation: { type: "string", enum: ["NONE", "SAME_OBJECTIVE", "SAME_TARGET_DIFFERENT_OBJECTIVE", "UPSTREAM_DEPENDENCY", "INDEPENDENT", "UNKNOWN"] },
+    targetConflict: { type: "boolean" },
+    expectedDeltaOverlap: { type: "boolean" },
+    outcomeVerified: { type: "boolean" },
+    source: { type: "string" },
+    runKey: { type: "string" }
+  },
+  additionalProperties: false
+};
+
 const PREFLIGHT_SCHEMA = {
   type: "object",
   properties: {
     provider: { type: "string", enum: ["GITHUB", "RENDER", "DRIVE", "APPS_SCRIPT", "IMAGE_PIPELINE", "GENERIC"] },
     action: { type: "string" },
     freshStateRead: { type: "boolean" },
+    currentStateResolved: { type: "boolean" },
     targetIdentityVerified: { type: "boolean" },
+    activeWorkRequired: { type: "boolean" },
+    activeWork: ACTIVE_WORK_SCHEMA,
     mutating: { type: "boolean" },
     consequential: { type: "boolean" },
     formalMutation: { type: "boolean" },
@@ -113,7 +133,7 @@ const TOOLS = [
   },
   {
     name: "route_hao_task",
-    description: "Run shared maintenance preflight when supplied, then classify a task into the Hao no-computer execution lane. Read-only classification only; this tool never performs the routed action.",
+    description: "Run resolved-Current and active-work-aware maintenance preflight when supplied, then classify a task into the Hao no-computer execution lane. Read-only classification only; this tool never performs the routed action.",
     inputSchema: { type: "object", properties: ROUTE_PROPERTIES, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
   }
@@ -176,6 +196,7 @@ const server = http.createServer((req, res) => {
       systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
       maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
       maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
+      activeWorkAwareness: SNAPSHOT.systemAdmin.activeWorkAwareness,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -197,6 +218,7 @@ const server = http.createServer((req, res) => {
       systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
       maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
       maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
+      activeWorkAwareness: SNAPSHOT.systemAdmin.activeWorkAwareness,
       taskRouter: "READ_ONLY",
       widgetBytes: WIDGET_BYTES,
       widgetSha256: WIDGET_SHA256,
@@ -293,6 +315,7 @@ server.listen(PORT, HOST, () => {
     systemAdminScope: SNAPSHOT.systemAdmin.surfaceScope,
     maintenanceMutation: SNAPSHOT.systemAdmin.maintenanceMutation,
     maintenancePreflight: SNAPSHOT.systemAdmin.maintenancePreflight,
+    activeWorkAwareness: SNAPSHOT.systemAdmin.activeWorkAwareness,
     taskRouter: "READ_ONLY",
     widgetBytes: WIDGET_BYTES,
     widgetSha256: WIDGET_SHA256,
