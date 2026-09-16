@@ -11,9 +11,13 @@ assert.equal(manifest.webapp.access, 'MYSELF');
 assert.equal(manifest.webapp.executeAs, 'USER_DEPLOYING');
 assert.deepEqual(manifest.oauthScopes, ['https://www.googleapis.com/auth/spreadsheets.readonly']);
 
+assert.match(code, /HAO_SCHEMA_VERSION = '0\.3\.0-exp'/);
 assert.match(code, /PropertiesService\.getScriptProperties\(\)/);
 assert.match(code, /SpreadsheetApp\.openById\(spreadsheetId\)/);
 assert.match(code, /authorityMutation:\s*false/);
+assert.match(code, /RAW_INTAKE_LIFECYCLE_COUNTS/);
+assert.match(code, /EXTERNAL_PROVIDER_READ_REQUIRED/);
+assert.match(code, /NOT_PERFORMED_BY_THIS_READ_ONLY_APP/);
 assert.match(code, /EXTERNAL_REQUIRED/);
 assert.match(code, /createTextFinder\(expectedKey\)/);
 assert.match(code, /matchEntireCell\(true\)/);
