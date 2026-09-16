@@ -1,0 +1,72 @@
+name: Hao Cloud Toolchain Probe
+
+on:
+  push:
+    branches:
+      - exp/hao-system-control-render
+    paths:
+      - '.github/workflows/hao-cloud-toolchain-probe.yml'
+      - 'hao-cloud-runtime/toolchain-trigger.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HAO_ARTIFACT_ROLE: NON_AUTHORITY_EXP_EXECUTION
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Runtime identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "HAO_EVENT=CLOUD_TOOLCHAIN_PROBE"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          echo "HAO_ARTIFACT_ROLE=$HAO_ARTIFACT_ROLE"
+          uname -a
+
+      - name: CLI inventory
+        shell: bash
+        run: |
+          set +e
+          for cmd in python3 node git jq ffmpeg magick convert compare identify pdftotext pdfinfo gs dot neato pandoc inkscape zip unzip rg; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              printf '%s=FOUND path=%s\n' "$cmd" "$(command -v "$cmd")"
+            else
+              printf '%s=MISSING\n' "$cmd"
+            fi
+          done
+          echo "--- versions ---"
+          python3 --version 2>/dev/null || true
+          node --version 2>/dev/null || true
+          git --version 2>/dev/null || true
+          ffmpeg -version 2>/dev/null | head -n1 || true
+          convert -version 2>/dev/null | head -n1 || true
+          pdftotext -v 2>&1 | head -n1 || true
+          gs --version 2>/dev/null || true
+          dot -V 2>&1 || true
+          pandoc --version 2>/dev/null | head -n1 || true
+
+      - name: Python module inventory
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          mods = ['PIL','cv2','numpy','pandas','openpyxl','matplotlib','fitz','pypdf','reportlab','lxml','bs4','networkx','scipy','skimage']
+          for m in mods:
+              print(f"{m}={'FOUND' if importlib.util.find_spec(m) else 'MISSING'}")
+          PY
+
+      - name: Safety boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$HAO_ARTIFACT_ROLE" = "NON_AUTHORITY_EXP_EXECUTION"
+          echo "formal_authority=UNTOUCHED"
+          echo "secrets_used=NONE"
+          echo "persistent_storage=NONE"
+          echo "result=PASS"
