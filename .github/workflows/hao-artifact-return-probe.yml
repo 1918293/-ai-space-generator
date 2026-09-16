@@ -1,0 +1,55 @@
+name: Hao Artifact Return Probe
+
+on:
+  push:
+    branches:
+      - exp/hao-system-control-render
+    paths:
+      - '.github/workflows/hao-artifact-return-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HAO_ARTIFACT_ROLE: NON_AUTHORITY_EXP_OUTPUT
+
+jobs:
+  artifact-return:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Generate synthetic output
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          printf '{"artifactRole":"%s","source":"synthetic-only","formalAuthority":"UNTOUCHED","commit":"%s"}\n' "$HAO_ARTIFACT_ROLE" "$GITHUB_SHA" > out/result.json
+          python3 - <<'PY'
+          import struct, zlib
+          w=h=16
+          raw=b''.join(b'\x00'+bytes([20,120,220])*w for _ in range(h))
+          def chunk(t,d):
+              return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+          png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b'')
+          open('out/synthetic.png','wb').write(png)
+          PY
+          sha256sum out/result.json out/synthetic.png | tee out/SHA256SUMS
+
+      - name: Verify safety boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$HAO_ARTIFACT_ROLE" = "NON_AUTHORITY_EXP_OUTPUT"
+          echo "private_input=NONE"
+          echo "secrets_used=NONE"
+          echo "formal_authority=UNTOUCHED"
+          echo "result=PASS"
+
+      - name: Upload synthetic artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-synthetic-return-${{ github.run_id }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: error
