@@ -1,4 +1,4 @@
-export const PREFLIGHT_VERSION = '0.2.0-exp';
+export const PREFLIGHT_VERSION = '0.3.0-exp';
 
 export const PREFLIGHT_DECISIONS = Object.freeze({
   PROCEED: 'PROCEED',
@@ -15,6 +15,7 @@ export const PREFLIGHT_DECISIONS = Object.freeze({
   BLOCKED_ACTIVE_WORK_CHECK_REQUIRED: 'BLOCKED_ACTIVE_WORK_CHECK_REQUIRED',
   BLOCKED_ACTIVE_WORK_VISIBILITY_UNKNOWN: 'BLOCKED_ACTIVE_WORK_VISIBILITY_UNKNOWN',
   BLOCKED_NECESSITY_UNPROVEN: 'BLOCKED_NECESSITY_UNPROVEN',
+  BLOCKED_VALIDATION_PLAN_REQUIRED: 'BLOCKED_VALIDATION_PLAN_REQUIRED',
 });
 
 export const PREFLIGHT_PROVIDERS = Object.freeze([
@@ -43,6 +44,17 @@ export const ACTIVE_WORK_STATUSES = Object.freeze([
   'UNKNOWN',
 ]);
 
+export const VALIDATION_EVIDENCE_TYPES = Object.freeze([
+  'REGRESSION_OR_HISTORY_REPLAY',
+  'SYNTHETIC_OR_ADVERSARIAL_MATRIX',
+  'DETERMINISTIC_PROPERTY_OR_FUZZ',
+  'MUTATION_TESTING',
+  'FAULT_INJECTION',
+  'CONCURRENCY_OR_STATE_TRANSITION_REPLAY',
+  'PROVIDER_READBACK',
+  'POST_RELEASE_STABILITY',
+]);
+
 function normalizeFingerprint(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -65,6 +77,15 @@ function normalizeActiveWork(input = {}) {
   };
 }
 
+function normalizeValidationPlan(input = {}) {
+  const raw = Array.isArray(input.selectedValidationEvidence) ? input.selectedValidationEvidence : [];
+  const selectedEvidence = [...new Set(raw.filter((item) => VALIDATION_EVIDENCE_TYPES.includes(item)))];
+  return {
+    ready: input.validationPlanReady === true && selectedEvidence.length > 0,
+    selectedEvidence,
+  };
+}
+
 function result(input, decision, reason, extra = {}) {
   const formalMutation = input.formalMutation === true;
   const shouldExecute = decision === PREFLIGHT_DECISIONS.PROCEED;
@@ -79,7 +100,7 @@ function result(input, decision, reason, extra = {}) {
     reason,
     executionBoundary: formalMutation ? 'SINGLE_WRITE_GATEWAY' : 'NORMAL_EXECUTION_LANE',
     postconditions: shouldExecute
-      ? ['EXECUTE_ONLY_REQUESTED_ACTION', 'READBACK_TARGET', 'VERIFY_OUTCOME']
+      ? ['EXECUTE_ONLY_REQUESTED_ACTION', 'EXECUTE_AGAINST_DECLARED_VALIDATION_PLAN', 'READBACK_TARGET', 'VERIFY_OUTCOME']
       : ['NO_DOWNSTREAM_MUTATION', 'RETAIN_DECISION_EVIDENCE'],
     ...extra,
   };
@@ -94,6 +115,7 @@ export function evaluateMaintenancePreflight(input = {}) {
   const desiredFingerprint = normalizeFingerprint(input.desiredFingerprint);
   const activeWorkRequired = consequential || input.activeWorkRequired === true;
   const activeWork = normalizeActiveWork(input);
+  const validationPlan = normalizeValidationPlan(input);
 
   if (!freshStateRead) {
     return result(input, PREFLIGHT_DECISIONS.BLOCKED_FRESH_STATE_REQUIRED,
@@ -161,10 +183,17 @@ export function evaluateMaintenancePreflight(input = {}) {
       'Consequential work is blocked until a material need for the action is established.', { activeWork });
   }
 
+  if (consequential && !validationPlan.ready) {
+    return result(input, PREFLIGHT_DECISIONS.BLOCKED_VALIDATION_PLAN_REQUIRED,
+      'Consequential work requires a minimum-sufficient validation plan before execution, including at least one declared evidence type.',
+      { activeWork, validationPlan });
+  }
+
   return result(input, PREFLIGHT_DECISIONS.PROCEED,
-    'Fresh state, resolved Current, target identity, active-work awareness, material delta, and maintenance necessity are sufficient to proceed.',
+    'Fresh state, resolved Current, target identity, active-work awareness, material delta, maintenance necessity, and a declared validation plan are sufficient to proceed.',
     {
       activeWork,
+      validationPlan,
       evidence: {
         freshStateRead: true,
         currentStateResolved: consequential ? true : null,
@@ -173,6 +202,8 @@ export function evaluateMaintenancePreflight(input = {}) {
         activeWorkRelation: activeWorkRequired ? activeWork.relation : null,
         materialDelta: currentFingerprint && desiredFingerprint ? currentFingerprint !== desiredFingerprint : 'NOT_FINGERPRINT_COMPARABLE',
         necessityEstablished: consequential ? true : null,
+        validationPlanReady: consequential ? true : null,
+        selectedValidationEvidence: consequential ? validationPlan.selectedEvidence : [],
       }
     }
   );
@@ -180,7 +211,7 @@ export function evaluateMaintenancePreflight(input = {}) {
 
 export const MAINTENANCE_PREFLIGHT_POLICY = Object.freeze({
   status: 'EXP_NON_AUTHORITY',
-  purpose: 'Prevent stale-state action, duplicate active work, unnecessary retries, writes, deploys, transforms, and maintenance before downstream execution.',
+  purpose: 'Prevent stale-state action, duplicate active work, unnecessary retries, writes, deploys, transforms, and maintenance before downstream execution, and require declared success/failure evidence before consequential execution.',
   ruleOrder: [
     'FRESH_STATE',
     'CURRENT_RESOLUTION',
@@ -190,9 +221,11 @@ export const MAINTENANCE_PREFLIGHT_POLICY = Object.freeze({
     'OBJECTIVE_ALREADY_SATISFIED',
     'MATERIAL_DELTA',
     'MAINTENANCE_NECESSITY',
+    'VALIDATION_PLAN',
     'PROCEED',
   ],
   activeWorkRelations: ACTIVE_WORK_RELATIONS,
+  validationEvidenceTypes: VALIDATION_EVIDENCE_TYPES,
   noOpIsValidOutcome: true,
   waitIsValidOutcome: true,
   formalMutationBoundary: 'SINGLE_WRITE_GATEWAY',
