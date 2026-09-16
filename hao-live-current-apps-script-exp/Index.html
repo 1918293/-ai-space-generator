@@ -37,6 +37,7 @@
       <h2>System Admin</h2>
       <div class="grid" id="metrics"></div>
       <p class="note">Pending / Blocked are raw Intake lifecycle counts from 00_Dashboard. They are not the resolved Current workload. Current actionable work must be resolved against live conversation intent, formal Current controls, supersession, and fresh provider state.</p>
+      <p id="admin-boundary" class="note"></p>
     </div>
     <div class="card">
       <h2>Current controls</h2>
@@ -80,6 +81,9 @@
     const metrics = document.getElementById('metrics');
     const c = data.system.counts || {};
     metrics.replaceChildren(item('System', data.system.status), item('Navigation', data.system.currentNavigation), item('Pending · Raw Intake', c.pending), item('Blocked · Raw Intake', c.blocked), item('Intake', c.intake), item('READ_BACK_OK', c.readBackOk));
+
+    const admin = data.systemAdmin || {};
+    text('admin-boundary', `Current=${admin.currentActionableWorkload || '—'} · Runtime=${admin.runtimeHealth || '—'} · CI=${admin.ciHealth || '—'} · Mutation=${admin.maintenanceMutation || '—'}`);
 
     const controls = document.getElementById('controls');
     controls.replaceChildren();
