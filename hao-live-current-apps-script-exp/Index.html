@@ -15,6 +15,10 @@
     code { font-size: 12px; }
     ul { padding-left: 20px; }
     .error { color: #9b1c1c; }
+    button { border: 1px solid #ccc; border-radius: 10px; background: #fff; padding: 8px 10px; margin: 4px 4px 4px 0; font: inherit; }
+    button:disabled { opacity: .5; }
+    .project-detail dt { font-size: 12px; opacity: .65; margin-top: 8px; }
+    .project-detail dd { margin: 2px 0 0; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -35,7 +39,9 @@
     </div>
     <div class="card">
       <h2>Project navigation</h2>
-      <ul id="projects"></ul>
+      <div id="projects"></div>
+      <div id="project-status"></div>
+      <dl id="project-detail" class="project-detail"></dl>
     </div>
     <div class="card">
       <h2>Conversation Current</h2>
@@ -51,15 +57,27 @@
     const b = document.createElement('div'); b.className = 'value'; b.textContent = value ?? '—';
     box.append(a,b); return box;
   };
+  const detail = (label, value, asLink = false) => {
+    const dt = document.createElement('dt'); dt.textContent = label;
+    const dd = document.createElement('dd');
+    if (asLink && value) {
+      const a = document.createElement('a'); a.href = value; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = value;
+      dd.appendChild(a);
+    } else {
+      dd.textContent = value ?? '—';
+    }
+    return [dt, dd];
+  };
 
   function render(data) {
     text('authority', data.formalAuthority);
     text('freshness', `${data.freshness.source} · ${data.freshness.readAt}`);
     const metrics = document.getElementById('metrics');
     const c = data.system.counts || {};
-    metrics.append(item('System', data.system.status), item('Navigation', data.system.currentNavigation), item('Pending', c.pending), item('Blocked', c.blocked), item('Intake', c.intake), item('READ_BACK_OK', c.readBackOk));
+    metrics.replaceChildren(item('System', data.system.status), item('Navigation', data.system.currentNavigation), item('Pending', c.pending), item('Blocked', c.blocked), item('Intake', c.intake), item('READ_BACK_OK', c.readBackOk));
 
     const controls = document.getElementById('controls');
+    controls.replaceChildren();
     Object.values(data.controls || {}).forEach((control) => {
       const li = document.createElement('li');
       li.textContent = `${control.key} · ${control.state} · ${control.pointerStatus} · ${control.updatedAt}`;
@@ -67,15 +85,49 @@
     });
 
     const projects = document.getElementById('projects');
+    projects.replaceChildren();
     (data.system.projectPointers || []).forEach((p) => {
-      const li = document.createElement('li');
-      li.textContent = `${p.label} · ${p.indexId}`;
-      projects.appendChild(li);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = `${p.label} · ${p.indexId}`;
+      button.addEventListener('click', () => loadProject(p.indexId, button));
+      projects.appendChild(button);
     });
 
     text('conversation', data.conversationCurrent.note);
     text('status', `LIVE · schema ${data.schemaVersion}`);
     document.getElementById('content').hidden = false;
+  }
+
+  function loadProject(indexId, button) {
+    const status = document.getElementById('project-status');
+    status.className = '';
+    status.textContent = `Fresh-reading ${indexId}…`;
+    button.disabled = true;
+    google.script.run
+      .withSuccessHandler((data) => {
+        const p = data.project;
+        const dl = document.getElementById('project-detail');
+        dl.replaceChildren(
+          ...detail('Index', p.indexId),
+          ...detail('Title', p.title),
+          ...detail('Domain', p.primaryDomain),
+          ...detail('Role', p.secondaryRole),
+          ...detail('Authority', p.authorityLevel),
+          ...detail('Lifecycle', p.lifecycleState),
+          ...detail('Evidence', p.evidenceClass),
+          ...detail('Indexed at', p.indexedAt),
+          ...detail('Open', p.url, true),
+        );
+        status.textContent = `LIVE · row ${p.resolvedRow}`;
+        button.disabled = false;
+      })
+      .withFailureHandler((error) => {
+        status.className = 'error';
+        status.textContent = `Project unavailable: ${error && error.message ? error.message : error}`;
+        button.disabled = false;
+      })
+      .getPrivateProjectIndex(indexId);
   }
 
   function fail(error) {
