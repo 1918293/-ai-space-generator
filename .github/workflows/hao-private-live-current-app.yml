@@ -1,0 +1,17 @@
+name: Hao Private Live Current App
+on:
+  push:
+    branches: [exp/hao-system-control-render]
+    paths:
+      - 'hao-live-current-apps-script-exp/**'
+      - '.github/workflows/hao-private-live-current-app.yml'
+permissions:
+  contents: read
+jobs:
+  validate-private-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate package contract
+        run: node hao-live-current-apps-script-exp/package-contract.test.mjs
