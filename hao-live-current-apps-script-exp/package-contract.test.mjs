@@ -18,6 +18,12 @@ assert.match(code, /EXTERNAL_REQUIRED/);
 assert.match(code, /createTextFinder\(expectedKey\)/);
 assert.match(code, /matchEntireCell\(true\)/);
 
+assert.match(html, />System Admin</);
+assert.match(html, /Pending · Raw Intake/);
+assert.match(html, /Blocked · Raw Intake/);
+assert.match(html, /They are not the resolved Current workload/);
+assert.match(html, /fresh provider state/);
+
 const denied = [
   'ANYONE_ANONYMOUS',
   '"ANYONE"',
@@ -45,5 +51,6 @@ console.log(JSON.stringify({
   oauthScopes: manifest.oauthScopes,
   spreadsheetIdInRepo: false,
   mutationSurface: false,
-  conversationCurrentAuthority: false
+  conversationCurrentAuthority: false,
+  systemAdminRawLifecycleSemantics: true
 }));
