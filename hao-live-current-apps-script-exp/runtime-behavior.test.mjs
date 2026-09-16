@@ -153,12 +153,15 @@ function test(name, fn) {
 test('happy path returns private formal current without credential/id leakage', () => {
   const ctx = makeRuntime();
   const out = ctx.getPrivateFormalCurrent();
-  assert.equal(out.schemaVersion, '0.2.0-exp');
+  assert.equal(out.schemaVersion, '0.3.0-exp');
   assert.equal(out.formalAuthority, 'Google Drive');
   assert.equal(out.authorityMutation, false);
   assert.equal(out.system.status, 'ACTIVE');
   assert.equal(out.system.counts.pending, 2);
   assert.equal(out.system.counts.blocked, 6);
+  assert.equal(out.systemAdmin.dashboardCountSemantics, 'RAW_INTAKE_LIFECYCLE_COUNTS');
+  assert.equal(out.systemAdmin.currentActionableWorkload, 'EXTERNAL_RESOLUTION_REQUIRED');
+  assert.equal(out.systemAdmin.maintenanceMutation, 'NOT_PERFORMED_BY_THIS_READ_ONLY_APP');
   assert.equal(out.system.projectPointers[0].indexId, 'IDX-048');
   assert.equal(out.controls.ACTION_ADMISSION_BINDING.pointerStatus, 'EXPECTED_POINTER');
   assert.equal(out.conversationCurrent.status, 'EXTERNAL_REQUIRED');
@@ -172,6 +175,8 @@ test('dashboard pending and blocked remain raw source counts only', () => {
   const out = ctx.getPrivateFormalCurrent();
   assert.equal(out.system.counts.pending, 2);
   assert.equal(out.system.counts.blocked, 6);
+  assert.equal(out.systemAdmin.dashboardCountSemantics, 'RAW_INTAKE_LIFECYCLE_COUNTS');
+  assert.equal(out.systemAdmin.currentActionableWorkload, 'EXTERNAL_RESOLUTION_REQUIRED');
   assert.equal(out.conversationCurrent.status, 'EXTERNAL_REQUIRED');
 });
 
