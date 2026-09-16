@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Hao System · Private Formal Current</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f6f6f6; color: #111; }
+    main { max-width: 760px; margin: 0 auto; padding: 20px; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 14px; padding: 16px; margin: 12px 0; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .metric { padding: 12px; border: 1px solid #e3e3e3; border-radius: 10px; }
+    .label { font-size: 12px; opacity: .65; }
+    .value { font-size: 20px; margin-top: 4px; word-break: break-word; }
+    code { font-size: 12px; }
+    ul { padding-left: 20px; }
+    .error { color: #9b1c1c; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Hao System</h1>
+  <p>Private Formal Current · Google identity boundary</p>
+  <div id="status" class="card">Fresh-reading Google Drive…</div>
+  <section id="content" hidden>
+    <div class="card">
+      <div class="label">Formal Authority</div>
+      <div id="authority" class="value"></div>
+      <div id="freshness"></div>
+    </div>
+    <div class="card grid" id="metrics"></div>
+    <div class="card">
+      <h2>Current controls</h2>
+      <ul id="controls"></ul>
+    </div>
+    <div class="card">
+      <h2>Project navigation</h2>
+      <ul id="projects"></ul>
+    </div>
+    <div class="card">
+      <h2>Conversation Current</h2>
+      <p id="conversation"></p>
+    </div>
+  </section>
+</main>
+<script>
+  const text = (id, value) => { document.getElementById(id).textContent = value ?? '—'; };
+  const item = (label, value) => {
+    const box = document.createElement('div'); box.className = 'metric';
+    const a = document.createElement('div'); a.className = 'label'; a.textContent = label;
+    const b = document.createElement('div'); b.className = 'value'; b.textContent = value ?? '—';
+    box.append(a,b); return box;
+  };
+
+  function render(data) {
+    text('authority', data.formalAuthority);
+    text('freshness', `${data.freshness.source} · ${data.freshness.readAt}`);
+    const metrics = document.getElementById('metrics');
+    const c = data.system.counts || {};
+    metrics.append(item('System', data.system.status), item('Navigation', data.system.currentNavigation), item('Pending', c.pending), item('Blocked', c.blocked), item('Intake', c.intake), item('READ_BACK_OK', c.readBackOk));
+
+    const controls = document.getElementById('controls');
+    Object.values(data.controls || {}).forEach((control) => {
+      const li = document.createElement('li');
+      li.textContent = `${control.key} · ${control.state} · ${control.pointerStatus} · ${control.updatedAt}`;
+      controls.appendChild(li);
+    });
+
+    const projects = document.getElementById('projects');
+    (data.system.projectPointers || []).forEach((p) => {
+      const li = document.createElement('li');
+      li.textContent = `${p.label} · ${p.indexId}`;
+      projects.appendChild(li);
+    });
+
+    text('conversation', data.conversationCurrent.note);
+    text('status', `LIVE · schema ${data.schemaVersion}`);
+    document.getElementById('content').hidden = false;
+  }
+
+  function fail(error) {
+    const el = document.getElementById('status');
+    el.className = 'card error';
+    el.textContent = `Live Current unavailable: ${error && error.message ? error.message : error}`;
+  }
+
+  google.script.run.withSuccessHandler(render).withFailureHandler(fail).getPrivateFormalCurrent();
+</script>
+</body>
+</html>
