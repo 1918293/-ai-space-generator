@@ -79,7 +79,7 @@ jobs:
           if (wait.lane !== null) process.exit(1);
           if (wait.disposition !== 'WAIT_ACTIVE_WORK_SAME_OBJECTIVE') process.exit(1);
 
-          const proceed = routeTask({
+          const blockedNoPlan = routeTask({
             deterministicCompute: true,
             maintenancePreflight: {
               provider: 'GITHUB',
@@ -94,9 +94,30 @@ jobs:
               desiredFingerprint: 'new',
             }
           });
+          if (blockedNoPlan.lane !== null) process.exit(1);
+          if (blockedNoPlan.disposition !== 'BLOCKED_VALIDATION_PLAN_REQUIRED') process.exit(1);
+
+          const proceed = routeTask({
+            deterministicCompute: true,
+            maintenancePreflight: {
+              provider: 'GITHUB',
+              action: 'RUN_COMPUTE',
+              freshStateRead: true,
+              currentStateResolved: true,
+              targetIdentityVerified: true,
+              consequential: true,
+              necessityEstablished: true,
+              activeWork: none,
+              currentFingerprint: 'old',
+              desiredFingerprint: 'new',
+              validationPlanReady: true,
+              selectedValidationEvidence: ['SYNTHETIC_OR_ADVERSARIAL_MATRIX', 'PROVIDER_READBACK'],
+            }
+          });
           if (proceed.lane !== 'GITHUB_ACTIONS_PUBLIC') process.exit(1);
           if (ROUTER_POLICY.maintenancePreflight.noOpIsValidOutcome !== true) process.exit(1);
           if (ROUTER_POLICY.maintenancePreflight.waitIsValidOutcome !== true) process.exit(1);
           if (ROUTER_POLICY.maintenancePreflight.ruleOrder[3] !== 'ACTIVE_WORK_AWARENESS') process.exit(1);
-          console.log('current_and_active_work_preflight_before_routing=PASS');
+          if (ROUTER_POLICY.maintenancePreflight.ruleOrder[8] !== 'VALIDATION_PLAN') process.exit(1);
+          console.log('current_active_work_and_validation_plan_preflight_before_routing=PASS');
           NODE
