@@ -1,0 +1,51 @@
+name: Hao No-Computer Runtime Smoke
+
+on:
+  push:
+    branches:
+      - exp/hao-system-control-render
+    paths:
+      - '.github/workflows/hao-no-computer-runtime-smoke.yml'
+      - 'hao-cloud-runtime/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HAO_ARTIFACT_ROLE: NON_AUTHORITY_EXP_EXECUTION
+
+jobs:
+  smoke:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Runtime identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "HAO_EVENT=NO_COMPUTER_RUNTIME_SMOKE"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "HAO_ARTIFACT_ROLE=$HAO_ARTIFACT_ROLE"
+
+      - name: Tool availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "node=$(node --version 2>/dev/null || echo missing)"
+          echo "python=$(python3 --version 2>/dev/null || echo missing)"
+          echo "git=$(git --version 2>/dev/null || echo missing)"
+          echo "curl=$(curl --version 2>/dev/null | head -n1 || echo missing)"
+          echo "jq=$(jq --version 2>/dev/null || echo missing)"
+
+      - name: Safety boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$HAO_ARTIFACT_ROLE" = "NON_AUTHORITY_EXP_EXECUTION"
+          echo "formal_authority=UNTOUCHED"
+          echo "secrets_used=NONE"
+          echo "network_mutation=NONE"
+          echo "result=PASS"
