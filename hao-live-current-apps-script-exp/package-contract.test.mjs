@@ -27,6 +27,11 @@ assert.match(html, /Pending · Raw Intake/);
 assert.match(html, /Blocked · Raw Intake/);
 assert.match(html, /They are not the resolved Current workload/);
 assert.match(html, /fresh provider state/);
+assert.match(html, /admin-boundary/);
+assert.match(html, /Current=\$\{admin\.currentActionableWorkload/);
+assert.match(html, /Runtime=\$\{admin\.runtimeHealth/);
+assert.match(html, /CI=\$\{admin\.ciHealth/);
+assert.match(html, /Mutation=\$\{admin\.maintenanceMutation/);
 
 const denied = [
   'ANYONE_ANONYMOUS',
@@ -56,5 +61,6 @@ console.log(JSON.stringify({
   spreadsheetIdInRepo: false,
   mutationSurface: false,
   conversationCurrentAuthority: false,
-  systemAdminRawLifecycleSemantics: true
+  systemAdminRawLifecycleSemantics: true,
+  systemAdminExecutionBoundaryVisible: true
 }));
