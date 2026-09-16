@@ -1,0 +1,92 @@
+name: Hao Cloud Bootstrap Probe
+
+on:
+  push:
+    branches:
+      - exp/hao-system-control-render
+    paths:
+      - '.github/workflows/hao-cloud-bootstrap-probe.yml'
+      - 'hao-cloud-runtime/bootstrap-trigger.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HAO_ARTIFACT_ROLE: NON_AUTHORITY_EXP_EXECUTION
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Bootstrap deterministic OSS toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "bootstrap_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            ffmpeg imagemagick poppler-utils ghostscript graphviz ripgrep
+          python3 -m pip install --disable-pip-version-check --quiet --user \
+            pillow numpy pandas openpyxl pypdf reportlab networkx
+          echo "bootstrap_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Verify installed CLI toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffmpeg -version | head -n1
+          convert -version | head -n1
+          pdftotext -v 2>&1 | head -n1
+          gs --version
+          dot -V 2>&1
+          rg --version | head -n1
+
+      - name: Verify Python toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import PIL, numpy, pandas, openpyxl, pypdf, reportlab, networkx
+          print('python_toolchain=PASS')
+          print('Pillow', PIL.__version__)
+          print('numpy', numpy.__version__)
+          print('pandas', pandas.__version__)
+          print('openpyxl', openpyxl.__version__)
+          print('pypdf', pypdf.__version__)
+          print('networkx', networkx.__version__)
+          PY
+
+      - name: Synthetic image hard-gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from PIL import Image, ImageDraw, ImageChops
+          original = Image.new('RGB',(64,64),(120,120,120))
+          edited = original.copy()
+          d = ImageDraw.Draw(edited)
+          d.rectangle((20,20,43,43), fill=(160,160,160))
+          mask = Image.new('L',(64,64),0)
+          md = ImageDraw.Draw(mask)
+          md.rectangle((20,20,43,43), fill=255)
+          diff = ImageChops.difference(original, edited)
+          outside = Image.new('L',mask.size,255)
+          outside = ImageChops.subtract(outside,mask)
+          gray = diff.convert('L')
+          outside_diff = ImageChops.multiply(gray,outside)
+          bbox = outside_diff.getbbox()
+          print('outside_mask_diff_pixels=0' if bbox is None else 'outside_mask_diff_pixels=>0')
+          assert bbox is None
+          print('synthetic_pixel_hard_gate=PASS')
+          PY
+
+      - name: Safety boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$HAO_ARTIFACT_ROLE" = "NON_AUTHORITY_EXP_EXECUTION"
+          echo "formal_authority=UNTOUCHED"
+          echo "secrets_used=NONE"
+          echo "persistent_storage=NONE"
+          echo "result=PASS"
