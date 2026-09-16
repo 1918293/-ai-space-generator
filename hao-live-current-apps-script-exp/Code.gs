@@ -1,4 +1,4 @@
-const HAO_SCHEMA_VERSION = '0.2.0-exp';
+const HAO_SCHEMA_VERSION = '0.3.0-exp';
 const HAO_SPREADSHEET_PROPERTY = 'HAO_SYSTEM_SPREADSHEET_ID';
 
 const CURRENT_POINTERS = Object.freeze({
@@ -33,6 +33,13 @@ function getPrivateFormalCurrent() {
     artifactRole: 'PRIVATE_FORMAL_CURRENT_PROJECTION',
     formalAuthority: 'Google Drive',
     authorityMutation: false,
+    systemAdmin: {
+      dashboardCountSemantics: 'RAW_INTAKE_LIFECYCLE_COUNTS',
+      currentActionableWorkload: 'EXTERNAL_RESOLUTION_REQUIRED',
+      runtimeHealth: 'EXTERNAL_PROVIDER_READ_REQUIRED',
+      ciHealth: 'EXTERNAL_PROVIDER_READ_REQUIRED',
+      maintenanceMutation: 'NOT_PERFORMED_BY_THIS_READ_ONLY_APP'
+    },
     conversationCurrent: {
       status: 'EXTERNAL_REQUIRED',
       note: 'Mode/TASK are resolved by ChatGPT current conversation, not by this web app.'
