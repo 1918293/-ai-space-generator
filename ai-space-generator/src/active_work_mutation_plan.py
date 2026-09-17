@@ -22,14 +22,16 @@ class ActiveWorkReleaseReason(StrEnum):
 class ActiveWorkMutationPlan:
     """Pure planned slot delta; never performs Google Docs persistence.
 
-    `expected_generation` and `expected_ref` are preconditions for a later writer.
-    Google Docs revision-CAS remains an additional document-level precondition;
-    this object does not replace it or claim provider success.
+    `before` is the exact slot snapshot from which the plan was derived. A later
+    writer must fresh-read the Signal and require exact equality before writing,
+    in addition to generation/ref fencing and Google Docs revision-CAS. This
+    prevents a stale same-generation plan from overwriting a newer REFRESH.
     """
 
     transition: ActiveWorkTransition
     slot_id: str
     expected_generation: int
+    before: ActiveWorkSlot
     after: ActiveWorkSlot
     expected_ref: str = ""
     release_reason: ActiveWorkReleaseReason | None = None
@@ -127,6 +129,7 @@ def plan_active_work_claim(
         transition=transition,
         slot_id=before.slot_id,
         expected_generation=expected_generation,
+        before=before,
         after=after,
     )
 
@@ -172,6 +175,7 @@ def plan_active_work_refresh(
         slot_id=before.slot_id,
         expected_generation=expected_generation,
         expected_ref=active_ref,
+        before=before,
         after=after,
     )
 
@@ -216,6 +220,7 @@ def plan_active_work_release(
         slot_id=before.slot_id,
         expected_generation=expected_generation,
         expected_ref=active_ref,
+        before=before,
         after=after,
         release_reason=reason,
     )
