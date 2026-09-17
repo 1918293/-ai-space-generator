@@ -37,6 +37,7 @@ class HaoCanonicalCurrent:
     operational_version: int
     authority_refs: tuple[str, ...]
     verified: bool
+    intent_refs: tuple[str, ...] = ()
     work_identity_seed: CanonicalWorkIdentitySeed | None = None
 
 
@@ -75,6 +76,10 @@ class HaoDriveAuthorityReader(Protocol):
     Implementations may use Google Drive/Docs/Sheets APIs or another approved
     read surface, but must return direct source references rather than turning a
     projection or model summary into Authority.
+
+    If `intent_refs` are present on `HaoCanonicalCurrent`, they must come from a
+    separately trusted current-interaction/intent-binding path. A Drive reader
+    must not fabricate direct Hao intent provenance from stored content.
     """
 
     def resolve_current(
@@ -124,9 +129,11 @@ class HaoDriveCanonicalAuthoritySource:
     Authority according to the configured routes. This class never promotes the
     continuation projection into a second Authority owner.
 
-    A resolved work identity is also only projected when the verified Current
-    authority explicitly supplies a canonical semantic seed. Raw TASK text is
-    never normalized, embedded, or promoted into a work identity here.
+    A resolved work identity is projected only when a verified Current snapshot
+    supplies both a source-backed identity seed and trusted direct-Hao-intent
+    refs. Raw TASK text, Drive-only content, model output, embeddings, providers,
+    tools, RUN_KEYs, or mutation identities are never normalized or promoted into
+    a work identity here.
     """
 
     def __init__(self, reader: HaoDriveAuthorityReader, routes: HaoAuthorityRoutes) -> None:
@@ -157,6 +164,7 @@ class HaoDriveCanonicalAuthoritySource:
                     task=current.task,
                     operational_version=current.operational_version,
                     authority_refs=current.authority_refs,
+                    intent_refs=current.intent_refs,
                 )
             except ValueError:
                 return None
