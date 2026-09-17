@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
+import re
 from typing import Iterable
 
 from .operational_state import CommandActor
@@ -20,6 +21,7 @@ _PROVENANCE_FIELDS = (
     "deliverable_identity",
     "acceptance_identity",
 )
+_REQUIREMENT_VERIFICATION_ROW_ID = re.compile(r"^RV-[1-9][0-9]*$")
 
 
 @dataclass(frozen=True)
@@ -167,6 +169,41 @@ def normalized_authority_refs(values: Iterable[str]) -> tuple[str, ...]:
         duplicate_code="WORK_IDENTITY_AUTHORITY_REFS_DUPLICATE",
         required=True,
     )
+
+
+def requirement_verification_work_key(
+    verification_row_id: str,
+    *,
+    source_ref: str,
+    authority_refs: Iterable[str],
+) -> str:
+    """Validate the domain-native key for Requirement Verification work only.
+
+    A Requirement Verification row owns its own ongoing verification work grain.
+    The Runtime may reuse that canonical `RV-*` identifier as the `work_key` for
+    this family only when the reader also supplies a matching source ref that is
+    present in verified Current authority refs. Requirement IDs (`R-*`), RUN_KEYs,
+    task text and arbitrary strings therefore cannot silently become this
+    family's work identity.
+    """
+
+    row_id = _required_text(
+        verification_row_id,
+        "WORK_IDENTITY_REQUIREMENT_VERIFICATION_ID_REQUIRED",
+    ).upper()
+    if _REQUIREMENT_VERIFICATION_ROW_ID.fullmatch(row_id) is None:
+        raise ValueError("WORK_IDENTITY_REQUIREMENT_VERIFICATION_ID_INVALID")
+    ref = _required_text(
+        source_ref,
+        "WORK_IDENTITY_REQUIREMENT_VERIFICATION_SOURCE_REQUIRED",
+    )
+    refs = normalized_authority_refs(authority_refs)
+    if ref not in refs:
+        raise ValueError("WORK_IDENTITY_REQUIREMENT_VERIFICATION_SOURCE_NOT_CURRENT_AUTHORITY")
+    source_identity = ref.rsplit(":", 1)[-1].strip().upper()
+    if source_identity != row_id:
+        raise ValueError("WORK_IDENTITY_REQUIREMENT_VERIFICATION_SOURCE_MISMATCH")
+    return row_id
 
 
 def normalized_intent_refs(values: Iterable[str]) -> tuple[str, ...]:
