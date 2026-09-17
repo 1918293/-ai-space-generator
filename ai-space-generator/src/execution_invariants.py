@@ -6,7 +6,6 @@ import json
 import re
 
 from .control_gateway import PreModelContextReceipt
-from .execution_control import CompletionClaim, ExecutionRecord, RunPhase, can_claim
 from .operational_state import ActiveOperationalState
 
 
@@ -73,13 +72,4 @@ def context_receipt_is_current(
         receipt.mode == state.mode
         and receipt.task == state.task
         and receipt.operational_version == state.version
-    )
-
-
-def terminal_completion_renderable(record: ExecutionRecord) -> bool:
-    """Final prose may say COMPLETED only from a closed, evidence-valid record."""
-
-    return (
-        record.phase == RunPhase.CLOSED
-        and can_claim(record, CompletionClaim.COMPLETED).allowed
     )
