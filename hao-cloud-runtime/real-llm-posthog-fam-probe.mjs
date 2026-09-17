@@ -11,12 +11,12 @@ if (!apiKey) throw new Error('GEMINI_API_KEY missing');
 if (!posthogKey) throw new Error('POSTHOG_PROJECT_API_KEY missing');
 
 const started = Date.now();
-const model = 'gemini-2.5-flash-lite';
+const model = 'gemini-3.5-flash-lite';
 const input = 'Reply with exactly: HAO_FAM_REAL_LLM_PASS';
 const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
   method: 'POST',
   headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
-  body: JSON.stringify({ contents: [{ parts: [{ text: input }] }], generationConfig: { maxOutputTokens: 32, temperature: 0 } }),
+  body: JSON.stringify({ contents: [{ parts: [{ text: input }] }], generationConfig: { maxOutputTokens: 32 } }),
   signal: AbortSignal.timeout(60000),
 });
 const body = await response.json();
