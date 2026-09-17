@@ -11,7 +11,12 @@ from .canonical_semantic_reader import (
     GoogleWorkspaceCanonicalRangeReader,
     load_canonical_semantic_sources_json,
 )
-from .context_bound_reasoning import ContextBoundIntentModel, ContextBoundPreModelGateway, ContextBoundReasoningIngress
+from .context_bound_reasoning import (
+    ContextActiveWorkAdmissionResolver,
+    ContextBoundIntentModel,
+    ContextBoundPreModelGateway,
+    ContextBoundReasoningIngress,
+)
 from .context_bound_responses import build_openai_context_bound_intent_boundary
 from .context_reasoning_consumer import ContextBoundReasoningConsumer, OperationalStateSource
 from .context_reasoning_observability import (
@@ -212,6 +217,7 @@ def build_runtime_reasoning_consumer(
     control_plane: ControlPlaneGateway,
     reader: CanonicalRangeReader | None = None,
     model: ContextBoundIntentModel | None = None,
+    active_work_resolver: ContextActiveWorkAdmissionResolver | None = None,
     telemetry: RuntimeTelemetry | None = None,
 ) -> ContextBoundReasoningConsumer:
     """Compose the production first-model reasoning seam from deployment config.
@@ -219,9 +225,12 @@ def build_runtime_reasoning_consumer(
     No private source ID or canonical semantic text is embedded in public code.
     Route metadata selects logical refs; provider-backed semantic reading remains
     fresh and fail-closed; the interaction-facing consumer accepts only raw Hao
-    text plus run/event/sequence identity. If Runtime telemetry is configured for
-    the process, the existing ingress is decorated once with content-free stage
-    observation; no second reasoning or MCP telemetry path is created.
+    text plus run/event/sequence identity. When Active Work coordination is
+    configured, the existing pre-model gateway applies its read-only resolver
+    only after canonical work identity hydration and before the first model call.
+    If Runtime telemetry is configured for the process, the existing ingress is
+    decorated once with content-free stage observation; no second reasoning,
+    Active Work gateway, or MCP telemetry path is created.
     """
 
     sources = load_canonical_semantic_sources_json(
@@ -239,6 +248,7 @@ def build_runtime_reasoning_consumer(
     pre_model = ContextBoundPreModelGateway(
         PreModelContextGateway(ConfiguredContextReasoningResolver(routes)),
         ConfiguredCanonicalSemanticsResolver(semantic_reader, sources),
+        active_work_resolver=active_work_resolver,
     )
     ingress = ContextBoundReasoningIngress(
         pre_model=pre_model,
