@@ -157,7 +157,7 @@ def test_provenance_location_change_does_not_change_intent_semantics():
     baseline = projection()
     moved_sources = tuple(
         (field, source_class, "HAO_INTENT:EVENT-201")
-        if field == "objective"
+        if source_class == "HAO_INTENT"
         else (field, source_class, ref)
         for field, source_class, ref in FIELD_SOURCES
     )
