@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.control_gateway import PreModelContextRequest
 from src.hao_authority_resolver import (
     HaoAuthorityRoutes,
     HaoCanonicalCurrent,
@@ -11,29 +12,46 @@ from src.hao_authority_resolver import (
     HaoExistingWorkResult,
     HaoLookupResult,
 )
+from src.operational_state import CommandActor
 from src.resolved_work_identity import (
     CanonicalWorkIdentitySeed,
     WorkIdentityRelation,
     compare_work_identity,
     current_context_fingerprint,
+    direct_hao_intent_ref,
     resolve_work_identity_projection,
 )
 
 
+INTENT_TEXT = "Auto > 根據上述執行任務"
+INTENT_REF = direct_hao_intent_ref(
+    user_text=INTENT_TEXT,
+    actor=CommandActor.USER,
+    event_id="EVENT-200",
+)
+INTENT_REFS = (INTENT_REF,)
 AUTHORITY_REFS = (
     "CURRENT:WORK_KEY",
     "CURRENT:PROJECT",
     "CURRENT:TARGET",
+    "CURRENT:OBJECTIVE",
     "CURRENT:DELIVERABLE",
     "REQUIREMENTS:R-036",
 )
-INTENT_REFS = ("HAO_INTENT:EVENT-200",)
 FIELD_SOURCES = (
     ("work_key", "CURRENT_AUTHORITY", "CURRENT:WORK_KEY"),
     ("project_scope", "CURRENT_AUTHORITY", "CURRENT:PROJECT"),
     ("logical_target", "CURRENT_AUTHORITY", "CURRENT:TARGET"),
-    ("objective", "HAO_INTENT", "HAO_INTENT:EVENT-200"),
-    ("deliverable_identity", "HAO_INTENT", "HAO_INTENT:EVENT-200"),
+    ("objective", "HAO_INTENT", INTENT_REF),
+    ("deliverable_identity", "HAO_INTENT", INTENT_REF),
+    ("acceptance_identity", "CURRENT_AUTHORITY", "REQUIREMENTS:R-036"),
+)
+AUTHORITY_ONLY_FIELD_SOURCES = (
+    ("work_key", "CURRENT_AUTHORITY", "CURRENT:WORK_KEY"),
+    ("project_scope", "CURRENT_AUTHORITY", "CURRENT:PROJECT"),
+    ("logical_target", "CURRENT_AUTHORITY", "CURRENT:TARGET"),
+    ("objective", "CURRENT_AUTHORITY", "CURRENT:OBJECTIVE"),
+    ("deliverable_identity", "CURRENT_AUTHORITY", "CURRENT:DELIVERABLE"),
     ("acceptance_identity", "CURRENT_AUTHORITY", "REQUIREMENTS:R-036"),
 )
 SEED = CanonicalWorkIdentitySeed(
@@ -45,6 +63,15 @@ SEED = CanonicalWorkIdentitySeed(
     acceptance_identity="SAME_WAIT_JOIN|COMPLETE_NOOP|UNKNOWN_FAIL_CLOSED",
     field_sources=FIELD_SOURCES,
 )
+
+
+def intent_request(
+    *,
+    event_id="EVENT-200",
+    text=INTENT_TEXT,
+    actor=CommandActor.USER,
+):
+    return PreModelContextRequest(user_text=text, actor=actor, event_id=event_id)
 
 
 def projection(*, version=7, seed=SEED, intent_refs=INTENT_REFS):
@@ -70,6 +97,35 @@ def with_seed(**changes):
     }
     values.update(changes)
     return CanonicalWorkIdentitySeed(**values)
+
+
+def test_direct_hao_intent_ref_is_bound_to_user_event_and_raw_text():
+    assert INTENT_REF.startswith("HAO_INTENT:")
+    assert INTENT_REF == direct_hao_intent_ref(
+        user_text=INTENT_TEXT,
+        actor=CommandActor.USER,
+        event_id="EVENT-200",
+    )
+    assert INTENT_REF != direct_hao_intent_ref(
+        user_text=INTENT_TEXT + " now",
+        actor=CommandActor.USER,
+        event_id="EVENT-200",
+    )
+    assert INTENT_REF != direct_hao_intent_ref(
+        user_text=INTENT_TEXT,
+        actor=CommandActor.USER,
+        event_id="EVENT-201",
+    )
+    assert direct_hao_intent_ref(
+        user_text=INTENT_TEXT,
+        actor=CommandActor.MODEL,
+        event_id="EVENT-200",
+    ) == ""
+    assert direct_hao_intent_ref(
+        user_text=INTENT_TEXT,
+        actor=CommandActor.USER,
+        event_id="",
+    ) == ""
 
 
 def test_stable_work_key_and_intent_fingerprint_are_separate_from_current_binding():
@@ -110,7 +166,7 @@ def test_unknown_identity_never_auto_coalesces():
 def test_typed_provenance_accepts_direct_hao_intent_and_current_authority_together():
     result = projection()
 
-    assert ("objective", "HAO_INTENT", "HAO_INTENT:EVENT-200") in result.field_sources
+    assert ("objective", "HAO_INTENT", INTENT_REF) in result.field_sources
     assert ("logical_target", "CURRENT_AUTHORITY", "CURRENT:TARGET") in result.field_sources
 
 
@@ -142,21 +198,32 @@ def test_current_authority_source_must_still_be_in_verified_current_refs():
         projection(seed=with_seed(field_sources=stale_sources))
 
 
-def test_at_least_one_material_intent_field_requires_direct_hao_intent_binding():
-    authority_only_sources = tuple(
-        (field, "CURRENT_AUTHORITY", "REQUIREMENTS:R-036")
-        if source_class == "HAO_INTENT"
-        else (field, source_class, ref)
-        for field, source_class, ref in FIELD_SOURCES
-    )
+def test_continuation_can_inherit_semantic_fields_from_current_authority():
+    result = projection(seed=with_seed(field_sources=AUTHORITY_ONLY_FIELD_SOURCES))
+
+    assert result.objective == SEED.objective
+    assert result.deliverable_identity == SEED.deliverable_identity
+    assert result.acceptance_identity == SEED.acceptance_identity
+    assert all(source_class == "CURRENT_AUTHORITY" for _, source_class, _ in result.field_sources)
+
+
+def test_direct_hao_interaction_provenance_is_required_even_when_semantics_are_current():
     with pytest.raises(ValueError, match="WORK_IDENTITY_DIRECT_HAO_INTENT_BINDING_REQUIRED"):
-        projection(seed=with_seed(field_sources=authority_only_sources))
+        projection(
+            seed=with_seed(field_sources=AUTHORITY_ONLY_FIELD_SOURCES),
+            intent_refs=(),
+        )
 
 
 def test_provenance_location_change_does_not_change_intent_semantics():
     baseline = projection()
+    moved_intent_ref = direct_hao_intent_ref(
+        user_text=INTENT_TEXT,
+        actor=CommandActor.USER,
+        event_id="EVENT-201",
+    )
     moved_sources = tuple(
-        (field, source_class, "HAO_INTENT:EVENT-201")
+        (field, source_class, moved_intent_ref)
         if source_class == "HAO_INTENT"
         else (field, source_class, ref)
         for field, source_class, ref in FIELD_SOURCES
@@ -164,7 +231,7 @@ def test_provenance_location_change_does_not_change_intent_semantics():
     moved = projection(
         version=8,
         seed=with_seed(field_sources=moved_sources),
-        intent_refs=("HAO_INTENT:EVENT-201",),
+        intent_refs=(moved_intent_ref,),
     )
 
     assert baseline.work_key == moved.work_key
@@ -214,9 +281,8 @@ def test_blank_work_key_or_duplicate_current_inputs_fail_closed():
 
 
 class Reader:
-    def __init__(self, seed, *, intent_refs=INTENT_REFS):
+    def __init__(self, seed):
         self.seed = seed
-        self.intent_refs = intent_refs
 
     def resolve_current(self, routes, state, request, checkpoint_cue):
         return HaoCanonicalCurrent(
@@ -225,7 +291,6 @@ class Reader:
             operational_version=state.version,
             authority_refs=AUTHORITY_REFS,
             verified=True,
-            intent_refs=self.intent_refs,
             work_identity_seed=self.seed,
         )
 
@@ -242,10 +307,10 @@ class Reader:
 ROUTES = HaoAuthorityRoutes("current", "requirements", "handoff", "regressions", "prior")
 
 
-def test_verified_composite_current_can_project_identity_without_task_inference():
+def test_verified_composite_current_can_project_identity_from_interaction_boundary():
     source = HaoDriveCanonicalAuthoritySource(Reader(SEED), ROUTES)
     state = SimpleNamespace(task="Natural language TASK text", version=7)
-    snapshot = source.read_context(state, SimpleNamespace(), "R200")
+    snapshot = source.read_context(state, intent_request(), "R200")
 
     assert snapshot is not None
     assert snapshot.work_identity is not None
@@ -254,17 +319,36 @@ def test_verified_composite_current_can_project_identity_without_task_inference(
     assert snapshot.work_identity.objective != state.task
 
 
-def test_drive_only_seed_without_direct_intent_binding_fails_closed():
-    source = HaoDriveCanonicalAuthoritySource(Reader(SEED, intent_refs=()), ROUTES)
+def test_continuation_instruction_can_keep_semantics_source_backed_by_current():
+    authority_only_seed = with_seed(field_sources=AUTHORITY_ONLY_FIELD_SOURCES)
+    source = HaoDriveCanonicalAuthoritySource(Reader(authority_only_seed), ROUTES)
+    state = SimpleNamespace(task="Natural language TASK text", version=7)
+    snapshot = source.read_context(state, intent_request(), "R200")
+
+    assert snapshot is not None
+    assert snapshot.work_identity is not None
+    assert all(
+        source_class == "CURRENT_AUTHORITY"
+        for _, source_class, _ in snapshot.work_identity.field_sources
+    )
+
+
+def test_identity_seed_without_current_direct_interaction_provenance_fails_closed():
+    source = HaoDriveCanonicalAuthoritySource(Reader(SEED), ROUTES)
     state = SimpleNamespace(task="ACTIVE_WORK_CANONICAL_IDENTITY", version=7)
 
-    assert source.read_context(state, SimpleNamespace(), "R200") is None
+    assert source.read_context(state, intent_request(event_id=""), "R200") is None
+    assert source.read_context(
+        state,
+        intent_request(actor=CommandActor.MODEL),
+        "R200",
+    ) is None
 
 
-def test_missing_identity_seed_does_not_infer_identity_from_task():
+def test_missing_identity_seed_does_not_infer_identity_from_task_or_require_event_id():
     source = HaoDriveCanonicalAuthoritySource(Reader(None), ROUTES)
     state = SimpleNamespace(task="ACTIVE_WORK_CANONICAL_IDENTITY", version=7)
-    snapshot = source.read_context(state, SimpleNamespace(), "R200")
+    snapshot = source.read_context(state, intent_request(event_id=""), "R200")
 
     assert snapshot is not None
     assert snapshot.work_identity is None
@@ -275,4 +359,4 @@ def test_invalid_composite_seed_fails_closed():
     source = HaoDriveCanonicalAuthoritySource(Reader(invalid), ROUTES)
     state = SimpleNamespace(task="Task", version=7)
 
-    assert source.read_context(state, SimpleNamespace(), "R200") is None
+    assert source.read_context(state, intent_request(), "R200") is None
