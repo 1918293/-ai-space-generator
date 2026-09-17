@@ -1,12 +1,15 @@
 CLASSIFICATION: synthetic_non_sensitive
-Purpose: Verify that a future condition-watch can detect a new Drive EXP Inbox document and complete the bounded distillation pipeline without Hao opening ChatGPT.
+Purpose: Verify the remaining high-information EXP hypothesis: a new Drive EXP Inbox file can initiate the established bounded distillation pipeline after this chat turn has ended, without Hao sending another message or opening ChatGPT to start the run.
 
-Observations:
-- This file is synthetic and contains no private production data.
-- The watcher should route it through the existing EXP GitHub workflow only once.
+Constraints:
+- This is synthetic, non-sensitive test content only.
+- Process this exact source version at most once.
+- Use the existing EXP branch and existing hardened public GitHub runner; do not modify the runner or workflow unless a blocking defect is discovered.
 - Gemini should return the bounded distillation schema.
-- PostHog should receive redacted execution metadata, not raw document content.
-- The result should be written only to EXP Output and read back.
-- Production canonical targets must remain untouched.
+- PostHog should receive redacted execution metadata only, never the raw document body.
+- Independently read back the matching PostHog trace from Hao project 247104 before claiming PASS.
+- Write the final result only to the existing EXP Output folder and read it back.
+- Do not write or mutate Hao System canonical authority.
+- On ambiguity, version mismatch, duplicate detection, or unsafe content, fail closed and report the bounded failure.
 
-Expected result: unattended trigger-path PASS or a bounded failure report.
+Expected result: unattended no-chat trigger path PASS or a bounded failure report with exact blocking evidence.
