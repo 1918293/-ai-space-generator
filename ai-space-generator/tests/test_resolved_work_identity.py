@@ -19,6 +19,7 @@ from src.resolved_work_identity import (
     compare_work_identity,
     current_context_fingerprint,
     direct_hao_intent_ref,
+    requirement_verification_work_key,
     resolve_work_identity_projection,
 )
 
@@ -99,6 +100,56 @@ def with_seed(**changes):
     return CanonicalWorkIdentitySeed(**values)
 
 
+def requirement_verification_projection(
+    *,
+    row_id="RV-051",
+    objective="VERIFY_ACTION_ADMISSION",
+    event_id="EVENT-RV-051",
+):
+    row_ref = f"REQUIREMENTS:{row_id}"
+    authority_refs = (
+        row_ref,
+        "CURRENT:PROJECT",
+        "CURRENT:TARGET",
+        "CURRENT:DELIVERABLE",
+        "CURRENT:ACCEPTANCE",
+    )
+    work_key = requirement_verification_work_key(
+        row_id,
+        source_ref=row_ref,
+        authority_refs=authority_refs,
+    )
+    seed = CanonicalWorkIdentitySeed(
+        work_key=work_key,
+        project_scope="PROJECT_HAO",
+        logical_target="requirements/07_Requirement_Verification",
+        objective=objective,
+        deliverable_identity="BOUNDED_VERIFICATION_EVIDENCE",
+        acceptance_identity="VERIFICATION_CONTRACT_SATISFIED",
+        field_sources=(
+            ("work_key", "CURRENT_AUTHORITY", row_ref),
+            ("project_scope", "CURRENT_AUTHORITY", "CURRENT:PROJECT"),
+            ("logical_target", "CURRENT_AUTHORITY", "CURRENT:TARGET"),
+            ("objective", "CURRENT_AUTHORITY", row_ref),
+            ("deliverable_identity", "CURRENT_AUTHORITY", "CURRENT:DELIVERABLE"),
+            ("acceptance_identity", "CURRENT_AUTHORITY", "CURRENT:ACCEPTANCE"),
+        ),
+    )
+    intent_ref = direct_hao_intent_ref(
+        user_text=INTENT_TEXT,
+        actor=CommandActor.USER,
+        event_id=event_id,
+    )
+    return resolve_work_identity_projection(
+        seed,
+        checkpoint_id="R200",
+        task="Continue Requirement Verification",
+        operational_version=7,
+        authority_refs=authority_refs,
+        intent_refs=(intent_ref,),
+    )
+
+
 def test_direct_hao_intent_ref_is_bound_to_user_event_and_raw_text():
     assert INTENT_REF.startswith("HAO_INTENT:")
     assert INTENT_REF == direct_hao_intent_ref(
@@ -156,6 +207,68 @@ def test_different_work_key_with_same_target_is_different_work():
     assert baseline.logical_target == changed.logical_target
     assert baseline.intent_fingerprint == changed.intent_fingerprint
     assert compare_work_identity(baseline, changed) == WorkIdentityRelation.DIFFERENT_WORK
+
+
+def test_requirement_verification_row_id_is_stable_across_attempt_events():
+    first = requirement_verification_projection(event_id="EVENT-RV-051-A")
+    second = requirement_verification_projection(event_id="EVENT-RV-051-B")
+
+    assert first.work_key == "RV-051"
+    assert second.work_key == "RV-051"
+    assert first.current_fingerprint != second.current_fingerprint
+    assert compare_work_identity(first, second) == WorkIdentityRelation.SAME_WORK_SAME_INTENT
+
+
+def test_requirement_verification_same_row_changed_intent_is_not_false_coalesced():
+    baseline = requirement_verification_projection()
+    changed = requirement_verification_projection(objective="VERIFY_DYNAMIC_TOOL_REVALIDATION")
+
+    assert baseline.work_key == changed.work_key == "RV-051"
+    assert baseline.intent_fingerprint != changed.intent_fingerprint
+    assert compare_work_identity(baseline, changed) == WorkIdentityRelation.SAME_WORK_CHANGED_INTENT
+
+
+def test_requirement_verification_different_rows_are_different_work():
+    first = requirement_verification_projection(row_id="RV-051")
+    second = requirement_verification_projection(row_id="RV-052")
+
+    assert first.intent_fingerprint == second.intent_fingerprint
+    assert compare_work_identity(first, second) == WorkIdentityRelation.DIFFERENT_WORK
+
+
+@pytest.mark.parametrize("invalid_id", ["R-051", "RUN-20260918-01", "PROJECT_HAO", "51"])
+def test_requirement_verification_rejects_non_rv_identity_substitutes(invalid_id):
+    ref = f"REQUIREMENTS:{invalid_id}"
+    with pytest.raises(ValueError, match="WORK_IDENTITY_REQUIREMENT_VERIFICATION_ID_INVALID"):
+        requirement_verification_work_key(
+            invalid_id,
+            source_ref=ref,
+            authority_refs=(ref,),
+        )
+
+
+def test_requirement_verification_source_must_be_in_verified_current_authority():
+    with pytest.raises(
+        ValueError,
+        match="WORK_IDENTITY_REQUIREMENT_VERIFICATION_SOURCE_NOT_CURRENT_AUTHORITY",
+    ):
+        requirement_verification_work_key(
+            "RV-051",
+            source_ref="REQUIREMENTS:RV-051",
+            authority_refs=("REQUIREMENTS:RV-052",),
+        )
+
+
+def test_requirement_verification_source_must_bind_the_same_row_identity():
+    with pytest.raises(
+        ValueError,
+        match="WORK_IDENTITY_REQUIREMENT_VERIFICATION_SOURCE_MISMATCH",
+    ):
+        requirement_verification_work_key(
+            "RV-051",
+            source_ref="REQUIREMENTS:RV-052",
+            authority_refs=("REQUIREMENTS:RV-052",),
+        )
 
 
 def test_unknown_identity_never_auto_coalesces():
