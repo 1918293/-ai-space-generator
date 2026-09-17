@@ -236,7 +236,18 @@ def test_requirement_verification_different_rows_are_different_work():
     assert compare_work_identity(first, second) == WorkIdentityRelation.DIFFERENT_WORK
 
 
-@pytest.mark.parametrize("invalid_id", ["R-051", "RUN-20260918-01", "PROJECT_HAO", "51"])
+def test_requirement_verification_accepts_existing_zero_padded_row_ids():
+    assert requirement_verification_work_key(
+        "rv-009",
+        source_ref="REQUIREMENTS:RV-009",
+        authority_refs=("REQUIREMENTS:RV-009",),
+    ) == "RV-009"
+
+
+@pytest.mark.parametrize(
+    "invalid_id",
+    ["R-051", "RUN-20260918-01", "PROJECT_HAO", "51", "RV-000"],
+)
 def test_requirement_verification_rejects_non_rv_identity_substitutes(invalid_id):
     ref = f"REQUIREMENTS:{invalid_id}"
     with pytest.raises(ValueError, match="WORK_IDENTITY_REQUIREMENT_VERIFICATION_ID_INVALID"):
