@@ -15,6 +15,13 @@ from .control_gateway import (
     PreparedControlledAction,
 )
 from .operational_state import ActiveOperationalState
+from .resolved_work_identity import (
+    CanonicalWorkIdentitySeed,
+    ResolvedWorkIdentityProjection,
+    direct_hao_intent_ref,
+    requirement_verification_work_key,
+    resolve_work_identity_projection,
+)
 
 
 _ALLOWED_CONTEXT_KINDS = frozenset(
@@ -39,6 +46,7 @@ _ALLOWED_DISPOSITIONS = frozenset(
 )
 _MAX_ITEM_SUMMARY_CHARS = 2000
 _MAX_TOTAL_SUMMARY_CHARS = 12000
+_RV_REF_PREFIX = "REQUIREMENTS:RV-"
 
 
 @dataclass(frozen=True)
@@ -63,11 +71,35 @@ class AdmittedContextItem:
 
 
 @dataclass(frozen=True)
+class ContextBoundWorkIdentity:
+    """Transient work identity bound to the exact admitted semantic snapshot.
+
+    `projection` retains the existing stable-work/material-intent semantics.
+    `semantic_context_fingerprint` proves which hydrated canonical context was
+    used. `binding_fingerprint` binds both without promoting this runtime object
+    into Authority or persistence.
+    """
+
+    projection: ResolvedWorkIdentityProjection
+    semantic_context_fingerprint: str
+    binding_fingerprint: str
+
+    @property
+    def work_key(self) -> str:
+        return self.projection.work_key
+
+    @property
+    def intent_fingerprint(self) -> str:
+        return self.projection.intent_fingerprint
+
+
+@dataclass(frozen=True)
 class ContextBoundModelInput:
     receipt: PreModelContextReceipt
     admitted_context: tuple[AdmittedContextItem, ...]
     semantic_fingerprint: str
     user_text: str
+    work_identity: ContextBoundWorkIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +265,109 @@ def semantic_context_fingerprint(
     return "sha256:" + sha256(material).hexdigest()
 
 
+def _required_rv_cell(row: list[object], index: int, code: str) -> str:
+    if index >= len(row):
+        raise ValueError(code)
+    value = str(row[index]).strip()
+    if not value:
+        raise ValueError(code)
+    return value
+
+
+def _requirement_verification_work_identity(
+    *,
+    receipt: PreModelContextReceipt,
+    request: PreModelContextRequest,
+    items: tuple[AdmittedContextItem, ...],
+    semantic_fingerprint: str,
+) -> ContextBoundWorkIdentity | None:
+    candidates = tuple(
+        item
+        for item in items
+        if item.kind in {"CURRENT_CONTROL", "CONTINUATION"}
+        and item.applicability == "APPLICABLE"
+        and item.ref.upper().startswith(_RV_REF_PREFIX)
+    )
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError("PRE_MODEL_RV_IDENTITY_AMBIGUOUS")
+
+    item = candidates[0]
+    try:
+        decoded = json.loads(item.summary)
+    except json.JSONDecodeError as exc:
+        raise ValueError("PRE_MODEL_RV_IDENTITY_ROW_INVALID") from exc
+    if not isinstance(decoded, list) or len(decoded) != 1 or not isinstance(decoded[0], list):
+        raise ValueError("PRE_MODEL_RV_IDENTITY_ROW_INVALID")
+    row = decoded[0]
+    if len(row) < 9:
+        raise ValueError("PRE_MODEL_RV_IDENTITY_ROW_INCOMPLETE")
+
+    row_id = _required_rv_cell(row, 0, "PRE_MODEL_RV_IDENTITY_ID_REQUIRED").upper()
+    requirement_id = _required_rv_cell(row, 1, "PRE_MODEL_RV_REQUIREMENT_ID_REQUIRED").upper()
+    requirement_statement = _required_rv_cell(row, 4, "PRE_MODEL_RV_OBJECTIVE_REQUIRED")
+    allocated_to = _required_rv_cell(row, 5, "PRE_MODEL_RV_ALLOCATED_TO_REQUIRED")
+    verification_method = _required_rv_cell(row, 6, "PRE_MODEL_RV_VERIFICATION_METHOD_REQUIRED")
+    verification_procedure = _required_rv_cell(row, 7, "PRE_MODEL_RV_VERIFICATION_PROCEDURE_REQUIRED")
+    acceptance_criteria = _required_rv_cell(row, 8, "PRE_MODEL_RV_ACCEPTANCE_REQUIRED")
+    project_scope = item.project_scope.strip()
+    if not project_scope:
+        raise ValueError("PRE_MODEL_RV_PROJECT_SCOPE_REQUIRED")
+
+    work_key = requirement_verification_work_key(
+        row_id,
+        source_ref=item.ref,
+        authority_refs=receipt.authority_refs,
+    )
+    intent_ref = direct_hao_intent_ref(
+        user_text=request.user_text,
+        actor=request.actor,
+        event_id=request.event_id,
+    )
+    if not intent_ref:
+        raise ValueError("PRE_MODEL_RV_IDENTITY_DIRECT_HAO_INTENT_REQUIRED")
+
+    seed = CanonicalWorkIdentitySeed(
+        work_key=work_key,
+        project_scope=project_scope,
+        logical_target=f"{requirement_id}|{allocated_to}",
+        objective=requirement_statement,
+        deliverable_identity=f"{verification_method}|{verification_procedure}",
+        acceptance_identity=acceptance_criteria,
+        field_sources=(
+            ("work_key", "CURRENT_AUTHORITY", item.ref),
+            ("project_scope", "CURRENT_AUTHORITY", item.ref),
+            ("logical_target", "CURRENT_AUTHORITY", item.ref),
+            ("objective", "CURRENT_AUTHORITY", item.ref),
+            ("deliverable_identity", "CURRENT_AUTHORITY", item.ref),
+            ("acceptance_identity", "CURRENT_AUTHORITY", item.ref),
+        ),
+    )
+    projection = resolve_work_identity_projection(
+        seed,
+        checkpoint_id=receipt.checkpoint_id,
+        task=receipt.task,
+        operational_version=receipt.operational_version,
+        authority_refs=receipt.authority_refs,
+        intent_refs=(intent_ref,),
+    )
+    material = json.dumps(
+        {
+            "identity_binding_fingerprint": projection.binding_fingerprint,
+            "semantic_context_fingerprint": semantic_fingerprint,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return ContextBoundWorkIdentity(
+        projection=projection,
+        semantic_context_fingerprint=semantic_fingerprint,
+        binding_fingerprint="sha256:" + sha256(material).hexdigest(),
+    )
+
+
 class ContextBoundPreModelGateway:
     """Second-stage fail-closed semantic hydration after structural admission."""
 
@@ -260,10 +395,16 @@ class ContextBoundPreModelGateway:
             return ContextBoundAdmission(False, "PRE_MODEL_SEMANTICS_UNRESOLVED")
         try:
             items = _normalize_context_items(structural.receipt, tuple(raw_items))
+            fingerprint = semantic_context_fingerprint(structural.receipt, items)
+            work_identity = _requirement_verification_work_identity(
+                receipt=structural.receipt,
+                request=request,
+                items=items,
+                semantic_fingerprint=fingerprint,
+            )
         except ValueError as exc:
             return ContextBoundAdmission(False, str(exc))
 
-        fingerprint = semantic_context_fingerprint(structural.receipt, items)
         return ContextBoundAdmission(
             True,
             "PRE_MODEL_SEMANTIC_CONTEXT_ADMITTED",
@@ -272,6 +413,7 @@ class ContextBoundPreModelGateway:
                 admitted_context=items,
                 semantic_fingerprint=fingerprint,
                 user_text=request.user_text.strip(),
+                work_identity=work_identity,
             ),
         )
 
