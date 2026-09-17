@@ -18,12 +18,27 @@ from src.resolved_work_identity import (
 )
 
 
+AUTHORITY_REFS = (
+    "CURRENT:PROJECT",
+    "CURRENT:TARGET",
+    "CURRENT:OBJECTIVE",
+    "CURRENT:DELIVERABLE",
+    "REQUIREMENTS:R-036",
+)
+FIELD_SOURCES = (
+    ("project_scope", "CURRENT:PROJECT"),
+    ("logical_target", "CURRENT:TARGET"),
+    ("objective", "CURRENT:OBJECTIVE"),
+    ("deliverable_class", "CURRENT:DELIVERABLE"),
+    ("acceptance_identity", "REQUIREMENTS:R-036"),
+)
 SEED = CanonicalWorkIdentitySeed(
     project_scope="PROJECT_HAO",
     logical_target="runtime-v2/active-work",
     objective="ACTIVE_WORK_CANONICAL_IDENTITY",
     deliverable_class="BOUNDED_ENGINEERING_VALIDATION",
     acceptance_identity="SAME_WAIT_JOIN|COMPLETE_NOOP|UNKNOWN_FAIL_CLOSED",
+    field_sources=FIELD_SOURCES,
 )
 
 
@@ -34,13 +49,14 @@ def projection(*, version=7, objective=None):
         objective=objective,
         deliverable_class=SEED.deliverable_class,
         acceptance_identity=SEED.acceptance_identity,
+        field_sources=SEED.field_sources,
     )
     return resolve_work_identity_projection(
         seed,
         checkpoint_id="R200",
         task="Validate Active Work identity",
         operational_version=version,
-        authority_refs=("CURRENT:CONFIG", "REQUIREMENTS:R-049"),
+        authority_refs=AUTHORITY_REFS,
     )
 
 
@@ -80,11 +96,18 @@ def test_current_fingerprint_is_order_invariant_for_authority_refs():
 def test_blank_or_duplicate_identity_inputs_fail_closed():
     with pytest.raises(ValueError, match="WORK_IDENTITY_OBJECTIVE_REQUIRED"):
         resolve_work_identity_projection(
-            CanonicalWorkIdentitySeed("PROJECT_HAO", "target", " ", "deliverable", "acceptance"),
+            CanonicalWorkIdentitySeed(
+                "PROJECT_HAO",
+                "target",
+                " ",
+                "deliverable",
+                "acceptance",
+                FIELD_SOURCES,
+            ),
             checkpoint_id="R1",
             task="Task",
             operational_version=1,
-            authority_refs=("CURRENT",),
+            authority_refs=AUTHORITY_REFS,
         )
 
     with pytest.raises(ValueError, match="WORK_IDENTITY_AUTHORITY_REFS_DUPLICATE"):
@@ -96,6 +119,74 @@ def test_blank_or_duplicate_identity_inputs_fail_closed():
         )
 
 
+def test_each_semantic_field_requires_current_authority_provenance():
+    missing = CanonicalWorkIdentitySeed(
+        project_scope=SEED.project_scope,
+        logical_target=SEED.logical_target,
+        objective=SEED.objective,
+        deliverable_class=SEED.deliverable_class,
+        acceptance_identity=SEED.acceptance_identity,
+        field_sources=FIELD_SOURCES[:-1],
+    )
+    with pytest.raises(ValueError, match="WORK_IDENTITY_SOURCE_FIELD_MISSING"):
+        resolve_work_identity_projection(
+            missing,
+            checkpoint_id="R200",
+            task="Task",
+            operational_version=7,
+            authority_refs=AUTHORITY_REFS,
+        )
+
+    stale_source = CanonicalWorkIdentitySeed(
+        project_scope=SEED.project_scope,
+        logical_target=SEED.logical_target,
+        objective=SEED.objective,
+        deliverable_class=SEED.deliverable_class,
+        acceptance_identity=SEED.acceptance_identity,
+        field_sources=tuple(
+            (field, "SUPERSEDED:OBJECTIVE") if field == "objective" else (field, ref)
+            for field, ref in FIELD_SOURCES
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="WORK_IDENTITY_SOURCE_NOT_CURRENT_AUTHORITY:objective",
+    ):
+        resolve_work_identity_projection(
+            stale_source,
+            checkpoint_id="R200",
+            task="Task",
+            operational_version=7,
+            authority_refs=AUTHORITY_REFS,
+        )
+
+
+def test_field_source_location_is_provenance_not_semantic_identity():
+    baseline = projection()
+    moved_seed = CanonicalWorkIdentitySeed(
+        project_scope=SEED.project_scope,
+        logical_target=SEED.logical_target,
+        objective=SEED.objective,
+        deliverable_class=SEED.deliverable_class,
+        acceptance_identity=SEED.acceptance_identity,
+        field_sources=tuple(
+            (field, "CURRENT:OBJECTIVE_V2") if field == "objective" else (field, ref)
+            for field, ref in FIELD_SOURCES
+        ),
+    )
+    moved = resolve_work_identity_projection(
+        moved_seed,
+        checkpoint_id="R200",
+        task="Validate Active Work identity",
+        operational_version=8,
+        authority_refs=AUTHORITY_REFS + ("CURRENT:OBJECTIVE_V2",),
+    )
+
+    assert baseline.semantic_fingerprint == moved.semantic_fingerprint
+    assert baseline.current_fingerprint != moved.current_fingerprint
+    assert baseline.binding_fingerprint != moved.binding_fingerprint
+
+
 class Reader:
     def __init__(self, seed):
         self.seed = seed
@@ -105,7 +196,7 @@ class Reader:
             checkpoint_id="R200",
             task=state.task,
             operational_version=state.version,
-            authority_refs=("CURRENT:CONFIG", "REQUIREMENTS:R-049"),
+            authority_refs=AUTHORITY_REFS,
             verified=True,
             work_identity_seed=self.seed,
         )
@@ -133,6 +224,7 @@ def test_verified_current_can_project_authority_supplied_identity_without_task_i
     assert snapshot.work_identity.objective == "ACTIVE_WORK_CANONICAL_IDENTITY"
     assert snapshot.work_identity.logical_target == "runtime-v2/active-work"
     assert snapshot.work_identity.objective != state.task
+    assert snapshot.work_identity.field_sources == FIELD_SOURCES
 
 
 def test_missing_identity_seed_does_not_infer_identity_from_task():
@@ -151,6 +243,7 @@ def test_invalid_authority_supplied_identity_fails_closed():
         objective="",
         deliverable_class="BOUNDED_ENGINEERING_VALIDATION",
         acceptance_identity="acceptance",
+        field_sources=FIELD_SOURCES,
     )
     source = HaoDriveCanonicalAuthoritySource(Reader(invalid), ROUTES)
     state = SimpleNamespace(task="Task", version=7)
