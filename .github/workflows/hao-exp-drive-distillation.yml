@@ -7,6 +7,7 @@ on:
       - '.github/workflows/hao-exp-drive-distillation.yml'
       - 'hao-cloud-runtime/exp-drive-distillation-runner.mjs'
       - 'hao-cloud-runtime/exp-drive-distillation-input.txt'
+      - 'hao-cloud-runtime/exp-drive-distillation-source-label.txt'
   workflow_dispatch:
 
 permissions:

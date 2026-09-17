@@ -8,11 +8,13 @@ const model = 'gemini-3.5-flash-lite';
 const runKey = `EXP-DRIVE-DISTILL-${process.env.GITHUB_RUN_ID ?? 'local'}`;
 const traceId = crypto.randomUUID();
 const generationId = crypto.randomUUID();
-const sourceLabel = 'EXP Seed 002 | Recent Valuable Content';
+const sourceLabel = fs.readFileSync('hao-cloud-runtime/exp-drive-distillation-source-label.txt', 'utf8').trim();
 const input = fs.readFileSync('hao-cloud-runtime/exp-drive-distillation-input.txt', 'utf8');
 
 assert.ok(geminiKey, 'GEMINI_API_KEY missing');
 assert.ok(posthogKey, 'POSTHOG_PROJECT_API_KEY missing');
+assert.ok(sourceLabel, 'source label missing');
+assert.ok(input.startsWith('CLASSIFICATION: synthetic_non_sensitive'), 'public EXP runner accepts synthetic_non_sensitive input only');
 
 const prompt = `You are a bounded document-distillation engine. Return valid JSON only, with exactly these keys:\nsource\npurpose\nkey_observations\nmaterial_delta\nexisting_content_overlap\nuncertainty\ncandidate_next_action\ncanonical_write_recommendation\n\nRules:\n- source must equal "${sourceLabel}".\n- key_observations must be an array of concise strings.\n- canonical_write_recommendation must be one of: YES, NO, REVIEW.\n- Do not invent facts beyond the supplied document.\n- This is EXP-only analysis. Do not claim any authoritative record was changed.\n\nDOCUMENT:\n${input}`;
 
@@ -42,6 +44,8 @@ assert.ok(Array.isArray(distillation.key_observations));
 assert.ok(['YES','NO','REVIEW'].includes(distillation.canonical_write_recommendation));
 
 const usage = body?.usageMetadata ?? {};
+const inputHash = crypto.createHash('sha256').update(input).digest('hex');
+const outputHash = crypto.createHash('sha256').update(JSON.stringify(distillation)).digest('hex');
 const output = {
   schema: 'hao-exp-drive-distillation-v1',
   mode: 'EXP',
@@ -73,16 +77,16 @@ const capture = await fetch('https://eu.i.posthog.com/i/v0/e/', {
       '$ai_trace_name': 'EXP Drive Distillation Pilot',
       '$ai_provider': 'google',
       '$ai_model': model,
-      '$ai_input': prompt,
-      '$ai_output_choices': [{ role: 'assistant', content: JSON.stringify(distillation) }],
+      '$ai_input': `REDACTED_SYNTHETIC_EXP sha256=${inputHash} chars=${input.length}`,
+      '$ai_output_choices': [{ role: 'assistant', content: `EXP distillation completed; recommendation=${distillation.canonical_write_recommendation}; sha256=${outputHash}` }],
       '$ai_input_tokens': usage.promptTokenCount ?? null,
       '$ai_output_tokens': usage.candidatesTokenCount ?? null,
       '$ai_is_error': false,
       run_key: runKey,
-      source_label: sourceLabel,
-      input_class: 'recent_high_value_non_sensitive',
+      source_label_hash: crypto.createHash('sha256').update(sourceLabel).digest('hex'),
+      input_class: 'synthetic_non_sensitive',
       is_synthetic: false,
-      measurement_source: 'chat_native_drive_github_gemini_exp',
+      measurement_source: 'drive_trigger_github_gemini_exp_redacted_observation',
       production_canonical_target_touched: false,
     },
   }),
