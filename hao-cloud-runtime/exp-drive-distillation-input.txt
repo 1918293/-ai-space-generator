@@ -1,0 +1,19 @@
+EXP PILOT INPUT
+Purpose: Test a bounded document-distillation workflow.
+
+Observations:
+- A workflow should process a newly created document from an experimental inbox.
+- It should summarize material deltas, uncertainty, and the next useful action.
+- It must not mutate authoritative records.
+- It should prefer verified zero-cost paths before credential onboarding or billable execution.
+- Observability may record execution evidence but does not become authority.
+
+Expected output fields:
+Source
+Purpose
+Key observations
+Material delta
+Existing-content overlap
+Uncertainty
+Candidate next action
+Canonical-write recommendation
