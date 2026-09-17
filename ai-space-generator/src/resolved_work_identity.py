@@ -10,7 +10,7 @@ _SEMANTIC_FIELDS = (
     "project_scope",
     "logical_target",
     "objective",
-    "deliverable_class",
+    "deliverable_identity",
     "acceptance_identity",
 )
 
@@ -20,15 +20,16 @@ class CanonicalWorkIdentitySeed:
     """Authority-supplied semantic work identity fields plus field provenance.
 
     The Runtime does not infer these fields from raw TASK text, model output,
-    embeddings, providers, tools, RUN_KEYs, or mutation identity. Each field
-    must already be resolved by the trusted Current/Intent authority path and
-    must name the verified Current authority ref that supplied it.
+    embeddings, providers, tools, RUN_KEYs, mutation identity, or a private
+    deliverable taxonomy. Each field must already be resolved by the trusted
+    Current/Intent authority path and must name the verified Current authority
+    ref that supplied it.
     """
 
     project_scope: str
     logical_target: str
     objective: str
-    deliverable_class: str
+    deliverable_identity: str
     acceptance_identity: str
     field_sources: tuple[tuple[str, str], ...]
 
@@ -47,7 +48,7 @@ class ResolvedWorkIdentityProjection:
     project_scope: str
     logical_target: str
     objective: str
-    deliverable_class: str
+    deliverable_identity: str
     acceptance_identity: str
     field_sources: tuple[tuple[str, str], ...]
     semantic_fingerprint: str
@@ -59,7 +60,7 @@ class ResolvedWorkIdentityProjection:
             "project_scope": self.project_scope,
             "logical_target": self.logical_target,
             "objective": self.objective,
-            "deliverable_class": self.deliverable_class,
+            "deliverable_identity": self.deliverable_identity,
             "acceptance_identity": self.acceptance_identity,
             "field_sources": self.field_sources,
             "semantic_fingerprint": self.semantic_fingerprint,
@@ -155,7 +156,10 @@ def resolve_work_identity_projection(
     project_scope = _required_text(seed.project_scope, "WORK_IDENTITY_PROJECT_SCOPE_REQUIRED")
     logical_target = _required_text(seed.logical_target, "WORK_IDENTITY_LOGICAL_TARGET_REQUIRED")
     objective = _required_text(seed.objective, "WORK_IDENTITY_OBJECTIVE_REQUIRED")
-    deliverable_class = _required_text(seed.deliverable_class, "WORK_IDENTITY_DELIVERABLE_CLASS_REQUIRED")
+    deliverable_identity = _required_text(
+        seed.deliverable_identity,
+        "WORK_IDENTITY_DELIVERABLE_REQUIRED",
+    )
     acceptance_identity = _required_text(seed.acceptance_identity, "WORK_IDENTITY_ACCEPTANCE_REQUIRED")
     refs = normalized_authority_refs(authority_refs)
     field_sources = _normalized_field_sources(seed.field_sources, authority_refs=refs)
@@ -165,7 +169,7 @@ def resolve_work_identity_projection(
             "project_scope": project_scope,
             "logical_target": logical_target,
             "objective": objective,
-            "deliverable_class": deliverable_class,
+            "deliverable_identity": deliverable_identity,
             "acceptance_identity": acceptance_identity,
         }
     )
@@ -185,7 +189,7 @@ def resolve_work_identity_projection(
         project_scope=project_scope,
         logical_target=logical_target,
         objective=objective,
-        deliverable_class=deliverable_class,
+        deliverable_identity=deliverable_identity,
         acceptance_identity=acceptance_identity,
         field_sources=field_sources,
         semantic_fingerprint=semantic_fingerprint,
