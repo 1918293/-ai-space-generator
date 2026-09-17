@@ -8,6 +8,11 @@ from .control_gateway import (
     PreModelContextResolution,
 )
 from .operational_state import ActiveOperationalState
+from .resolved_work_identity import (
+    CanonicalWorkIdentitySeed,
+    ResolvedWorkIdentityProjection,
+    resolve_work_identity_projection,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,7 @@ class HaoCanonicalCurrent:
     operational_version: int
     authority_refs: tuple[str, ...]
     verified: bool
+    work_identity_seed: CanonicalWorkIdentitySeed | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,7 @@ class HaoCanonicalContextSnapshot:
     prior_attempt_lookup_complete: bool
     regression_lookup_complete: bool
     reuse_disposition: str
+    work_identity: ResolvedWorkIdentityProjection | None = None
 
 
 class HaoDriveAuthorityReader(Protocol):
@@ -116,6 +123,10 @@ class HaoDriveCanonicalAuthoritySource:
     is only valid when the reader has cross-checked task-matched canonical
     Authority according to the configured routes. This class never promotes the
     continuation projection into a second Authority owner.
+
+    A resolved work identity is also only projected when the verified Current
+    authority explicitly supplies a canonical semantic seed. Raw TASK text is
+    never normalized, embedded, or promoted into a work identity here.
     """
 
     def __init__(self, reader: HaoDriveAuthorityReader, routes: HaoAuthorityRoutes) -> None:
@@ -137,6 +148,19 @@ class HaoDriveCanonicalAuthoritySource:
         if current is None or not current.verified:
             return None
 
+        work_identity: ResolvedWorkIdentityProjection | None = None
+        if current.work_identity_seed is not None:
+            try:
+                work_identity = resolve_work_identity_projection(
+                    current.work_identity_seed,
+                    checkpoint_id=current.checkpoint_id,
+                    task=current.task,
+                    operational_version=current.operational_version,
+                    authority_refs=current.authority_refs,
+                )
+            except ValueError:
+                return None
+
         existing = self._reader.lookup_existing_work(self._routes, state, request)
         prior = self._reader.lookup_prior_attempts(self._routes, state, request)
         regressions = self._reader.lookup_regressions(self._routes, state, request)
@@ -152,6 +176,7 @@ class HaoDriveCanonicalAuthoritySource:
             prior_attempt_lookup_complete=prior.complete,
             regression_lookup_complete=regressions.complete,
             reuse_disposition=existing.reuse_disposition,
+            work_identity=work_identity,
         )
 
 
