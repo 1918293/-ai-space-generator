@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from typing import Iterable, Mapping
 
+from .active_work_canonical_locator import (
+    CanonicalActiveWorkSignalTextSource,
+    load_active_work_index_range_source_json,
+)
+from .active_work_identity_admission import FreshActiveWorkIdentityAdmissionResolver
 from .canonical_semantic_reader import (
     CanonicalRangeReader,
     CanonicalSemanticRangeSource,
@@ -210,6 +216,22 @@ class _RuntimeTelemetryReasoningSink:
         self._telemetry.record_context_reasoning_observation(observation)
 
 
+def _configured_active_work_resolver(
+    values: Mapping[str, str],
+    *,
+    reader: CanonicalRangeReader,
+) -> ContextActiveWorkAdmissionResolver | None:
+    raw_source = str(values.get("HAO_ACTIVE_WORK_INDEX_SOURCE_JSON", "")).strip()
+    if not raw_source:
+        return None
+    index_source = load_active_work_index_range_source_json(raw_source)
+    signal_source = CanonicalActiveWorkSignalTextSource(reader, index_source)
+    return FreshActiveWorkIdentityAdmissionResolver(
+        signal_source,
+        now=lambda: datetime.now(timezone.utc),
+    )
+
+
 def build_runtime_reasoning_consumer(
     values: Mapping[str, str],
     *,
@@ -226,11 +248,13 @@ def build_runtime_reasoning_consumer(
     Route metadata selects logical refs; provider-backed semantic reading remains
     fresh and fail-closed; the interaction-facing consumer accepts only raw Hao
     text plus run/event/sequence identity. When Active Work coordination is
-    configured, the existing pre-model gateway applies its read-only resolver
-    only after canonical work identity hydration and before the first model call.
-    If Runtime telemetry is configured for the process, the existing ingress is
-    decorated once with content-free stage observation; no second reasoning,
-    Active Work gateway, or MCP telemetry path is created.
+    configured, deployment supplies only the canonical System Index row location;
+    Runtime fresh-resolves IDX-055 to the Signal Doc before each relation check.
+    A directly injected resolver remains available for bounded tests/integration.
+    The existing pre-model gateway applies the read-only result only after
+    canonical work identity hydration and before the first model call. If Runtime
+    telemetry is configured, the existing ingress is decorated once; no second
+    reasoning, Active Work gateway, Authority or coordination store is created.
     """
 
     sources = load_canonical_semantic_sources_json(
@@ -245,10 +269,17 @@ def build_runtime_reasoning_consumer(
     intent_model = model or build_openai_context_bound_intent_boundary(
         model=_required_text(values, "HAO_REASONING_MODEL")
     )
+    effective_active_work_resolver = active_work_resolver
+    if effective_active_work_resolver is None:
+        effective_active_work_resolver = _configured_active_work_resolver(
+            values,
+            reader=semantic_reader,
+        )
+
     pre_model = ContextBoundPreModelGateway(
         PreModelContextGateway(ConfiguredContextReasoningResolver(routes)),
         ConfiguredCanonicalSemanticsResolver(semantic_reader, sources),
-        active_work_resolver=active_work_resolver,
+        active_work_resolver=effective_active_work_resolver,
     )
     ingress = ContextBoundReasoningIngress(
         pre_model=pre_model,
