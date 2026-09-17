@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Callable, Protocol
 
-from .active_work_signal import ActiveWorkSignal
+from .active_work_signal import ActiveWorkSignal, parse_active_work_signal
 from .resolved_work_identity import WorkIdentityRelation
 
 
@@ -30,6 +31,12 @@ class ActiveWorkIdentityAdmission:
     code: str
     disposition: ActiveWorkIdentityDisposition
     blocking_refs: tuple[str, ...] = ()
+
+
+class ActiveWorkSignalTextSource(Protocol):
+    """Fresh read-only source for the existing persistent Active Work document."""
+
+    def read_text(self) -> str | None: ...
 
 
 def resolve_active_work_identity_admission(
@@ -102,3 +109,49 @@ def resolve_active_work_identity_admission(
         "ACTIVE_WORK_IDENTITY_INDEPENDENT",
         ActiveWorkIdentityDisposition.INDEPENDENT,
     )
+
+
+class FreshActiveWorkIdentityAdmissionResolver:
+    """Fresh-read adapter for the existing Signal, suitable for pre-model wiring.
+
+    Every `resolve` call reads the source again. Missing or malformed source state
+    becomes visibility UNKNOWN and never silently degrades to OBJECTIVE/TARGET or
+    RUN_KEY matching. The resolver performs no persistence and owns no policy.
+    """
+
+    def __init__(
+        self,
+        source: ActiveWorkSignalTextSource,
+        *,
+        now: Callable[[], datetime],
+    ) -> None:
+        self._source = source
+        self._now = now
+
+    def resolve(
+        self,
+        *,
+        work_key: str,
+        intent_fingerprint: str,
+    ) -> ActiveWorkIdentityAdmission:
+        raw = self._source.read_text()
+        if raw is None or not raw.strip():
+            return ActiveWorkIdentityAdmission(
+                False,
+                "ACTIVE_WORK_SIGNAL_UNAVAILABLE",
+                ActiveWorkIdentityDisposition.VISIBILITY_UNKNOWN,
+            )
+        try:
+            signal = parse_active_work_signal(raw)
+        except ValueError:
+            return ActiveWorkIdentityAdmission(
+                False,
+                "ACTIVE_WORK_SIGNAL_INVALID",
+                ActiveWorkIdentityDisposition.VISIBILITY_UNKNOWN,
+            )
+        return resolve_active_work_identity_admission(
+            signal,
+            work_key=work_key,
+            intent_fingerprint=intent_fingerprint,
+            now=self._now(),
+        )
