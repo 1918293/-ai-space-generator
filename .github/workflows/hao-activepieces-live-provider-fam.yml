@@ -1,135 +1,52 @@
-name: Hao Activepieces Idempotency FAM
+name: Hao Activepieces Real LLM FAM
 
 on:
   push:
-    branches:
-      - exp/hao-activepieces-idempotency-fam
+    branches: [exp/hao-activepieces-idempotency-fam]
     paths:
       - '.github/workflows/hao-activepieces-live-provider-fam.yml'
-      - 'hao-cloud-runtime/activepieces-idempotency-fam-runner.mjs'
-      - 'hao-cloud-runtime/activepieces-idempotency-mock-target.mjs'
+      - 'hao-cloud-runtime/activepieces-gemini-posthog-fam-runner.mjs'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  activepieces-idempotency-fam:
+  activepieces-real-llm-fam:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     env:
       ACTIVEPIECES_IMAGE: activepieces/activepieces@sha256:65ea85f5e7ea236416b342eef0d2dbade8da51247aaea495d191eb027095805a
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      POSTHOG_PROJECT_API_KEY: ${{ secrets.POSTHOG_PROJECT_API_KEY }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Pull exact official runtime image
+      - name: Start isolated Activepieces provider
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p activepieces-fam-output
           docker pull "$ACTIVEPIECES_IMAGE"
-          IMAGE_DIGEST="$(docker image inspect "$ACTIVEPIECES_IMAGE" --format '{{index .RepoDigests 0}}')"
-          test -n "$IMAGE_DIGEST"
-          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> "$GITHUB_ENV"
-          printf '%s\n' "$IMAGE_DIGEST" > activepieces-fam-output/image-digest.txt
-          echo "activepieces_image_digest=$IMAGE_DIGEST"
-
-      - name: Start isolated lost-ack mock target
-        shell: bash
-        run: |
-          set -euo pipefail
-          node hao-cloud-runtime/activepieces-idempotency-mock-target.mjs > activepieces-fam-output/mock-target.log 2>&1 &
-          echo $! > activepieces-fam-output/mock-target.pid
-          ready=0
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:9091/health > activepieces-fam-output/mock-health.json 2>/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          test "$ready" -eq 1
-          echo 'mock_target_health=PASS'
-
-      - name: Start ephemeral Activepieces provider with internal API identity
-        shell: bash
-        run: |
-          set -euo pipefail
           JWT_SECRET="$(openssl rand -hex 32)"
           WORKER_TOKEN="$(JWT_SECRET="$JWT_SECRET" node <<'NODE'
-          const crypto = require('crypto');
-          const enc = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
-          const now = Math.floor(Date.now() / 1000);
-          const header = { alg: 'HS256', typ: 'JWT', kid: '1' };
-          const payload = { id: crypto.randomUUID(), type: 'WORKER', iat: now, exp: now + 86400, iss: 'activepieces' };
-          const unsigned = `${enc(header)}.${enc(payload)}`;
-          const signature = crypto.createHmac('sha256', process.env.JWT_SECRET).update(unsigned).digest('base64url');
-          process.stdout.write(`${unsigned}.${signature}`);
+          const crypto=require('crypto'); const enc=v=>Buffer.from(JSON.stringify(v)).toString('base64url'); const now=Math.floor(Date.now()/1000); const h={alg:'HS256',typ:'JWT',kid:'1'}; const p={id:crypto.randomUUID(),type:'WORKER',iat:now,exp:now+86400,iss:'activepieces'}; const u=`${enc(h)}.${enc(p)}`; process.stdout.write(`${u}.${crypto.createHmac('sha256',process.env.JWT_SECRET).update(u).digest('base64url')}`)
           NODE
           )"
-          echo "::add-mask::$JWT_SECRET"
-          echo "::add-mask::$WORKER_TOKEN"
-          docker run -d --rm \
-            --name hao-activepieces-live-fam \
-            --add-host=host.docker.internal:host-gateway \
-            -p 8080:80 \
-            -e AP_DB_TYPE=PGLITE \
-            -e AP_REDIS_TYPE=MEMORY \
-            -e AP_FRONTEND_URL=http://127.0.0.1:80 \
-            -e AP_PIECES_SYNC_MODE=NONE \
-            -e AP_TELEMETRY_ENABLED=false \
-            -e AP_JWT_SECRET="$JWT_SECRET" \
-            -e AP_WORKER_TOKEN="$WORKER_TOKEN" \
-            "$ACTIVEPIECES_IMAGE"
+          echo "::add-mask::$JWT_SECRET"; echo "::add-mask::$WORKER_TOKEN"
+          docker run -d --rm --name hao-activepieces-real-llm-fam -p 8080:80 \
+            -e AP_DB_TYPE=PGLITE -e AP_REDIS_TYPE=MEMORY -e AP_FRONTEND_URL=http://127.0.0.1:80 \
+            -e AP_PIECES_SYNC_MODE=NONE -e AP_TELEMETRY_ENABLED=false \
+            -e AP_JWT_SECRET="$JWT_SECRET" -e AP_WORKER_TOKEN="$WORKER_TOKEN" "$ACTIVEPIECES_IMAGE"
           ready=0
-          for i in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:8080/api/v1/health > activepieces-fam-output/health.json 2>/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 2
-          done
+          for i in $(seq 1 120); do if curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1; then ready=1; break; fi; sleep 2; done
           test "$ready" -eq 1
-          sleep 3
-          if docker logs hao-activepieces-live-fam 2>&1 | grep -F 'AP_WORKER_TOKEN" is a required variable' >/dev/null; then
-            echo 'worker_identity=FAIL'
-            exit 1
-          fi
-          docker exec hao-activepieces-live-fam node -e "fetch('http://127.0.0.1:80/api/v1/health').then(async r=>{const t=await r.text();if(!r.ok)process.exit(1);process.stdout.write(t)}).catch(e=>{console.error(e);process.exit(1)})" > activepieces-fam-output/internal-health.json
-          echo 'activepieces_health=PASS'
-          echo 'worker_identity=PASS'
-          echo 'internal_api_origin=PASS'
-
-      - name: Execute lost-ack and idempotency adversarial FAM
-        shell: bash
+          echo activepieces_health=PASS
+      - name: Execute Activepieces to Gemini to PostHog FAM
         env:
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          FAM_CREDENTIAL="$(openssl rand -hex 18)Aa1!"
-          echo "::add-mask::$FAM_CREDENTIAL"
-          export FAM_CREDENTIAL
-          node hao-cloud-runtime/activepieces-idempotency-fam-runner.mjs
-
-      - name: Capture bounded provider diagnostics
+        run: node hao-cloud-runtime/activepieces-gemini-posthog-fam-runner.mjs
+      - name: Provider diagnostics
         if: always()
-        shell: bash
-        run: docker logs hao-activepieces-live-fam > activepieces-fam-output/provider.log 2>&1 || true
-
-      - name: Stop ephemeral provider and mock target
+        run: docker logs hao-activepieces-real-llm-fam 2>&1 | tail -n 300 || true
+      - name: Stop provider
         if: always()
-        shell: bash
-        run: |
-          docker rm -f hao-activepieces-live-fam >/dev/null 2>&1 || true
-          if test -f activepieces-fam-output/mock-target.pid; then
-            kill "$(cat activepieces-fam-output/mock-target.pid)" >/dev/null 2>&1 || true
-          fi
-
-      - name: Upload bounded non-sensitive evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hao-activepieces-idempotency-fam-${{ github.run_id }}
-          path: activepieces-fam-output/
-          if-no-files-found: warn
-          retention-days: 1
+        run: docker rm -f hao-activepieces-real-llm-fam >/dev/null 2>&1 || true
