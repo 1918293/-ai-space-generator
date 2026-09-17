@@ -29,14 +29,14 @@ FIELD_SOURCES = (
     ("project_scope", "CURRENT:PROJECT"),
     ("logical_target", "CURRENT:TARGET"),
     ("objective", "CURRENT:OBJECTIVE"),
-    ("deliverable_class", "CURRENT:DELIVERABLE"),
+    ("deliverable_identity", "CURRENT:DELIVERABLE"),
     ("acceptance_identity", "REQUIREMENTS:R-036"),
 )
 SEED = CanonicalWorkIdentitySeed(
     project_scope="PROJECT_HAO",
     logical_target="runtime-v2/active-work",
     objective="ACTIVE_WORK_CANONICAL_IDENTITY",
-    deliverable_class="BOUNDED_ENGINEERING_VALIDATION",
+    deliverable_identity="BOUNDED_ENGINEERING_VALIDATION",
     acceptance_identity="SAME_WAIT_JOIN|COMPLETE_NOOP|UNKNOWN_FAIL_CLOSED",
     field_sources=FIELD_SOURCES,
 )
@@ -47,7 +47,7 @@ def projection(*, version=7, objective=None):
         project_scope=SEED.project_scope,
         logical_target=SEED.logical_target,
         objective=objective,
-        deliverable_class=SEED.deliverable_class,
+        deliverable_identity=SEED.deliverable_identity,
         acceptance_identity=SEED.acceptance_identity,
         field_sources=SEED.field_sources,
     )
@@ -75,6 +75,26 @@ def test_material_semantic_delta_changes_semantic_identity():
 
     assert baseline.semantic_fingerprint != changed.semantic_fingerprint
     assert baseline.binding_fingerprint != changed.binding_fingerprint
+
+
+def test_material_deliverable_delta_changes_semantic_identity():
+    baseline = projection()
+    changed_seed = CanonicalWorkIdentitySeed(
+        project_scope=SEED.project_scope,
+        logical_target=SEED.logical_target,
+        objective=SEED.objective,
+        deliverable_identity="PRODUCTION_ACTIVE_WORK_WIRING",
+        acceptance_identity=SEED.acceptance_identity,
+        field_sources=SEED.field_sources,
+    )
+    changed = resolve_work_identity_projection(
+        changed_seed,
+        checkpoint_id="R200",
+        task="Validate Active Work identity",
+        operational_version=7,
+        authority_refs=AUTHORITY_REFS,
+    )
+    assert baseline.semantic_fingerprint != changed.semantic_fingerprint
 
 
 def test_current_fingerprint_is_order_invariant_for_authority_refs():
@@ -124,7 +144,7 @@ def test_each_semantic_field_requires_current_authority_provenance():
         project_scope=SEED.project_scope,
         logical_target=SEED.logical_target,
         objective=SEED.objective,
-        deliverable_class=SEED.deliverable_class,
+        deliverable_identity=SEED.deliverable_identity,
         acceptance_identity=SEED.acceptance_identity,
         field_sources=FIELD_SOURCES[:-1],
     )
@@ -141,7 +161,7 @@ def test_each_semantic_field_requires_current_authority_provenance():
         project_scope=SEED.project_scope,
         logical_target=SEED.logical_target,
         objective=SEED.objective,
-        deliverable_class=SEED.deliverable_class,
+        deliverable_identity=SEED.deliverable_identity,
         acceptance_identity=SEED.acceptance_identity,
         field_sources=tuple(
             (field, "SUPERSEDED:OBJECTIVE") if field == "objective" else (field, ref)
@@ -167,7 +187,7 @@ def test_field_source_location_is_provenance_not_semantic_identity():
         project_scope=SEED.project_scope,
         logical_target=SEED.logical_target,
         objective=SEED.objective,
-        deliverable_class=SEED.deliverable_class,
+        deliverable_identity=SEED.deliverable_identity,
         acceptance_identity=SEED.acceptance_identity,
         field_sources=tuple(
             (field, "CURRENT:OBJECTIVE_V2") if field == "objective" else (field, ref)
@@ -223,6 +243,7 @@ def test_verified_current_can_project_authority_supplied_identity_without_task_i
     assert snapshot.work_identity is not None
     assert snapshot.work_identity.objective == "ACTIVE_WORK_CANONICAL_IDENTITY"
     assert snapshot.work_identity.logical_target == "runtime-v2/active-work"
+    assert snapshot.work_identity.deliverable_identity == "BOUNDED_ENGINEERING_VALIDATION"
     assert snapshot.work_identity.objective != state.task
     assert snapshot.work_identity.field_sources == FIELD_SOURCES
 
@@ -241,7 +262,7 @@ def test_invalid_authority_supplied_identity_fails_closed():
         project_scope="PROJECT_HAO",
         logical_target="runtime-v2/active-work",
         objective="",
-        deliverable_class="BOUNDED_ENGINEERING_VALIDATION",
+        deliverable_identity="BOUNDED_ENGINEERING_VALIDATION",
         acceptance_identity="acceptance",
         field_sources=FIELD_SOURCES,
     )
