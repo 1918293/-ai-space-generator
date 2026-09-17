@@ -1,0 +1,54 @@
+import crypto from 'node:crypto';
+
+const apiKey = process.env.OPENAI_API_KEY;
+const posthogKey = process.env.POSTHOG_PROJECT_API_KEY;
+const posthogHost = process.env.POSTHOG_HOST || 'https://eu.i.posthog.com';
+const runKey = process.env.FAM_RUN_KEY || `FAM-${process.env.GITHUB_RUN_ID || crypto.randomUUID()}`;
+const traceId = crypto.randomUUID();
+const generationId = crypto.randomUUID();
+
+if (!apiKey) throw new Error('OPENAI_API_KEY missing');
+if (!posthogKey) throw new Error('POSTHOG_PROJECT_API_KEY missing');
+
+const started = Date.now();
+const model = 'gpt-5.4-mini';
+const input = 'Reply with exactly: HAO_FAM_REAL_LLM_PASS';
+const response = await fetch('https://api.openai.com/v1/responses', {
+  method: 'POST',
+  headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+  body: JSON.stringify({ model, input, max_output_tokens: 32 }),
+  signal: AbortSignal.timeout(60000),
+});
+const body = await response.json();
+if (!response.ok) throw new Error(`OpenAI call failed: ${response.status} ${JSON.stringify(body).slice(0,500)}`);
+const output = body.output_text ?? body.output?.flatMap(x => x.content ?? []).map(x => x.text ?? '').join('') ?? '';
+const latency = (Date.now() - started) / 1000;
+
+const event = {
+  api_key: posthogKey,
+  event: '$ai_generation',
+  properties: {
+    distinct_id: `hao-fam-real-llm-${runKey}`,
+    '$ai_trace_id': traceId,
+    '$ai_generation_id': generationId,
+    '$ai_model': body.model || model,
+    '$ai_provider': 'openai',
+    '$ai_input': input,
+    '$ai_output_choices': [{ role: 'assistant', content: output }],
+    '$ai_latency': latency,
+    '$ai_input_tokens': body.usage?.input_tokens ?? null,
+    '$ai_output_tokens': body.usage?.output_tokens ?? null,
+    '$ai_is_error': false,
+    '$ai_trace_name': 'Hao FAM real LLM observation E2E',
+    run_key: runKey,
+    environment: 'fam',
+    is_synthetic: false,
+    measurement_source: 'real_openai_api_call',
+    production_canonical_target_touched: false
+  }
+};
+const capture = await fetch(`${posthogHost.replace(/\/$/, '')}/i/v0/e/`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event), signal: AbortSignal.timeout(30000)
+});
+if (!capture.ok) throw new Error(`PostHog capture failed: ${capture.status} ${(await capture.text()).slice(0,500)}`);
+console.log(JSON.stringify({ event: 'hao_fam_real_llm_probe', result: 'PASS', runKey, traceId, generationId, model: body.model || model, inputTokens: body.usage?.input_tokens ?? null, outputTokens: body.usage?.output_tokens ?? null, outputMatched: output.trim() === 'HAO_FAM_REAL_LLM_PASS', productionCanonicalTargetTouched: false }, null, 2));
