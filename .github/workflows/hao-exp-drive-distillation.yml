@@ -1,0 +1,33 @@
+name: Hao EXP Drive Distillation
+
+on:
+  push:
+    branches: [exp/hao-activepieces-idempotency-fam]
+    paths:
+      - '.github/workflows/hao-exp-drive-distillation.yml'
+      - 'hao-cloud-runtime/exp-drive-distillation-runner.mjs'
+      - 'hao-cloud-runtime/exp-drive-distillation-input.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exp-drive-distillation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      POSTHOG_PROJECT_API_KEY: ${{ secrets.POSTHOG_PROJECT_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bounded Drive distillation EXP
+        run: node hao-cloud-runtime/exp-drive-distillation-runner.mjs
+      - name: Upload bounded non-sensitive evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-exp-drive-distillation-${{ github.run_id }}
+          path: exp-drive-distillation-output/
+          if-no-files-found: warn
+          retention-days: 1
