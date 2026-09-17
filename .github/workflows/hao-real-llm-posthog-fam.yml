@@ -17,11 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       POSTHOG_PROJECT_API_KEY: ${{ secrets.POSTHOG_PROJECT_API_KEY }}
       POSTHOG_HOST: https://eu.i.posthog.com
       FAM_RUN_KEY: FAM-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
-      - name: Run bounded real LLM observation probe
+      - name: Run bounded Gemini Free Tier LLM observation probe
         run: node hao-cloud-runtime/real-llm-posthog-fam-probe.mjs
