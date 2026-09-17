@@ -3,10 +3,12 @@ name: Hao Activepieces Live Provider FAM
 on:
   push:
     branches:
-      - exp/hao-system-control-render
+      - exp/hao-activepieces-idempotency-fam
     paths:
       - '.github/workflows/hao-activepieces-live-provider-fam.yml'
       - 'hao-cloud-runtime/activepieces-live-provider-fam-runner.mjs'
+      - 'hao-cloud-runtime/activepieces-idempotency-fam-runner.mjs'
+      - 'hao-cloud-runtime/activepieces-idempotency-mock-target.mjs'
       - 'hao-cloud-runtime/activepieces-active-work.mjs'
       - 'hao-cloud-runtime/maintenance-preflight.mjs'
   workflow_dispatch:
@@ -17,7 +19,7 @@ permissions:
 jobs:
   activepieces-live-provider-fam:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       ACTIVEPIECES_IMAGE: activepieces/activepieces@sha256:65ea85f5e7ea236416b342eef0d2dbade8da51247aaea495d191eb027095805a
     steps:
@@ -34,6 +36,23 @@ jobs:
           echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> "$GITHUB_ENV"
           printf '%s\n' "$IMAGE_DIGEST" > activepieces-fam-output/image-digest.txt
           echo "activepieces_image_digest=$IMAGE_DIGEST"
+
+      - name: Start isolated lost-ack mock target
+        shell: bash
+        run: |
+          set -euo pipefail
+          node hao-cloud-runtime/activepieces-idempotency-mock-target.mjs > activepieces-fam-output/mock-target.log 2>&1 &
+          echo $! > activepieces-fam-output/mock-target.pid
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9091/health > activepieces-fam-output/mock-health.json 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+          echo 'mock_target_health=PASS'
 
       - name: Start ephemeral Activepieces provider with internal API identity
         shell: bash
@@ -55,6 +74,7 @@ jobs:
           echo "::add-mask::$WORKER_TOKEN"
           docker run -d --rm \
             --name hao-activepieces-live-fam \
+            --add-host=host.docker.internal:host-gateway \
             -p 8080:80 \
             -e AP_DB_TYPE=PGLITE \
             -e AP_REDIS_TYPE=MEMORY \
@@ -83,7 +103,7 @@ jobs:
           echo 'worker_identity=PASS'
           echo 'internal_api_origin=PASS'
 
-      - name: Execute real provider run and tag-filter readback
+      - name: Execute baseline real provider run and tag-filter readback
         shell: bash
         env:
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
@@ -94,15 +114,30 @@ jobs:
           export FAM_CREDENTIAL
           node hao-cloud-runtime/activepieces-live-provider-fam-runner.mjs
 
+      - name: Execute lost-ack and idempotency adversarial FAM
+        shell: bash
+        env:
+          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          FAM_CREDENTIAL="$(openssl rand -hex 18)Aa1!"
+          echo "::add-mask::$FAM_CREDENTIAL"
+          export FAM_CREDENTIAL
+          node hao-cloud-runtime/activepieces-idempotency-fam-runner.mjs
+
       - name: Capture bounded provider diagnostics
         if: always()
         shell: bash
         run: docker logs hao-activepieces-live-fam > activepieces-fam-output/provider.log 2>&1 || true
 
-      - name: Stop ephemeral provider
+      - name: Stop ephemeral provider and mock target
         if: always()
         shell: bash
-        run: docker rm -f hao-activepieces-live-fam >/dev/null 2>&1 || true
+        run: |
+          docker rm -f hao-activepieces-live-fam >/dev/null 2>&1 || true
+          if test -f activepieces-fam-output/mock-target.pid; then
+            kill "$(cat activepieces-fam-output/mock-target.pid)" >/dev/null 2>&1 || true
+          fi
 
       - name: Upload bounded non-sensitive evidence
         if: always()
