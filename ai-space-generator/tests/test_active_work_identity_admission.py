@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 from src.active_work_identity_admission import (
     ActiveWorkIdentityDisposition,
+    FreshActiveWorkIdentityAdmissionResolver,
     resolve_active_work_identity_admission,
 )
 from src.active_work_signal import parse_active_work_signal
@@ -90,6 +91,18 @@ def resolve(text: str, *, work_key: str = "RV-051", intent: str = FP_A):
         intent_fingerprint=intent,
         now=NOW,
     )
+
+
+class Source:
+    def __init__(self, *reads: str | None):
+        self.reads = list(reads)
+        self.calls = 0
+
+    def read_text(self):
+        self.calls += 1
+        if not self.reads:
+            return None
+        return self.reads.pop(0)
 
 
 def test_no_live_work_is_clear():
@@ -184,3 +197,39 @@ def test_identity_layer_does_not_treat_objective_or_target_as_work_identity():
     )
     assert decision.allowed is True
     assert decision.disposition == ActiveWorkIdentityDisposition.INDEPENDENT
+
+
+def test_fresh_resolver_reads_source_on_every_resolution():
+    source = Source(
+        signal(),
+        signal(active_slot(1, work_key="RV-051", intent_fingerprint=FP_A)),
+    )
+    resolver = FreshActiveWorkIdentityAdmissionResolver(source, now=lambda: NOW)
+
+    first = resolver.resolve(work_key="RV-051", intent_fingerprint=FP_A)
+    second = resolver.resolve(work_key="RV-051", intent_fingerprint=FP_A)
+
+    assert first.allowed is True
+    assert first.disposition == ActiveWorkIdentityDisposition.CLEAR
+    assert second.allowed is False
+    assert second.disposition == ActiveWorkIdentityDisposition.WAIT_OR_JOIN
+    assert source.calls == 2
+
+
+def test_fresh_resolver_fails_closed_when_signal_is_unavailable():
+    resolver = FreshActiveWorkIdentityAdmissionResolver(Source(None), now=lambda: NOW)
+    decision = resolver.resolve(work_key="RV-051", intent_fingerprint=FP_A)
+    assert decision.allowed is False
+    assert decision.code == "ACTIVE_WORK_SIGNAL_UNAVAILABLE"
+    assert decision.disposition == ActiveWorkIdentityDisposition.VISIBILITY_UNKNOWN
+
+
+def test_fresh_resolver_fails_closed_when_signal_is_malformed():
+    resolver = FreshActiveWorkIdentityAdmissionResolver(
+        Source("HAO_ACTIVE_WORK_SIGNAL_V1\nROLE=BROKEN\n"),
+        now=lambda: NOW,
+    )
+    decision = resolver.resolve(work_key="RV-051", intent_fingerprint=FP_A)
+    assert decision.allowed is False
+    assert decision.code == "ACTIVE_WORK_SIGNAL_INVALID"
+    assert decision.disposition == ActiveWorkIdentityDisposition.VISIBILITY_UNKNOWN
