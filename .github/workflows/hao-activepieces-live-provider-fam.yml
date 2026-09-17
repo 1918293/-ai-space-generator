@@ -35,7 +35,7 @@ jobs:
           printf '%s\n' "$IMAGE_DIGEST" > activepieces-fam-output/image-digest.txt
           echo "activepieces_image_digest=$IMAGE_DIGEST"
 
-      - name: Start ephemeral Activepieces provider with worker identity
+      - name: Start ephemeral Activepieces provider with internal API identity
         shell: bash
         run: |
           set -euo pipefail
@@ -58,7 +58,7 @@ jobs:
             -p 8080:80 \
             -e AP_DB_TYPE=PGLITE \
             -e AP_REDIS_TYPE=MEMORY \
-            -e AP_FRONTEND_URL=http://localhost:8080 \
+            -e AP_FRONTEND_URL=http://127.0.0.1:80 \
             -e AP_PIECES_SYNC_MODE=NONE \
             -e AP_TELEMETRY_ENABLED=false \
             -e AP_JWT_SECRET="$JWT_SECRET" \
@@ -78,8 +78,10 @@ jobs:
             echo 'worker_identity=FAIL'
             exit 1
           fi
+          docker exec hao-activepieces-live-fam node -e "fetch('http://127.0.0.1:80/api/v1/health').then(async r=>{const t=await r.text();if(!r.ok)process.exit(1);process.stdout.write(t)}).catch(e=>{console.error(e);process.exit(1)})" > activepieces-fam-output/internal-health.json
           echo 'activepieces_health=PASS'
           echo 'worker_identity=PASS'
+          echo 'internal_api_origin=PASS'
 
       - name: Execute real provider run and tag-filter readback
         shell: bash
