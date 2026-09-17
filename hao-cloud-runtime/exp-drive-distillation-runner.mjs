@@ -8,7 +8,7 @@ const model = 'gemini-3.5-flash-lite';
 const runKey = `EXP-DRIVE-DISTILL-${process.env.GITHUB_RUN_ID ?? 'local'}`;
 const traceId = crypto.randomUUID();
 const generationId = crypto.randomUUID();
-const sourceLabel = 'EXP Seed 001';
+const sourceLabel = 'EXP Seed 002 | Recent Valuable Content';
 const input = fs.readFileSync('hao-cloud-runtime/exp-drive-distillation-input.txt', 'utf8');
 
 assert.ok(geminiKey, 'GEMINI_API_KEY missing');
@@ -80,7 +80,7 @@ const capture = await fetch('https://eu.i.posthog.com/i/v0/e/', {
       '$ai_is_error': false,
       run_key: runKey,
       source_label: sourceLabel,
-      input_class: 'synthetic_non_sensitive',
+      input_class: 'recent_high_value_non_sensitive',
       is_synthetic: false,
       measurement_source: 'chat_native_drive_github_gemini_exp',
       production_canonical_target_touched: false,

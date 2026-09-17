@@ -1,19 +1,24 @@
-EXP PILOT INPUT
-Purpose: Test a bounded document-distillation workflow.
+RECENT VALUABLE CONTENT — EXP INPUT
 
-Observations:
-- A workflow should process a newly created document from an experimental inbox.
-- It should summarize material deltas, uncertainty, and the next useful action.
-- It must not mutate authoritative records.
-- It should prefer verified zero-cost paths before credential onboarding or billable execution.
-- Observability may record execution evidence but does not become authority.
+Context
+This source distills high-value findings from the current automation exploration and recent verified work.
 
-Expected output fields:
-Source
-Purpose
-Key observations
-Material delta
-Existing-content overlap
-Uncertainty
-Candidate next action
-Canonical-write recommendation
+Verified findings
+- A real Activepieces workflow executed a real Gemini 3.5 Flash-Lite generation and produced correlated PostHog AI-observation evidence.
+- Activepieces retry after a lost acknowledgement can re-execute an external HTTP side effect. Provider retry alone therefore does not guarantee exactly-once outcomes.
+- A protected target with idempotency preserved one logical effect across retry and replay, while an unprotected control duplicated effects.
+- The stable role split is: Activepieces for orchestration/execution/retry; Single Write Gateway for formal mutation, deduplication, CAS/idempotency and exact readback; PostHog for observation evidence; Hao System / Google Drive remains canonical Authority.
+- A free-only constraint must be admitted before credential onboarding or billable/quota-consuming execution. A prior OpenAI path failed with insufficient quota after credential onboarding; the corrected Gemini Free Tier route was validated before execution.
+- PostHog model-cost estimates are observability estimates, not billing proof.
+- A chat-native EXP pipeline has already completed: Drive EXP Inbox -> Gemini distillation -> EXP Output -> PostHog capture, with production canonical target untouched.
+- The first chat-native pilot showed that Activepieces is not required merely to perform distillation inside a normal conversation. Activepieces adds value mainly when execution must start from an external event without opening ChatGPT.
+- Auto may reuse recent or past accessible content, but should prefer current chat and current canonical sources, fresh-read formal controls when needed, and never invent inaccessible history.
+
+Current EXP question
+Distill the material value of these findings and identify the next highest-information action without creating a new authority, gateway, policy engine, or task database.
+
+Constraints
+- EXP only.
+- No production canonical mutation.
+- Prefer reuse and minimal change.
+- Do not repeat already-satisfied synthetic tests unless a new failure mechanism is being tested.
