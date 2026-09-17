@@ -1,0 +1,27 @@
+name: Hao Real LLM PostHog FAM
+
+on:
+  push:
+    branches:
+      - exp/hao-activepieces-idempotency-fam
+    paths:
+      - '.github/workflows/hao-real-llm-posthog-fam.yml'
+      - 'hao-cloud-runtime/real-llm-posthog-fam-probe.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-llm-observation-fam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      POSTHOG_PROJECT_API_KEY: ${{ secrets.POSTHOG_PROJECT_API_KEY }}
+      POSTHOG_HOST: https://eu.i.posthog.com
+      FAM_RUN_KEY: FAM-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bounded real LLM observation probe
+        run: node hao-cloud-runtime/real-llm-posthog-fam-probe.mjs
