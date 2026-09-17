@@ -21,7 +21,7 @@ _PROVENANCE_FIELDS = (
     "deliverable_identity",
     "acceptance_identity",
 )
-_REQUIREMENT_VERIFICATION_ROW_ID = re.compile(r"^RV-[1-9][0-9]*$")
+_REQUIREMENT_VERIFICATION_ROW_ID = re.compile(r"^RV-[0-9]*[1-9][0-9]*$")
 
 
 @dataclass(frozen=True)
