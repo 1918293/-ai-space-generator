@@ -50,3 +50,5 @@ jobs:
       - name: Stop provider
         if: always()
         run: docker rm -f hao-activepieces-real-llm-fam >/dev/null 2>&1 || true
+
+# FAM execution trigger: real Activepieces -> Gemini Free Tier -> PostHog verification
