@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Iterable
 
+from .operational_state import CommandActor
+
 
 _SOURCE_HAO_INTENT = "HAO_INTENT"
 _SOURCE_CURRENT_AUTHORITY = "CURRENT_AUTHORITY"
@@ -17,9 +19,6 @@ _PROVENANCE_FIELDS = (
     "objective",
     "deliverable_identity",
     "acceptance_identity",
-)
-_HAO_INTENT_REQUIRED_FIELDS = frozenset(
-    {"objective", "deliverable_identity", "acceptance_identity"}
 )
 
 
@@ -36,6 +35,11 @@ class CanonicalWorkIdentitySeed:
     either `HAO_INTENT` or `CURRENT_AUTHORITY`. `HAO_INTENT` refs must have been
     admitted by the trusted current-interaction path; `CURRENT_AUTHORITY` refs
     must belong to the verified Current authority set.
+
+    A continuation instruction does not need to restate every semantic field.
+    When Hao supplies no material delta, objective/deliverable/acceptance may
+    remain source-backed by Current Authority while the separate direct-Hao
+    interaction ref proves the current instruction provenance.
     """
 
     work_key: str
@@ -53,8 +57,8 @@ class ResolvedWorkIdentityProjection:
 
     `work_key` answers "which work instance?". `intent_fingerprint` answers
     "which material intent for that work?". `current_fingerprint` identifies the
-    exact trusted Current/direct-Hao-intent snapshot. `binding_fingerprint` binds
-    all three without collapsing their distinct semantics.
+    exact trusted Current/direct-Hao-interaction snapshot. `binding_fingerprint`
+    binds all three without collapsing their distinct semantics.
     """
 
     work_key: str
@@ -112,6 +116,33 @@ def _sha256_payload(payload: dict[str, object]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(material).hexdigest()
+
+
+def direct_hao_intent_ref(
+    *,
+    user_text: str,
+    actor: CommandActor,
+    event_id: str,
+) -> str:
+    """Mint a non-Authority provenance ref from the trusted interaction seam.
+
+    The ref proves which raw USER interaction is bound to this resolution. It
+    does not interpret, normalize, or promote the text into Authority. Blank or
+    non-USER inputs return an empty ref so identity resolution fails closed while
+    ordinary non-identity context handling can remain backward compatible.
+    """
+
+    if actor != CommandActor.USER:
+        return ""
+    if not user_text.strip() or not event_id.strip():
+        return ""
+    fingerprint = _sha256_payload(
+        {
+            "event_id": event_id.strip(),
+            "user_text": user_text,
+        }
+    )
+    return "HAO_INTENT:" + fingerprint.removeprefix("sha256:")
 
 
 def _normalized_refs(
@@ -181,12 +212,6 @@ def _normalized_field_sources(
         if source_class == _SOURCE_HAO_INTENT and ref not in intent_set:
             raise ValueError(f"WORK_IDENTITY_SOURCE_NOT_HAO_INTENT:{field}")
 
-    if not any(
-        by_field[field][0] == _SOURCE_HAO_INTENT
-        for field in _HAO_INTENT_REQUIRED_FIELDS
-    ):
-        raise ValueError("WORK_IDENTITY_DIRECT_HAO_INTENT_BINDING_REQUIRED")
-
     return tuple(
         (field, by_field[field][0], by_field[field][1])
         for field in _PROVENANCE_FIELDS
@@ -238,6 +263,8 @@ def resolve_work_identity_projection(
     acceptance_identity = _required_text(seed.acceptance_identity, "WORK_IDENTITY_ACCEPTANCE_REQUIRED")
     refs = normalized_authority_refs(authority_refs)
     direct_intent_refs = normalized_intent_refs(intent_refs)
+    if not direct_intent_refs:
+        raise ValueError("WORK_IDENTITY_DIRECT_HAO_INTENT_BINDING_REQUIRED")
     field_sources = _normalized_field_sources(
         seed.field_sources,
         authority_refs=refs,
