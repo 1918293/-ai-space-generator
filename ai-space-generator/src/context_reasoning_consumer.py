@@ -5,6 +5,7 @@ from typing import Protocol
 
 from .context_bound_reasoning import ContextBoundReasoningResult
 from .control_gateway import PreModelContextRequest
+from .execution_invariants import context_receipt_is_current
 from .operational_state import ActiveOperationalState, CommandActor
 
 
@@ -44,7 +45,9 @@ class ContextBoundReasoningConsumer:
     existing ControlPlane decides whether an action can be selected.
 
     This service performs no external provider mutation. It produces a prepared
-    controlled action projection for the existing execution path.
+    controlled action projection for the existing execution path. If Current
+    changes while the model is reasoning, the prepared action is discarded
+    before it can leave this consumer.
     """
 
     def __init__(
@@ -82,6 +85,20 @@ class ContextBoundReasoningConsumer:
         )
 
         prepared = result.prepared
+        if prepared is not None:
+            model_input = result.admission.model_input
+            if model_input is None:
+                return ContextReasoningConsumerResult(
+                    code="PRE_MODEL_CURRENT_RECEIPT_MISSING_BEFORE_ACTION",
+                    action_selected=False,
+                )
+            fresh_state = self._state_source.get()
+            if not context_receipt_is_current(model_input.receipt, fresh_state):
+                return ContextReasoningConsumerResult(
+                    code="PRE_MODEL_CURRENT_CHANGED_BEFORE_ACTION",
+                    action_selected=False,
+                )
+
         proposal = None if prepared is None else prepared.resolution.proposal
         record = None if prepared is None else prepared.record
         return ContextReasoningConsumerResult(
