@@ -6,6 +6,7 @@ import json
 from typing import Protocol
 
 from .action_catalog import ModelActionIntent
+from .active_work_identity_admission import ActiveWorkIdentityAdmission
 from .control_gateway import (
     ControlPlaneGateway,
     ModelIngressRequest,
@@ -126,6 +127,17 @@ class ContextSemanticsResolver(Protocol):
         request: PreModelContextRequest,
         receipt: PreModelContextReceipt,
     ) -> tuple[AdmittedContextItem, ...] | None: ...
+
+
+class ContextActiveWorkAdmissionResolver(Protocol):
+    """Read-only Active Work check for an already-hydrated work identity."""
+
+    def resolve(
+        self,
+        *,
+        work_key: str,
+        intent_fingerprint: str,
+    ) -> ActiveWorkIdentityAdmission: ...
 
 
 class ContextBoundIntentModel(Protocol):
@@ -375,9 +387,11 @@ class ContextBoundPreModelGateway:
         self,
         structural_gateway: PreModelContextGateway,
         semantic_resolver: ContextSemanticsResolver,
+        active_work_resolver: ContextActiveWorkAdmissionResolver | None = None,
     ) -> None:
         self._structural_gateway = structural_gateway
         self._semantic_resolver = semantic_resolver
+        self._active_work_resolver = active_work_resolver
 
     def admit(
         self,
@@ -404,6 +418,14 @@ class ContextBoundPreModelGateway:
             )
         except ValueError as exc:
             return ContextBoundAdmission(False, str(exc))
+
+        if work_identity is not None and self._active_work_resolver is not None:
+            active_work = self._active_work_resolver.resolve(
+                work_key=work_identity.work_key,
+                intent_fingerprint=work_identity.intent_fingerprint,
+            )
+            if not active_work.allowed:
+                return ContextBoundAdmission(False, active_work.code)
 
         return ContextBoundAdmission(
             True,
