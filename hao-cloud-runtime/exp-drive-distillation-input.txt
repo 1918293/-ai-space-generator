@@ -1,10 +1,12 @@
 CLASSIFICATION: synthetic_non_sensitive
-Purpose: Validate privacy guards and dynamic source-label wiring before an unattended Drive-trigger EXP.
+Purpose: Verify that a future condition-watch can detect a new Drive EXP Inbox document and complete the bounded distillation pipeline without Hao opening ChatGPT.
 
 Observations:
-- The public GitHub EXP runner must reject inputs that are not explicitly marked synthetic_non_sensitive.
-- The source label should be supplied by a separate bounded metadata file.
-- PostHog observation should receive hashes and execution metadata rather than raw document or distillation content.
+- This file is synthetic and contains no private production data.
+- The watcher should route it through the existing EXP GitHub workflow only once.
+- Gemini should return the bounded distillation schema.
+- PostHog should receive redacted execution metadata, not raw document content.
+- The result should be written only to EXP Output and read back.
 - Production canonical targets must remain untouched.
 
-Expected result: PASS only if all guards hold.
+Expected result: unattended trigger-path PASS or a bounded failure report.
