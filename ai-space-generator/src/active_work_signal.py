@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+import re
+
+from .resolved_work_identity import WorkIdentityRelation
 
 
 SIGNAL_HEADER = "HAO_ACTIVE_WORK_SIGNAL_V1"
@@ -36,6 +39,11 @@ _SLOT_FIELDS = (
     "READBACK_STATE",
     "OWNER",
 )
+_OPTIONAL_IDENTITY_FIELDS = (
+    "WORK_KEY",
+    "INTENT_FINGERPRINT",
+)
+_INTENT_FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class ActiveWorkStatus(StrEnum):
@@ -59,6 +67,8 @@ class ActiveWorkSlot:
     expected_delta: str
     readback_state: str
     owner: str
+    work_key: str | None = None
+    intent_fingerprint: str | None = None
 
     def is_live(self, now: datetime) -> bool:
         _require_aware(now, "NOW")
@@ -73,6 +83,29 @@ class ActiveWorkSlot:
         if self.status != ActiveWorkStatus.ACTIVE:
             raise ValueError("ACTIVE_WORK_REF_REQUIRES_ACTIVE_SLOT")
         return f"ACTIVE_WORK:{self.slot_id}:G{self.generation}:{self.run_key}"
+
+    def identity_relation(
+        self,
+        *,
+        work_key: str,
+        intent_fingerprint: str,
+        now: datetime,
+    ) -> WorkIdentityRelation:
+        candidate_work_key = work_key.strip()
+        candidate_intent = intent_fingerprint.strip()
+        if not candidate_work_key or candidate_work_key == "NONE":
+            raise ValueError("ACTIVE_WORK_QUERY_WORK_KEY_REQUIRED")
+        if _INTENT_FINGERPRINT.fullmatch(candidate_intent) is None:
+            raise ValueError("ACTIVE_WORK_QUERY_INTENT_FINGERPRINT_INVALID")
+        if not self.is_live(now):
+            return WorkIdentityRelation.UNKNOWN
+        if self.work_key is None or self.intent_fingerprint is None:
+            return WorkIdentityRelation.UNKNOWN
+        if self.work_key != candidate_work_key:
+            return WorkIdentityRelation.DIFFERENT_WORK
+        if self.intent_fingerprint == candidate_intent:
+            return WorkIdentityRelation.SAME_WORK_SAME_INTENT
+        return WorkIdentityRelation.SAME_WORK_CHANGED_INTENT
 
 
 @dataclass(frozen=True)
@@ -93,6 +126,37 @@ class ActiveWorkSignal:
             slot
             for slot in self.slots
             if slot.objective == objective and slot.is_live(now)
+        )
+
+    def live_identity_relations(
+        self,
+        *,
+        work_key: str,
+        intent_fingerprint: str,
+        now: datetime,
+    ) -> tuple[tuple[ActiveWorkSlot, WorkIdentityRelation], ...]:
+        _require_aware(now, "NOW")
+        return tuple(
+            (
+                slot,
+                slot.identity_relation(
+                    work_key=work_key,
+                    intent_fingerprint=intent_fingerprint,
+                    now=now,
+                ),
+            )
+            for slot in self.slots
+            if slot.is_live(now)
+        )
+
+    def has_live_ref(self, ref: str, *, now: datetime) -> bool:
+        candidate = ref.strip()
+        if not candidate:
+            raise ValueError("ACTIVE_WORK_REF_REQUIRED")
+        _require_aware(now, "NOW")
+        return any(
+            slot.is_live(now) and slot.ref == candidate
+            for slot in self.slots
         )
 
 
@@ -137,6 +201,29 @@ def _validate_controls(values: dict[str, str]) -> None:
             raise ValueError(f"ACTIVE_WORK_SIGNAL_CONTROL_INVALID:{key}")
 
 
+def _optional_identity(
+    values: dict[str, str],
+    index: int,
+) -> tuple[str | None, str | None]:
+    prefix = f"S{index}_"
+    keys = tuple(f"{prefix}{field}" for field in _OPTIONAL_IDENTITY_FIELDS)
+    present = tuple(key in values for key in keys)
+    if not any(present):
+        return None, None
+    if not all(present):
+        raise ValueError(f"ACTIVE_WORK_IDENTITY_PAIR_INCOMPLETE:S{index}")
+
+    work_key = values[keys[0]]
+    intent_fingerprint = values[keys[1]]
+    if work_key == "NONE" and intent_fingerprint == "NONE":
+        return None, None
+    if work_key == "NONE" or intent_fingerprint == "NONE":
+        raise ValueError(f"ACTIVE_WORK_IDENTITY_PAIR_INCOMPLETE:S{index}")
+    if _INTENT_FINGERPRINT.fullmatch(intent_fingerprint) is None:
+        raise ValueError(f"ACTIVE_WORK_INTENT_FINGERPRINT_INVALID:S{index}")
+    return work_key, intent_fingerprint
+
+
 def _slot(values: dict[str, str], index: int) -> ActiveWorkSlot:
     prefix = f"S{index}_"
     raw: dict[str, str] = {}
@@ -145,6 +232,8 @@ def _slot(values: dict[str, str], index: int) -> ActiveWorkSlot:
         if key not in values:
             raise ValueError(f"ACTIVE_WORK_SIGNAL_SLOT_FIELD_MISSING:{key}")
         raw[field] = values[key]
+
+    work_key, intent_fingerprint = _optional_identity(values, index)
 
     try:
         status = ActiveWorkStatus(raw["STATUS"])
@@ -164,6 +253,8 @@ def _slot(values: dict[str, str], index: int) -> ActiveWorkSlot:
             for field in _SLOT_FIELDS
             if field not in {"STATUS", "GENERATION"} and raw[field] != "NONE"
         ]
+        if work_key is not None or intent_fingerprint is not None:
+            nonempty.extend(_OPTIONAL_IDENTITY_FIELDS)
         if nonempty:
             raise ValueError(f"ACTIVE_WORK_EMPTY_SLOT_NOT_CLEARED:S{index}")
         return ActiveWorkSlot(
@@ -181,6 +272,8 @@ def _slot(values: dict[str, str], index: int) -> ActiveWorkSlot:
             expected_delta="NONE",
             readback_state="NONE",
             owner="NONE",
+            work_key=None,
+            intent_fingerprint=None,
         )
 
     if generation < 1:
@@ -222,6 +315,8 @@ def _slot(values: dict[str, str], index: int) -> ActiveWorkSlot:
         expected_delta=raw["EXPECTED_DELTA"],
         readback_state=raw["READBACK_STATE"],
         owner=raw["OWNER"],
+        work_key=work_key,
+        intent_fingerprint=intent_fingerprint,
     )
 
 
@@ -232,6 +327,7 @@ def parse_active_work_signal(text: str) -> ActiveWorkSignal:
     expected_keys = set(_REQUIRED_CONTROL_VALUES)
     for index in range(1, MAX_SLOTS + 1):
         expected_keys.update(f"S{index}_{field}" for field in _SLOT_FIELDS)
+        expected_keys.update(f"S{index}_{field}" for field in _OPTIONAL_IDENTITY_FIELDS)
     unexpected = set(values) - expected_keys
     if unexpected:
         raise ValueError("ACTIVE_WORK_SIGNAL_UNEXPECTED_FIELD")
