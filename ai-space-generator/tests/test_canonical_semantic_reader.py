@@ -58,11 +58,20 @@ class RangeReader:
         }
         self.versions = versions or {"hao": "5190", "repo": "128138e"}
         self.reads = []
+        self.batch_reads = []
         self.version_reads = []
 
     def read_range(self, spreadsheet_id, range_a1):
         self.reads.append((spreadsheet_id, range_a1))
         return self.values.get((spreadsheet_id, range_a1))
+
+    def read_ranges(self, spreadsheet_id, range_a1s):
+        ranges = tuple(range_a1s)
+        self.batch_reads.append((spreadsheet_id, ranges))
+        return {
+            range_a1: self.values.get((spreadsheet_id, range_a1))
+            for range_a1 in ranges
+        }
 
     def source_version(self, file_id):
         self.version_reads.append(file_id)
@@ -141,8 +150,46 @@ def test_fresh_exact_canonical_ranges_become_model_usable_semantics():
     assert items["CURRENT:A540"].source_version == "5190"
     assert items["FAIL:OUT_OF_GRID_SEARCH"].disposition == "DO_NOT_REPEAT"
     assert items["FAIL:OUT_OF_GRID_SEARCH"].binding_id == "legacy.search.unbounded"
+    assert reader.reads == []
+    assert reader.batch_reads == [
+        (
+            "hao",
+            (
+                "06_Config!A540:F540",
+                "04_Verification_Log!A5228:N5228",
+                "01_Intake!A1:V1",
+            ),
+        ),
+        ("repo", ("PR17!A1:B1",)),
+    ]
+    assert reader.version_reads == ["hao", "repo"]
+
+
+
+def test_reader_without_batch_capability_keeps_legacy_fresh_read_path():
+    class LegacyReader:
+        def __init__(self):
+            baseline = RangeReader()
+            self.values = baseline.values
+            self.versions = baseline.versions
+            self.reads = []
+            self.version_reads = []
+
+        def read_range(self, spreadsheet_id, range_a1):
+            self.reads.append((spreadsheet_id, range_a1))
+            return self.values.get((spreadsheet_id, range_a1))
+
+        def source_version(self, file_id):
+            self.version_reads.append(file_id)
+            return self.versions.get(file_id, "")
+
+    reader = LegacyReader()
+
+    admission = gateway(reader).admit(state(), request())
+
+    assert admission.allowed is True
     assert len(reader.reads) == 4
-    assert len(reader.version_reads) == 4
+    assert reader.version_reads == ["hao", "repo"]
 
 
 def test_missing_configured_prior_attempt_range_fails_closed_before_model():
