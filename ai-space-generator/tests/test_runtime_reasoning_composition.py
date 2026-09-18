@@ -85,11 +85,20 @@ class StateSource:
 class Reader:
     def __init__(self):
         self.reads = []
+        self.batch_reads = []
         self.versions = []
 
     def read_range(self, spreadsheet_id, range_a1):
         self.reads.append((spreadsheet_id, range_a1))
         return [[range_a1, "fresh canonical semantic"]]
+
+    def read_ranges(self, spreadsheet_id, range_a1s):
+        ranges = tuple(range_a1s)
+        self.batch_reads.append((spreadsheet_id, ranges))
+        return {
+            range_a1: [[range_a1, "fresh canonical semantic"]]
+            for range_a1 in ranges
+        }
 
     def source_version(self, file_id):
         self.versions.append(file_id)
@@ -165,8 +174,19 @@ def test_runtime_composition_forces_raw_user_turn_through_fresh_semantics_before
     assert result.action_selected is True
     assert result.action_id == "RUN-188:A0001:formal.persist"
     assert len(model.calls) == 1
-    assert len(reader.reads) == 4
-    assert reader.versions == ["sheet-main"] * 4
+    assert reader.reads == []
+    assert reader.batch_reads == [
+        (
+            "sheet-main",
+            (
+                "06_Config!A540:F540",
+                "01_Intake!A5192:V5192",
+                "01_Intake!A5000:V5000",
+                "01_Intake!A5001:V5001",
+            ),
+        )
+    ]
+    assert reader.versions == ["sheet-main"]
     model_input = model.calls[0]
     assert model_input.receipt.task == TASK
     assert model_input.receipt.operational_version == 188
