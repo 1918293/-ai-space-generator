@@ -138,6 +138,44 @@ def _required_source_identities(receipt: PreModelContextReceipt) -> tuple[set[tu
     return exact, set(receipt.authority_refs)
 
 
+def _read_selected_ranges(
+    reader: CanonicalRangeReader,
+    selected: tuple[CanonicalSemanticRangeSource, ...],
+) -> dict[tuple[str, str], object | None] | None:
+    """Fresh-read selected ranges with one batch per spreadsheet when supported.
+
+    This is a per-resolution transport optimization only. It does not cache
+    canonical values across user turns, weaken fail-closed semantics, or create a
+    second source of truth. Readers without a batch capability retain the exact
+    legacy one-range-at-a-time behavior.
+    """
+
+    grouped: dict[str, list[CanonicalSemanticRangeSource]] = {}
+    for source in selected:
+        grouped.setdefault(source.spreadsheet_id, []).append(source)
+
+    resolved: dict[tuple[str, str], object | None] = {}
+    batch_reader = getattr(reader, "read_ranges", None)
+    for spreadsheet_id, sources in grouped.items():
+        ranges = tuple(source.range_a1 for source in sources)
+        if callable(batch_reader):
+            batch_values = batch_reader(spreadsheet_id, ranges)
+            if batch_values is None:
+                return None
+            for source in sources:
+                if source.range_a1 not in batch_values:
+                    return None
+                resolved[(source.kind, source.ref)] = batch_values[source.range_a1]
+            continue
+
+        for source in sources:
+            values = reader.read_range(source.spreadsheet_id, source.range_a1)
+            if values is None:
+                return None
+            resolved[(source.kind, source.ref)] = values
+    return resolved
+
+
 class ConfiguredCanonicalSemanticsResolver(ContextSemanticsResolver):
     """Fresh-read exact canonical ranges selected by the structural receipt.
 
@@ -193,20 +231,31 @@ class ConfiguredCanonicalSemanticsResolver(ContextSemanticsResolver):
 
         admitted: list[AdmittedContextItem] = []
         try:
-            for source in selected:
-                values = self._reader.read_range(source.spreadsheet_id, source.range_a1)
-                if values is None:
-                    return None
-                summary = _normalized_range_summary(values)
+            selected_tuple = tuple(selected)
+            range_values = _read_selected_ranges(self._reader, selected_tuple)
+            if range_values is None:
+                return None
+
+            source_versions: dict[str, str] = {}
+            for source in selected_tuple:
+                if source.source_file_id in source_versions:
+                    continue
                 version = self._reader.source_version(source.source_file_id).strip()
                 if not version:
                     return None
+                source_versions[source.source_file_id] = version
+
+            for source in selected_tuple:
+                values = range_values.get((source.kind, source.ref))
+                if values is None:
+                    return None
+                summary = _normalized_range_summary(values)
                 admitted.append(
                     AdmittedContextItem(
                         ref=source.ref,
                         kind=source.kind,
                         summary=summary,
-                        source_version=version,
+                        source_version=source_versions[source.source_file_id],
                         project_scope=source.project_scope,
                         applicability=source.applicability,
                         disposition=source.disposition,
@@ -252,6 +301,45 @@ class GoogleWorkspaceCanonicalRangeReader:
         except Exception:
             return None
         return result.get("values")
+
+    def read_ranges(
+        self,
+        spreadsheet_id: str,
+        range_a1s: tuple[str, ...],
+    ) -> Mapping[str, object | None] | None:
+        """Fresh batchGet for exact ranges on one spreadsheet.
+
+        Google Sheets preserves requested range ordering in valueRanges. Mapping
+        back by the caller-provided A1 strings avoids depending on provider
+        normalization of returned range labels.
+        """
+
+        ranges = tuple(value.strip() for value in range_a1s)
+        if not ranges or any(not value for value in ranges):
+            return None
+        try:
+            result = (
+                self._sheets.spreadsheets()
+                .values()
+                .batchGet(
+                    spreadsheetId=spreadsheet_id,
+                    ranges=list(ranges),
+                    valueRenderOption="UNFORMATTED_VALUE",
+                    dateTimeRenderOption="FORMATTED_STRING",
+                )
+                .execute()
+            )
+        except Exception:
+            return None
+        value_ranges = result.get("valueRanges")
+        if not isinstance(value_ranges, list) or len(value_ranges) != len(ranges):
+            return None
+        resolved: dict[str, object | None] = {}
+        for requested, payload in zip(ranges, value_ranges):
+            if not isinstance(payload, Mapping):
+                return None
+            resolved[requested] = payload.get("values")
+        return resolved
 
     def source_version(self, file_id: str) -> str:
         try:
