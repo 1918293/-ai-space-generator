@@ -100,7 +100,7 @@ resource "google_cloud_run_v2_service" "api" {
       }
 
       dynamic "env" {
-        for_each = merge(local.common_env, {
+        for_each = merge(local.common_env, local.api_reasoning_env, {
           HAO_RUNTIME_ROLE         = "api"
           HAO_SECRET_BINDINGS_JSON = jsonencode(local.api_secret_bindings)
         })
