@@ -419,7 +419,12 @@ class ContextBoundPreModelGateway:
         except ValueError as exc:
             return ContextBoundAdmission(False, str(exc))
 
-        if work_identity is not None and self._active_work_resolver is not None:
+        if work_identity is not None:
+            if self._active_work_resolver is None:
+                return ContextBoundAdmission(
+                    False,
+                    "ACTIVE_WORK_CONFIGURATION_REQUIRED",
+                )
             active_work = self._active_work_resolver.resolve(
                 work_key=work_identity.work_key,
                 intent_fingerprint=work_identity.intent_fingerprint,
