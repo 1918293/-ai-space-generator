@@ -147,7 +147,7 @@ def test_fresh_exact_canonical_ranges_become_model_usable_semantics():
         "REG:NO_FALSE_COMPLETION",
     }
     assert json.loads(items["CURRENT:A540"].summary)[0][2] == "action admission binding"
-    assert items["CURRENT:A540"].source_version == "5190"
+    assert items["CURRENT:A540"].source_version.startswith("range-sha256:")
     assert items["FAIL:OUT_OF_GRID_SEARCH"].disposition == "DO_NOT_REPEAT"
     assert items["FAIL:OUT_OF_GRID_SEARCH"].binding_id == "legacy.search.unbounded"
     assert reader.reads == []
@@ -162,7 +162,7 @@ def test_fresh_exact_canonical_ranges_become_model_usable_semantics():
         ),
         ("repo", ("PR17!A1:B1",)),
     ]
-    assert reader.version_reads == ["hao", "repo"]
+    assert reader.version_reads == []
 
 
 
@@ -189,7 +189,7 @@ def test_reader_without_batch_capability_keeps_legacy_fresh_read_path():
 
     assert admission.allowed is True
     assert len(reader.reads) == 4
-    assert reader.version_reads == ["hao", "repo"]
+    assert reader.version_reads == []
 
 
 def test_missing_configured_prior_attempt_range_fails_closed_before_model():
@@ -224,13 +224,44 @@ def test_overbroad_canonical_range_is_not_truncated_into_fake_semantics():
     assert admission.code == "PRE_MODEL_SEMANTICS_UNRESOLVED"
 
 
-def test_source_version_failure_blocks_semantic_admission():
-    reader = RangeReader(versions={"hao": "", "repo": "128138e"})
+def test_unrelated_whole_file_version_change_does_not_churn_semantic_fingerprint():
+    first_reader = RangeReader(versions={"hao": "5190", "repo": "128138e"})
+    second_reader = RangeReader(versions={"hao": "9999", "repo": "different-file-version"})
 
-    admission = gateway(reader).admit(state(), request())
+    first = gateway(first_reader).admit(state(), request())
+    second = gateway(second_reader).admit(state(), request())
 
-    assert admission.allowed is False
-    assert admission.code == "PRE_MODEL_SEMANTICS_UNRESOLVED"
+    assert first.allowed is True
+    assert second.allowed is True
+    assert first.model_input is not None
+    assert second.model_input is not None
+    assert first.model_input.semantic_fingerprint == second.model_input.semantic_fingerprint
+    assert first_reader.version_reads == []
+    assert second_reader.version_reads == []
+
+
+def test_selected_range_content_change_changes_content_version_and_semantic_fingerprint():
+    first_reader = RangeReader()
+    second_reader = RangeReader()
+    second_reader.values[("hao", "06_Config!A540:F540")] = [
+        ["A540", "CURRENT", "materially changed action admission binding"]
+    ]
+
+    first = gateway(first_reader).admit(state(), request())
+    second = gateway(second_reader).admit(state(), request())
+
+    assert first.allowed is True
+    assert second.allowed is True
+    assert first.model_input is not None
+    assert second.model_input is not None
+    first_item = next(
+        item for item in first.model_input.admitted_context if item.ref == "CURRENT:A540"
+    )
+    second_item = next(
+        item for item in second.model_input.admitted_context if item.ref == "CURRENT:A540"
+    )
+    assert first_item.source_version != second_item.source_version
+    assert first.model_input.semantic_fingerprint != second.model_input.semantic_fingerprint
 
 
 def test_semantic_config_contains_locations_not_canonical_content():
