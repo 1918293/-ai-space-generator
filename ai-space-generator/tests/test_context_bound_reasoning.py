@@ -454,6 +454,38 @@ def test_responses_boundary_receives_semantics_not_only_refs():
     assert instructions.index("<model_intent_shape>") < instructions.index("<hao_runtime_context>")
 
 
+def test_responses_boundary_hidden_semantic_fingerprint_still_binds_intent_identity():
+    first_input = admitted_model_input()
+    first_boundary = ContextBoundResponsesIntentBoundary(
+        FakeResponsesClient(json.dumps(valid_response_payload())),
+        model="gpt-5.6-luna",
+    )
+    first_intent = first_boundary.invoke(first_input)
+
+    changed_items = list(semantic_items())
+    changed_items[0] = AdmittedContextItem(
+        ref=changed_items[0].ref,
+        kind=changed_items[0].kind,
+        summary=changed_items[0].summary + " Material semantic delta.",
+        source_version=changed_items[0].source_version,
+        project_scope=changed_items[0].project_scope,
+        applicability=changed_items[0].applicability,
+        disposition=changed_items[0].disposition,
+        binding_id=changed_items[0].binding_id,
+    )
+    changed_admission = semantic_gateway(tuple(changed_items)).admit(state(), request())
+    assert changed_admission.allowed is True
+    assert changed_admission.model_input is not None
+    second_client = FakeResponsesClient(json.dumps(valid_response_payload()))
+    second_boundary = ContextBoundResponsesIntentBoundary(
+        second_client,
+        model="gpt-5.6-luna",
+    )
+    second_intent = second_boundary.invoke(changed_admission.model_input)
+
+    assert first_intent.intent_id != second_intent.intent_id
+    assert '"semantic_context_fingerprint"' not in second_client.responses.calls[0]["instructions"]
+
 def test_responses_boundary_requires_reported_used_refs():
     payload = valid_response_payload()
     payload.pop("model_reported_used_refs")
