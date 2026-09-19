@@ -219,4 +219,5 @@ class HaoCanonicalPreModelResolver:
             prior_attempt_lookup_complete=snapshot.prior_attempt_lookup_complete,
             regression_lookup_complete=snapshot.regression_lookup_complete,
             reuse_disposition=snapshot.reuse_disposition,
+            work_identity=snapshot.work_identity,
         )
