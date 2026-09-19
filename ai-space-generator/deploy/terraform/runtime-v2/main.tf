@@ -44,6 +44,13 @@ locals {
     HAO_PARENT_TASK_PLANS_JSON       = var.parent_task_plans_json
   }
 
+  api_reasoning_env = {
+    HAO_REASONING_MODEL                    = var.reasoning_model
+    HAO_CONTEXT_REASONING_ROUTES_JSON     = var.context_reasoning_routes_json
+    HAO_CANONICAL_SEMANTIC_SOURCES_JSON  = var.canonical_semantic_sources_json
+    HAO_ACTIVE_WORK_INDEX_SOURCE_JSON     = var.active_work_index_source_json
+  }
+
   secret_version_paths = {
     temporal    = var.enable_runtime_workloads ? "${google_secret_manager_secret.temporal_api_key.id}/versions/${var.temporal_api_key_version}" : null
     database    = var.enable_runtime_workloads ? "${google_secret_manager_secret.database_url.id}/versions/${var.database_url_secret_version}" : null
