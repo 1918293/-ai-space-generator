@@ -3,6 +3,10 @@ import json
 import pytest
 
 from src.action_catalog import ActionBinding, ActionCatalog, ModelActionIntent
+from src.active_work_identity_admission import (
+    ActiveWorkIdentityAdmission,
+    ActiveWorkIdentityDisposition,
+)
 from src.context_bound_reasoning import (
     AdmittedContextItem,
     ContextBoundPreModelGateway,
@@ -18,6 +22,11 @@ from src.control_gateway import (
 )
 from src.execution_control import ActionArchetype, ActionExternality, Mode
 from src.operational_state import ActiveOperationalState, CommandActor
+from src.resolved_work_identity import (
+    CanonicalWorkIdentitySeed,
+    direct_hao_intent_ref,
+    resolve_work_identity_projection,
+)
 
 
 TASK = "Runtime v2 semantic binding"
@@ -100,6 +109,70 @@ def semantic_items(
     )
 
 
+def generic_work_identity():
+    intent_ref = direct_hao_intent_ref(
+        user_text=request().user_text,
+        actor=CommandActor.USER,
+        event_id=request().event_id,
+    )
+    seed = CanonicalWorkIdentitySeed(
+        work_key="PROJECT_HAO:GENERIC_NON_RV_WORK",
+        project_scope="PROJECT_HAO",
+        logical_target="runtime-v2/generic-current-work",
+        objective="Reuse verified Current identity for non-RV Active Work coordination",
+        deliverable_identity="BOUNDED_GENERIC_IDENTITY_BINDING",
+        acceptance_identity="ACTIVE_WORK_RESOLVER_SEES_TRUSTED_IDENTITY",
+        field_sources=(
+            ("work_key", "CURRENT_AUTHORITY", "CURRENT:PROJECT_HAO"),
+            ("project_scope", "CURRENT_AUTHORITY", "CURRENT:PROJECT_HAO"),
+            ("logical_target", "CURRENT_AUTHORITY", "CURRENT:PROJECT_HAO"),
+            ("objective", "CURRENT_AUTHORITY", "CURRENT:PROJECT_HAO"),
+            ("deliverable_identity", "CURRENT_AUTHORITY", "CURRENT:PROJECT_HAO"),
+            ("acceptance_identity", "CURRENT_AUTHORITY", "CURRENT:PROJECT_HAO"),
+        ),
+    )
+    return resolve_work_identity_projection(
+        seed,
+        checkpoint_id="R186",
+        task=TASK,
+        operational_version=186,
+        authority_refs=("CURRENT:PROJECT_HAO",),
+        intent_refs=(intent_ref,),
+    )
+
+
+class StructuralResolverWithGenericIdentity(StructuralResolver):
+    def resolve(self, current_state, current_request, checkpoint_cue):
+        resolution = super().resolve(current_state, current_request, checkpoint_cue)
+        return PreModelContextResolution(
+            checkpoint_id=resolution.checkpoint_id,
+            task=resolution.task,
+            operational_version=resolution.operational_version,
+            authority_refs=resolution.authority_refs,
+            existing_work_refs=resolution.existing_work_refs,
+            prior_attempt_refs=resolution.prior_attempt_refs,
+            regression_refs=resolution.regression_refs,
+            existing_work_lookup_complete=resolution.existing_work_lookup_complete,
+            prior_attempt_lookup_complete=resolution.prior_attempt_lookup_complete,
+            regression_lookup_complete=resolution.regression_lookup_complete,
+            reuse_disposition=resolution.reuse_disposition,
+            work_identity=generic_work_identity(),
+        )
+
+
+class CapturingActiveWorkResolver:
+    def __init__(self):
+        self.calls = []
+
+    def resolve(self, *, work_key, intent_fingerprint):
+        self.calls.append((work_key, intent_fingerprint))
+        return ActiveWorkIdentityAdmission(
+            True,
+            "ACTIVE_WORK_IDENTITY_CLEAR",
+            ActiveWorkIdentityDisposition.CLEAR,
+        )
+
+
 class SemanticResolver:
     def __init__(self, items=None):
         self.items = semantic_items() if items is None else items
@@ -171,6 +244,26 @@ class IntentModel:
             expected_state_delta="bounded formal delta",
             model_reported_used_refs=self.used_refs,
         )
+
+
+def test_non_rv_trusted_current_identity_is_preserved_and_checked_by_active_work():
+    active_work = CapturingActiveWorkResolver()
+    admission = ContextBoundPreModelGateway(
+        PreModelContextGateway(StructuralResolverWithGenericIdentity()),
+        SemanticResolver(),
+        active_work_resolver=active_work,
+    ).admit(state(), request())
+
+    assert admission.allowed is True
+    assert admission.model_input is not None
+    assert admission.model_input.work_identity is not None
+    assert admission.model_input.work_identity.work_key == "PROJECT_HAO:GENERIC_NON_RV_WORK"
+    assert active_work.calls == [
+        (
+            admission.model_input.work_identity.work_key,
+            admission.model_input.work_identity.intent_fingerprint,
+        )
+    ]
 
 
 def test_missing_regression_semantics_blocks_before_first_model():
