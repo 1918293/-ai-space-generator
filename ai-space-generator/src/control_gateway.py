@@ -13,6 +13,7 @@ from .operational_state import (
     CommandActor,
     execution_record_from_operational_state,
 )
+from .resolved_work_identity import ResolvedWorkIdentityProjection
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,7 @@ class PreModelContextResolution:
     regression_lookup_complete: bool = False
     prior_attempt_lookup_complete: bool = True
     reuse_disposition: str = ""
+    work_identity: ResolvedWorkIdentityProjection | None = None
 
 
 class PreModelContextResolver(Protocol):
@@ -223,6 +225,7 @@ class PreModelContextReceipt:
     regression_refs: tuple[str, ...]
     reuse_disposition: str
     context_fingerprint: str
+    work_identity: ResolvedWorkIdentityProjection | None = None
 
 
 @dataclass(frozen=True)
@@ -291,6 +294,11 @@ def _mint_pre_model_receipt(
         "prior_attempt_refs": prior_attempt_refs,
         "regression_refs": regression_refs,
         "reuse_disposition": resolution.reuse_disposition.strip().upper(),
+        "work_identity": (
+            resolution.work_identity.receipt_payload()
+            if resolution.work_identity is not None
+            else None
+        ),
     }
     fingerprint = hashlib.sha256(
         json.dumps(
@@ -311,6 +319,7 @@ def _mint_pre_model_receipt(
         regression_refs=regression_refs,
         reuse_disposition=payload["reuse_disposition"],
         context_fingerprint=fingerprint,
+        work_identity=resolution.work_identity,
     )
 
 
