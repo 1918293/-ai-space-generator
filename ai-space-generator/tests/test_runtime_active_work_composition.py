@@ -246,6 +246,78 @@ class FakeControlPlane:
         )
 
 
+NON_RV_IDENTITY_REF = "CURRENT:RUNTIME_V2_ACCEPTANCE_STATE"
+
+
+def non_rv_identity_values():
+    return {
+        "HAO_REASONING_MODEL": "not-called",
+        "HAO_CONTEXT_REASONING_ROUTES_JSON": json.dumps(
+            [
+                {
+                    "task": NON_RV_TASK,
+                    "authority_refs": [NON_RV_IDENTITY_REF],
+                    "reuse_disposition": "ADMIT",
+                }
+            ]
+        ),
+        "HAO_CANONICAL_SEMANTIC_SOURCES_JSON": json.dumps(
+            [
+                {
+                    "ref": NON_RV_IDENTITY_REF,
+                    "kind": "CURRENT_CONTROL",
+                    "spreadsheet_id": "hao-current-sheet",
+                    "range_a1": "06_Config!A553:F553",
+                    "source_file_id": "hao-current-sheet",
+                    "project_scope": "PROJECT_HAO",
+                    "applicability": "APPLICABLE",
+                    "disposition": "APPLY",
+                }
+            ]
+        ),
+    }
+
+
+class NonRvIdentityReader:
+    def read_range(self, spreadsheet_id, range_a1):
+        assert spreadsheet_id == "hao-current-sheet"
+        assert range_a1 == "06_Config!A553:F553"
+        identity = {
+            "work_key": "RUNTIME_V2_ACCEPTANCE_STATE",
+            "project_scope": "PROJECT_HAO",
+            "logical_target": "PR17_RUNTIME_V2",
+            "objective": "Close the Runtime v2 root-fix path without bypass.",
+            "deliverable_identity": "BOUNDED_RUNTIME_V2_ENGINEERING",
+            "acceptance_identity": "ACTIVE_WORK_CHECKED_BEFORE_CONSEQUENTIAL_ACTION",
+        }
+        return [[
+            "RUNTIME_V2_ACCEPTANCE_STATE",
+            "CURRENT_STAGE=ENGINEERING_READINESS_PASS; WORK_IDENTITY_V1="
+            + json.dumps(identity, ensure_ascii=False, separators=(",", ":")),
+            "CURRENT",
+            "Hao",
+            "2026-09-20T02:14:00+08:00",
+            "existing Current owner carries its own work identity",
+        ]]
+
+    def source_version(self, file_id):
+        assert file_id == "hao-current-sheet"
+        return "hao-current-v2"
+
+
+class AllowingActiveWorkResolver:
+    def __init__(self):
+        self.calls = []
+
+    def resolve(self, *, work_key, intent_fingerprint):
+        self.calls.append((work_key, intent_fingerprint))
+        return ActiveWorkIdentityAdmission(
+            True,
+            "ACTIVE_WORK_IDENTITY_CLEAR",
+            ActiveWorkIdentityDisposition.CLEAR,
+        )
+
+
 class ForbiddenModel:
     def __init__(self):
         self.calls = 0
@@ -353,6 +425,34 @@ def test_non_rv_read_only_action_does_not_require_active_work_identity():
     assert result.code == "MODEL_INTENT_BOUND"
     assert model.calls == 1
     assert control_plane.calls == 1
+
+
+def test_non_rv_consequential_action_executes_when_existing_current_owner_supplies_identity():
+    model = MutatingIntentModel()
+    control_plane = FakeControlPlane(consequential=True)
+    active_work = AllowingActiveWorkResolver()
+    consumer = build_runtime_reasoning_consumer(
+        non_rv_identity_values(),
+        state_source=NonRvStateSource(),
+        control_plane=control_plane,
+        reader=NonRvIdentityReader(),
+        model=model,
+        active_work_resolver=active_work,
+    )
+
+    result = consumer.prepare_user_turn(
+        "Auto > execute the bounded non-RV change",
+        run_id="RUN-NON-RV-IDENTIFIED",
+        event_id="EVENT-NON-RV-IDENTIFIED",
+    )
+
+    assert result.action_selected is True
+    assert result.code == "MODEL_INTENT_BOUND"
+    assert model.calls == 1
+    assert control_plane.calls == 1
+    assert len(active_work.calls) >= 1
+    assert active_work.calls[-1][0] == "RUNTIME_V2_ACCEPTANCE_STATE"
+    assert active_work.calls[-1][1].startswith("sha256:")
 
 
 def test_rv_composition_without_active_work_configuration_fails_closed_before_model():
