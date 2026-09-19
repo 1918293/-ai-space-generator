@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,8 +7,15 @@ from src.active_work_identity_admission import (
     ActiveWorkIdentityAdmission,
     ActiveWorkIdentityDisposition,
 )
+from src.action_catalog import ModelActionIntent
 from src.context_bound_reasoning import ContextBoundModelInput
-from src.execution_control import Mode
+from src.execution_control import (
+    ActionArchetype,
+    ActionExternality,
+    ControlDecision,
+    FailureStage,
+    Mode,
+)
 from src.operational_state import ActiveOperationalState
 from src.runtime_reasoning_composition import build_runtime_reasoning_consumer
 
@@ -124,6 +132,120 @@ class CapturingActiveWorkResolver:
         )
 
 
+NON_RV_TASK = "Generic non-RV production composition"
+NON_RV_REF = "CURRENT:PROJECT_HAO"
+
+
+def non_rv_values():
+    return {
+        "HAO_REASONING_MODEL": "not-called",
+        "HAO_CONTEXT_REASONING_ROUTES_JSON": json.dumps(
+            [
+                {
+                    "task": NON_RV_TASK,
+                    "authority_refs": [NON_RV_REF],
+                    "reuse_disposition": "ADMIT",
+                }
+            ]
+        ),
+        "HAO_CANONICAL_SEMANTIC_SOURCES_JSON": json.dumps(
+            [
+                {
+                    "ref": NON_RV_REF,
+                    "kind": "CURRENT_CONTROL",
+                    "spreadsheet_id": "hao-current-sheet",
+                    "range_a1": "06_Config!A540:F540",
+                    "source_file_id": "hao-current-sheet",
+                    "project_scope": "PROJECT_HAO",
+                    "applicability": "APPLICABLE",
+                    "disposition": "APPLY",
+                }
+            ]
+        ),
+    }
+
+
+class NonRvStateSource:
+    def __init__(self):
+        self.current = ActiveOperationalState(Mode.EXP, NON_RV_TASK, 8, "EVENT-8")
+
+    def get(self):
+        return self.current
+
+
+class NonRvReader:
+    def read_range(self, spreadsheet_id, range_a1):
+        assert spreadsheet_id == "hao-current-sheet"
+        assert range_a1 == "06_Config!A540:F540"
+        return [[
+            "ACTION_ADMISSION_BINDING",
+            "Current requires hard controls before consequential action.",
+            "CURRENT",
+            "Hao",
+            "2026-09-18T16:12:10+08:00",
+            "source-backed current control",
+        ]]
+
+    def source_version(self, file_id):
+        assert file_id == "hao-current-sheet"
+        return "hao-current-v1"
+
+
+class MutatingIntentModel:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, model_input: ContextBoundModelInput):
+        self.calls += 1
+        return ModelActionIntent(
+            intent_id="INTENT-NON-RV-MUTATE",
+            requested_capability="formal_persistence",
+            binding_id="formal.persist",
+            expected_state_delta="bounded formal delta",
+            model_reported_used_refs=(NON_RV_REF,),
+        )
+
+
+class ReadOnlyIntentModel:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, model_input: ContextBoundModelInput):
+        self.calls += 1
+        return ModelActionIntent(
+            intent_id="INTENT-NON-RV-READ",
+            requested_capability="read_current",
+            binding_id="current.read",
+            model_reported_used_refs=(NON_RV_REF,),
+        )
+
+
+class FakeControlPlane:
+    def __init__(self, *, consequential):
+        self.calls = 0
+        self.consequential = consequential
+
+    def prepare(self, state, request):
+        self.calls += 1
+        proposal = SimpleNamespace(
+            action_id="RUN-NON-RV:A0001",
+            archetype=ActionArchetype.MUTATE if self.consequential else ActionArchetype.READ,
+            externality=(
+                ActionExternality.PRIVATE_REVERSIBLE
+                if self.consequential
+                else ActionExternality.READ_ONLY
+            ),
+            authorization_scope="",
+        )
+        return SimpleNamespace(
+            record=SimpleNamespace(decision_id="DECISION-NON-RV"),
+            resolution=SimpleNamespace(
+                proposal=proposal,
+                decision=ControlDecision(True, "MODEL_INTENT_BOUND", FailureStage.BINDING),
+            ),
+        )
+
+
 class ForbiddenModel:
     def __init__(self):
         self.calls = 0
@@ -185,6 +307,52 @@ S1_READBACK_STATE=PENDING
 S1_OWNER=CHATGPT_CURRENT_CHAT
 """
     return CONTROL + s1 + empty_slot(2) + empty_slot(3) + empty_slot(4)
+
+
+def test_non_rv_consequential_action_without_source_backed_identity_fails_closed_after_model():
+    model = MutatingIntentModel()
+    control_plane = FakeControlPlane(consequential=True)
+    consumer = build_runtime_reasoning_consumer(
+        non_rv_values(),
+        state_source=NonRvStateSource(),
+        control_plane=control_plane,
+        reader=NonRvReader(),
+        model=model,
+    )
+
+    result = consumer.prepare_user_turn(
+        "Auto > execute the bounded non-RV change",
+        run_id="RUN-NON-RV-MUTATE",
+        event_id="EVENT-NON-RV-MUTATE",
+    )
+
+    assert result.action_selected is False
+    assert result.code == "ACTIVE_WORK_IDENTITY_REQUIRED"
+    assert model.calls == 1
+    assert control_plane.calls == 1
+
+
+def test_non_rv_read_only_action_does_not_require_active_work_identity():
+    model = ReadOnlyIntentModel()
+    control_plane = FakeControlPlane(consequential=False)
+    consumer = build_runtime_reasoning_consumer(
+        non_rv_values(),
+        state_source=NonRvStateSource(),
+        control_plane=control_plane,
+        reader=NonRvReader(),
+        model=model,
+    )
+
+    result = consumer.prepare_user_turn(
+        "Auto > inspect current state only",
+        run_id="RUN-NON-RV-READ",
+        event_id="EVENT-NON-RV-READ",
+    )
+
+    assert result.action_selected is True
+    assert result.code == "MODEL_INTENT_BOUND"
+    assert model.calls == 1
+    assert control_plane.calls == 1
 
 
 def test_rv_composition_without_active_work_configuration_fails_closed_before_model():
