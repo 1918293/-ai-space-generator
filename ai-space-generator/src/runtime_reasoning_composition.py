@@ -216,6 +216,16 @@ class _RuntimeTelemetryReasoningSink:
         self._telemetry.record_context_reasoning_observation(observation)
 
 
+def _routes_require_active_work(
+    routes: Iterable[ContextReasoningRoute],
+) -> bool:
+    return any(
+        ref.upper().startswith("REQUIREMENTS:RV-")
+        for route in tuple(routes)
+        for ref in route.authority_refs
+    )
+
+
 def _configured_active_work_resolver(
     values: Mapping[str, str],
     *,
@@ -275,6 +285,8 @@ def build_runtime_reasoning_consumer(
             values,
             reader=semantic_reader,
         )
+    if effective_active_work_resolver is None and _routes_require_active_work(routes):
+        raise ValueError("ACTIVE_WORK_CONFIGURATION_REQUIRED")
 
     pre_model = ContextBoundPreModelGateway(
         PreModelContextGateway(ConfiguredContextReasoningResolver(routes)),
