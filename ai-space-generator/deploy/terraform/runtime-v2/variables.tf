@@ -131,6 +131,33 @@ variable "initial_task" {
   description = "Only used to seed a brand-new empty operational-state database."
 }
 
+variable "reasoning_model" {
+  type        = string
+  default     = null
+  description = "API-only model identifier for Runtime v2 context-bound reasoning."
+}
+
+variable "context_reasoning_routes_json" {
+  type        = string
+  default     = null
+  description = "API-only deployment-owned HAO_CONTEXT_REASONING_ROUTES_JSON routing metadata."
+  sensitive   = true
+}
+
+variable "canonical_semantic_sources_json" {
+  type        = string
+  default     = null
+  description = "API-only deployment-owned HAO_CANONICAL_SEMANTIC_SOURCES_JSON source-location metadata."
+  sensitive   = true
+}
+
+variable "active_work_index_source_json" {
+  type        = string
+  default     = null
+  description = "API-only deployment-owned HAO_ACTIVE_WORK_INDEX_SOURCE_JSON canonical IDX-055 locator metadata."
+  sensitive   = true
+}
+
 variable "sheets_targets_json" {
   type        = string
   default     = null
@@ -391,6 +418,10 @@ variable "enable_runtime_workloads" {
         var.expected_hao_subject,
         var.attestation_key_id,
         var.initial_task,
+        var.reasoning_model,
+        var.context_reasoning_routes_json,
+        var.canonical_semantic_sources_json,
+        var.active_work_index_source_json,
         var.sheets_targets_json,
         var.task_policies_json,
         var.parent_task_plans_json,
