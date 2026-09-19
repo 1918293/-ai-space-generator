@@ -153,7 +153,7 @@ def control_plane():
     )
 
 
-def test_runtime_composition_forces_raw_user_turn_through_fresh_semantics_before_action_selection():
+def test_runtime_composition_fresh_semantics_do_not_release_mutation_without_work_identity():
     reader = Reader()
     model = Model()
     consumer = build_runtime_reasoning_consumer(
@@ -170,9 +170,9 @@ def test_runtime_composition_forces_raw_user_turn_through_fresh_semantics_before
         event_id="EVENT-188",
     )
 
-    assert result.code == "MODEL_INTENT_RESOLVED_TO_TRUSTED_BINDING"
-    assert result.action_selected is True
-    assert result.action_id == "RUN-188:A0001:formal.persist"
+    assert result.code == "ACTIVE_WORK_IDENTITY_REQUIRED"
+    assert result.action_selected is False
+    assert result.action_id == ""
     assert len(model.calls) == 1
     assert reader.reads == []
     assert reader.batch_reads == [
