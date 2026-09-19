@@ -45,10 +45,10 @@ locals {
   }
 
   api_reasoning_env = {
-    HAO_REASONING_MODEL                    = var.reasoning_model
-    HAO_CONTEXT_REASONING_ROUTES_JSON     = var.context_reasoning_routes_json
-    HAO_CANONICAL_SEMANTIC_SOURCES_JSON  = var.canonical_semantic_sources_json
-    HAO_ACTIVE_WORK_INDEX_SOURCE_JSON     = var.active_work_index_source_json
+    HAO_REASONING_MODEL                 = var.reasoning_model
+    HAO_CONTEXT_REASONING_ROUTES_JSON   = var.context_reasoning_routes_json
+    HAO_CANONICAL_SEMANTIC_SOURCES_JSON = var.canonical_semantic_sources_json
+    HAO_ACTIVE_WORK_INDEX_SOURCE_JSON   = var.active_work_index_source_json
   }
 
   secret_version_paths = {
