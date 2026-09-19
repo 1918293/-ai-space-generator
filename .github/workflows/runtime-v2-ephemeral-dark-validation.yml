@@ -1,0 +1,161 @@
+name: Runtime v2 Ephemeral Dark Validation
+
+on:
+  push:
+    branches:
+      - exp/execution-control-plane-v1
+    paths:
+      - .github/workflows/runtime-v2-ephemeral-dark-validation.yml
+      - ai-space-generator/src/**
+      - ai-space-generator/tests/**
+      - ai-space-generator/requirements-control.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-v2-ephemeral-dark-validation
+  cancel-in-progress: false
+
+jobs:
+  ephemeral-dark-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: runtime_v2
+          POSTGRES_PASSWORD: runtime_v2_ephemeral
+          POSTGRES_DB: runtime_v2
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U runtime_v2 -d runtime_v2"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    defaults:
+      run:
+        working-directory: ai-space-generator
+
+    env:
+      DATABASE_URL: postgresql://runtime_v2:runtime_v2_ephemeral@127.0.0.1:5432/runtime_v2
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ai-space-generator/requirements-control.txt
+
+      - name: Install bounded Runtime dependencies
+        run: python -m pip install --upgrade pytest -r requirements-control.txt
+
+      - name: Exercise Runtime v2 against real ephemeral Postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+
+          import psycopg
+
+          from src.execution_control import Mode
+          from src.postgres_persistence import build_postgres_persistence
+
+          database_url = os.environ["DATABASE_URL"]
+
+          first = build_postgres_persistence(database_url)
+          state = first.operational_state.initialize(
+              mode=Mode.EXP,
+              task="Runtime v2 ephemeral dark validation",
+          )
+          assert state.mode == Mode.EXP
+          assert state.task == "Runtime v2 ephemeral dark validation"
+          assert state.version == 1
+
+          restarted = build_postgres_persistence(database_url)
+          assert restarted.operational_state.get() == state
+
+          created, reserved = first.idempotency.reserve(
+              "EPHEMERAL-DARK-VALIDATION",
+              "sha256:ephemeral-dark-validation",
+          )
+          assert created is True
+          assert reserved.key == "EPHEMERAL-DARK-VALIDATION"
+
+          created_again, replayed = restarted.idempotency.reserve(
+              "EPHEMERAL-DARK-VALIDATION",
+              "sha256:ephemeral-dark-validation",
+          )
+          assert created_again is False
+          assert replayed.key == reserved.key
+
+          first.idempotency.release(
+              "EPHEMERAL-DARK-VALIDATION",
+              "sha256:ephemeral-dark-validation",
+          )
+          assert restarted.idempotency.get("EPHEMERAL-DARK-VALIDATION") is None
+
+          registered = first.run_registry.register(
+              workflow_id="EPHEMERAL-DARK-VALIDATION",
+              owner_subject="github-actions",
+              operational_version=state.version,
+          )
+          owned = restarted.run_registry.require_owned(
+              workflow_id=registered.workflow_id,
+              owner_subject=registered.owner_subject,
+          )
+          assert owned == registered
+
+          with psycopg.connect(database_url) as conn:
+              tables = {
+                  row[0]
+                  for row in conn.execute(
+                      """
+                      SELECT tablename
+                      FROM pg_catalog.pg_tables
+                      WHERE schemaname = 'public'
+                      """
+                  )
+              }
+
+          expected_tables = {
+              "operational_state",
+              "operational_events",
+              "idempotency_records",
+              "authoritative_completions",
+              "mcp_control_runs",
+          }
+          assert expected_tables.issubset(tables), (expected_tables, tables)
+
+          print("POSTGRES_REAL_CONNECTION=PASS")
+          print("POSTGRES_RESTART_READBACK=PASS")
+          print("IDEMPOTENCY_REPLAY=PASS")
+          print("MCP_RUN_OWNERSHIP=PASS")
+          print("RUNTIME_SCHEMA=PASS")
+          PY
+
+      - name: Exercise bounded real-network and persistence regression surfaces
+        run: >-
+          python -m pytest -q
+          tests/test_postgres_persistence.py
+          tests/test_mcp_http_oauth_network_e2e.py
+          tests/test_runtime_deployment.py
+
+      - name: Emit zero-cost ephemeral acceptance marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "EXECUTION_SURFACE=GITHUB_ACTIONS_PUBLIC_STANDARD_RUNNER"
+          echo "POSTGRES_SCOPE=JOB_LOCAL_EPHEMERAL_SERVICE"
+          echo "PERSISTENT_GCP_RESOURCES=NONE"
+          echo "GCP_MUTATION_ATTEMPTED=false"
+          echo "RESULT=EPHEMERAL_DARK_VALIDATION_PASS"
