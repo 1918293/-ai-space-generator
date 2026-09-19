@@ -8,6 +8,7 @@ from src.control_gateway import PreModelContextRequest
 from src.hao_authority_resolver import (
     HaoAuthorityRoutes,
     HaoCanonicalCurrent,
+    HaoCanonicalPreModelResolver,
     HaoDriveCanonicalAuthoritySource,
     HaoExistingWorkResult,
     HaoLookupResult,
@@ -441,6 +442,19 @@ def test_verified_composite_current_can_project_identity_from_interaction_bounda
     assert snapshot.work_identity.work_key == "PROJECT_HAO:ACTIVE_WORK_COORDINATION"
     assert snapshot.work_identity.objective == "ACTIVE_WORK_CANONICAL_IDENTITY"
     assert snapshot.work_identity.objective != state.task
+
+
+def test_generic_verified_work_identity_survives_hao_pre_model_resolution():
+    source = HaoDriveCanonicalAuthoritySource(Reader(SEED), ROUTES)
+    resolver = HaoCanonicalPreModelResolver(source)
+    state = SimpleNamespace(task="Natural language TASK text", version=7)
+
+    resolution = resolver.resolve(state, intent_request(), "")
+
+    assert resolution is not None
+    assert resolution.work_identity is not None
+    assert resolution.work_identity.work_key == "PROJECT_HAO:ACTIVE_WORK_COORDINATION"
+    assert resolution.work_identity.intent_fingerprint == projection().intent_fingerprint
 
 
 def test_continuation_instruction_can_keep_semantics_source_backed_by_current():
