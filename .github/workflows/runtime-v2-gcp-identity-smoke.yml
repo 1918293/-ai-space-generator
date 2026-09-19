@@ -59,3 +59,51 @@ jobs:
           print("PROJECT_NUMBER=786667867165")
           print("RESULT=GITHUB_GCP_IDENTITY_SMOKE_PASS")
           PY
+
+      - name: Verify zero-cost bridge has no project mutation authority
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, urllib.request
+
+          requested = [
+              "resourcemanager.projects.get",
+              "resourcemanager.projects.getIamPolicy",
+              "resourcemanager.projects.setIamPolicy",
+              "serviceusage.services.enable",
+              "storage.buckets.create",
+              "iam.serviceAccounts.create",
+              "iam.serviceAccounts.setIamPolicy",
+              "iam.workloadIdentityPools.create",
+              "artifactregistry.repositories.create",
+              "run.services.create",
+              "cloudsql.instances.create",
+              "compute.networks.create",
+              "secretmanager.secrets.create",
+          ]
+
+          req = urllib.request.Request(
+              "https://cloudresourcemanager.googleapis.com/v1/projects/oceanic-toolbox-386903:testIamPermissions",
+              data=json.dumps({"permissions": requested}).encode(),
+              headers={
+                  "Authorization": "Bearer " + os.environ["ACCESS_TOKEN"],
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              data = json.load(response)
+
+          granted = sorted(data.get("permissions", []))
+          print("GRANTED_PROJECT_PERMISSIONS=" + json.dumps(granted))
+          if granted:
+              raise SystemExit(
+                  "unexpected project authority on identity-only deployer: "
+                  + ",".join(granted)
+              )
+          print("PROJECT_MUTATION_AUTHORITY=NONE")
+          print("RESULT=ZERO_COST_IDENTITY_BOUNDARY_PASS")
+          PY
