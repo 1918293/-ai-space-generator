@@ -297,6 +297,7 @@ def build_runtime_reasoning_consumer(
         pre_model=pre_model,
         model=intent_model,
         control_plane=control_plane,
+        enforce_consequential_active_work=True,
     )
 
     effective_telemetry = telemetry
