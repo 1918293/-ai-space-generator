@@ -324,6 +324,8 @@ def _current_control_work_identity(
             or item.ref not in receipt.authority_refs
         ):
             continue
+        if _WORK_IDENTITY_MARKER not in item.summary:
+            continue
         try:
             decoded_summary = json.loads(item.summary)
         except json.JSONDecodeError as exc:
