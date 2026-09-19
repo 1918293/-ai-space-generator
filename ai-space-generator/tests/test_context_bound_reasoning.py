@@ -436,12 +436,22 @@ def test_responses_boundary_receives_semantics_not_only_refs():
     assert call["tool_choice"] == "none"
     assert call["store"] is False
     instructions = call["instructions"]
-    assert '"existing_work_refs":["PR17:CURRENT"]' in instructions
-    assert '"prior_attempt_refs":["INTAKE:FAIL-1"]' in instructions
-    assert '"semantic_context_fingerprint":"sha256:' in instructions
+    assert '"mode":"EXP"' in instructions
+    assert f'"task":"{TASK}"' in instructions
+    assert '"ref":"PR17:CURRENT"' in instructions
+    assert '"ref":"INTAKE:FAIL-1"' in instructions
     assert "Reuse the current Runtime v2 control plane" in instructions
     assert "A prior same-shape path failed" in instructions
     assert "model_reported_used_refs" in instructions
+    assert '"checkpoint_id"' not in instructions
+    assert '"operational_version"' not in instructions
+    assert '"source_version"' not in instructions
+    assert '"structural_context_fingerprint"' not in instructions
+    assert '"semantic_context_fingerprint"' not in instructions
+    assert '"existing_work_refs"' not in instructions
+    assert '"prior_attempt_refs"' not in instructions
+    assert '"regression_refs"' not in instructions
+    assert instructions.index("<model_intent_shape>") < instructions.index("<hao_runtime_context>")
 
 
 def test_responses_boundary_requires_reported_used_refs():
