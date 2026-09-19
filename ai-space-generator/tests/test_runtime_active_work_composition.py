@@ -192,8 +192,9 @@ class NonRvReader:
 
 
 class MutatingIntentModel:
-    def __init__(self):
+    def __init__(self, used_ref=NON_RV_REF):
         self.calls = 0
+        self.used_ref = used_ref
 
     def invoke(self, model_input: ContextBoundModelInput):
         self.calls += 1
@@ -202,7 +203,7 @@ class MutatingIntentModel:
             requested_capability="formal_persistence",
             binding_id="formal.persist",
             expected_state_delta="bounded formal delta",
-            model_reported_used_refs=(NON_RV_REF,),
+            model_reported_used_refs=(self.used_ref,),
         )
 
 
@@ -428,7 +429,7 @@ def test_non_rv_read_only_action_does_not_require_active_work_identity():
 
 
 def test_non_rv_consequential_action_executes_when_existing_current_owner_supplies_identity():
-    model = MutatingIntentModel()
+    model = MutatingIntentModel(used_ref=NON_RV_IDENTITY_REF)
     control_plane = FakeControlPlane(consequential=True)
     active_work = AllowingActiveWorkResolver()
     consumer = build_runtime_reasoning_consumer(
