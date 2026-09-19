@@ -186,12 +186,16 @@ def test_runtime_composition_forces_raw_user_turn_through_fresh_semantics_before
             ),
         )
     ]
-    assert reader.versions == ["sheet-main"]
+    assert reader.versions == []
     model_input = model.calls[0]
     assert model_input.receipt.task == TASK
     assert model_input.receipt.operational_version == 188
     assert model_input.receipt.checkpoint_id == "R188"
     assert model_input.user_text == "Auto > continue"
+    assert all(
+        item.source_version.startswith("range-sha256:")
+        for item in model_input.admitted_context
+    )
 
 
 def test_route_ref_without_semantic_source_fails_at_composition_time():
