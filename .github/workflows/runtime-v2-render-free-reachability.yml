@@ -1,0 +1,59 @@
+name: Runtime v2 Render Free Reachability
+
+on:
+  push:
+    branches:
+      - exp/execution-control-plane-v1
+    paths:
+      - .github/workflows/runtime-v2-render-free-reachability.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-health-readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify existing free Render field surface from an external runner
+        env:
+          FIELD_URL: https://hao-runtime-v2-field-exp-full.onrender.com/healthz
+          EXPECTED_DEPLOYED_COMMIT: d4206975a7875b06310cb46559f183d1cf095e87
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          url = os.environ["FIELD_URL"]
+          expected = os.environ["EXPECTED_DEPLOYED_COMMIT"]
+          deadline = time.time() + 90
+          last_error = None
+
+          while time.time() < deadline:
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      body = json.load(response)
+                  if response.status == 200:
+                      break
+              except Exception as exc:
+                  last_error = repr(exc)
+                  time.sleep(3)
+          else:
+              raise SystemExit("public field health unavailable: " + str(last_error))
+
+          assert body["artifactRole"] == "EXP_DEPLOYED_FIELD_CONSUMER", body
+          assert body["releaseCommit"] == expected, body
+          assert body["providerMutation"] is False, body
+          assert body["gcpProduction"] is False, body
+
+          print("PUBLIC_FIELD_HEALTH=PASS")
+          print("DEPLOYED_COMMIT_READBACK=" + body["releaseCommit"])
+          print("PROVIDER_MUTATION_PERFORMED=false")
+          print("GCP_PRODUCTION=false")
+          print("RESULT=ZERO_COST_USER_REACHABLE_FIELD_SURFACE_PASS")
+          PY
