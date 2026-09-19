@@ -530,10 +530,12 @@ class ContextBoundReasoningIngress:
         pre_model: ContextBoundPreModelGateway,
         model: ContextBoundIntentModel,
         control_plane: ControlPlaneGateway,
+        enforce_consequential_active_work: bool = False,
     ) -> None:
         self._pre_model = pre_model
         self._model = model
         self._control_plane = control_plane
+        self._enforce_consequential_active_work = enforce_consequential_active_work
 
     def prepare(
         self,
@@ -599,7 +601,8 @@ class ContextBoundReasoningIngress:
         )
         proposal = prepared.resolution.proposal
         if (
-            proposal is not None
+            self._enforce_consequential_active_work
+            and proposal is not None
             and prepared.resolution.decision.allowed
             and _proposal_requires_active_work(proposal)
         ):
