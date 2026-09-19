@@ -277,6 +277,27 @@ def semantic_context_fingerprint(
     return "sha256:" + sha256(material).hexdigest()
 
 
+def _bind_context_work_identity(
+    projection: ResolvedWorkIdentityProjection,
+    *,
+    semantic_fingerprint: str,
+) -> ContextBoundWorkIdentity:
+    material = json.dumps(
+        {
+            "identity_binding_fingerprint": projection.binding_fingerprint,
+            "semantic_context_fingerprint": semantic_fingerprint,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return ContextBoundWorkIdentity(
+        projection=projection,
+        semantic_context_fingerprint=semantic_fingerprint,
+        binding_fingerprint="sha256:" + sha256(material).hexdigest(),
+    )
+
+
 def _required_rv_cell(row: list[object], index: int, code: str) -> str:
     if index >= len(row):
         raise ValueError(code)
@@ -364,19 +385,9 @@ def _requirement_verification_work_identity(
         authority_refs=receipt.authority_refs,
         intent_refs=(intent_ref,),
     )
-    material = json.dumps(
-        {
-            "identity_binding_fingerprint": projection.binding_fingerprint,
-            "semantic_context_fingerprint": semantic_fingerprint,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return ContextBoundWorkIdentity(
-        projection=projection,
-        semantic_context_fingerprint=semantic_fingerprint,
-        binding_fingerprint="sha256:" + sha256(material).hexdigest(),
+    return _bind_context_work_identity(
+        projection,
+        semantic_fingerprint=semantic_fingerprint,
     )
 
 
@@ -410,12 +421,18 @@ class ContextBoundPreModelGateway:
         try:
             items = _normalize_context_items(structural.receipt, tuple(raw_items))
             fingerprint = semantic_context_fingerprint(structural.receipt, items)
-            work_identity = _requirement_verification_work_identity(
-                receipt=structural.receipt,
-                request=request,
-                items=items,
-                semantic_fingerprint=fingerprint,
-            )
+            if structural.receipt.work_identity is not None:
+                work_identity = _bind_context_work_identity(
+                    structural.receipt.work_identity,
+                    semantic_fingerprint=fingerprint,
+                )
+            else:
+                work_identity = _requirement_verification_work_identity(
+                    receipt=structural.receipt,
+                    request=request,
+                    items=items,
+                    semantic_fingerprint=fingerprint,
+                )
         except ValueError as exc:
             return ContextBoundAdmission(False, str(exc))
 
