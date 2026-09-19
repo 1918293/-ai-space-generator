@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from typing import Any, Iterable, Mapping, Protocol
 
@@ -127,6 +128,33 @@ def _normalized_range_summary(values: object) -> str:
     return summary
 
 
+def _semantic_source_version(
+    source: CanonicalSemanticRangeSource,
+    summary: str,
+) -> str:
+    """Content-address the exact canonical slice admitted to the model.
+
+    The provider range is fresh-read on every resolution. Binding semantic
+    freshness to the exact source identity + normalized selected content avoids
+    whole-file version churn when an unrelated row in the same spreadsheet
+    changes, while still changing deterministically for any selected-source,
+    range, or content delta.
+    """
+
+    material = json.dumps(
+        {
+            "source_file_id": source.source_file_id,
+            "spreadsheet_id": source.spreadsheet_id,
+            "range_a1": source.range_a1,
+            "summary": summary,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "range-sha256:" + sha256(material).hexdigest()
+
+
 def _required_source_identities(receipt: PreModelContextReceipt) -> tuple[set[tuple[str, str]], set[str]]:
     exact: set[tuple[str, str]] = set()
     for ref in receipt.existing_work_refs:
@@ -236,15 +264,6 @@ class ConfiguredCanonicalSemanticsResolver(ContextSemanticsResolver):
             if range_values is None:
                 return None
 
-            source_versions: dict[str, str] = {}
-            for source in selected_tuple:
-                if source.source_file_id in source_versions:
-                    continue
-                version = self._reader.source_version(source.source_file_id).strip()
-                if not version:
-                    return None
-                source_versions[source.source_file_id] = version
-
             for source in selected_tuple:
                 values = range_values.get((source.kind, source.ref))
                 if values is None:
@@ -255,7 +274,7 @@ class ConfiguredCanonicalSemanticsResolver(ContextSemanticsResolver):
                         ref=source.ref,
                         kind=source.kind,
                         summary=summary,
-                        source_version=source_versions[source.source_file_id],
+                        source_version=_semantic_source_version(source, summary),
                         project_scope=source.project_scope,
                         applicability=source.applicability,
                         disposition=source.disposition,
