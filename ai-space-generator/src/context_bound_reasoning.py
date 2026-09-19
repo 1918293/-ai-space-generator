@@ -15,6 +15,7 @@ from .control_gateway import (
     PreModelContextRequest,
     PreparedControlledAction,
 )
+from .execution_control import ActionArchetype, ActionExternality
 from .operational_state import ActiveOperationalState
 from .resolved_work_identity import (
     CanonicalWorkIdentitySeed,
@@ -404,6 +405,19 @@ class ContextBoundPreModelGateway:
         self._semantic_resolver = semantic_resolver
         self._active_work_resolver = active_work_resolver
 
+    def resolve_active_work(
+        self,
+        work_identity: ContextBoundWorkIdentity,
+    ) -> ActiveWorkIdentityAdmission | None:
+        """Fresh-read Active Work for a trusted runtime-owned work identity."""
+
+        if self._active_work_resolver is None:
+            return None
+        return self._active_work_resolver.resolve(
+            work_key=work_identity.work_key,
+            intent_fingerprint=work_identity.intent_fingerprint,
+        )
+
     def admit(
         self,
         state: ActiveOperationalState,
@@ -455,6 +469,24 @@ class ContextBoundPreModelGateway:
                 work_identity=work_identity,
             ),
         )
+
+
+def _proposal_requires_active_work(proposal: object) -> bool:
+    archetype = getattr(proposal, "archetype", None)
+    externality = getattr(proposal, "externality", None)
+    return (
+        archetype in {
+            ActionArchetype.MUTATE,
+            ActionArchetype.PUBLISH,
+            ActionArchetype.RECOVER,
+        }
+        or externality in {
+            ActionExternality.PRIVATE_IRREVERSIBLE,
+            ActionExternality.EXTERNAL_REVERSIBLE,
+            ActionExternality.EXTERNAL_IRREVERSIBLE,
+            ActionExternality.FINANCIAL_PERMISSION_OR_SECURITY,
+        }
+    )
 
 
 def _validate_model_reported_usage(
@@ -565,6 +597,33 @@ class ContextBoundReasoningIngress:
                 intent=intent,
             ),
         )
+        proposal = prepared.resolution.proposal
+        if (
+            proposal is not None
+            and prepared.resolution.decision.allowed
+            and _proposal_requires_active_work(proposal)
+        ):
+            work_identity = admission.model_input.work_identity
+            if work_identity is None:
+                return ContextBoundReasoningResult(
+                    admission=admission,
+                    intent=intent,
+                    code="ACTIVE_WORK_IDENTITY_REQUIRED",
+                )
+            active_work = self._pre_model.resolve_active_work(work_identity)
+            if active_work is None:
+                return ContextBoundReasoningResult(
+                    admission=admission,
+                    intent=intent,
+                    code="ACTIVE_WORK_CONFIGURATION_REQUIRED",
+                )
+            if not active_work.allowed:
+                return ContextBoundReasoningResult(
+                    admission=admission,
+                    intent=intent,
+                    code=active_work.code,
+                )
+
         return ContextBoundReasoningResult(
             admission=admission,
             intent=intent,
