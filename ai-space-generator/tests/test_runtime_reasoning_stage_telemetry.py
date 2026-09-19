@@ -177,8 +177,8 @@ class Model:
     def invoke(self, model_input):
         return ModelActionIntent(
             "INTENT-RUNTIME-TELEMETRY",
-            "formal_persistence",
-            "formal.persist",
+            "read_current",
+            "current.read",
             model_reported_used_refs=("CURRENT:A540", "PR17:HEAD"),
         )
 
@@ -196,12 +196,12 @@ def control_plane():
         ActionCatalog(
             (
                 ActionBinding(
-                    "formal.persist",
-                    "formal_persistence",
+                    "current.read",
+                    "read_current",
                     "google-drive",
-                    "update_cells",
-                    ActionArchetype.MUTATE,
-                    ActionExternality.PRIVATE_REVERSIBLE,
+                    "get_current",
+                    ActionArchetype.READ,
+                    ActionExternality.READ_ONLY,
                 ),
             )
         ),
