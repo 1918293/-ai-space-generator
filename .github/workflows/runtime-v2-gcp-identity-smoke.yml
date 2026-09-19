@@ -108,13 +108,41 @@ jobs:
               print("TEST_IAM_ERROR_MESSAGE=" + str(err.get("message", "UNKNOWN")))
               raise SystemExit("testIamPermissions request failed")
 
-          granted = sorted(data.get("permissions", []))
-          print("GRANTED_PROJECT_PERMISSIONS=" + json.dumps(granted))
-          if granted:
+          granted = set(data.get("permissions", []))
+          required_read_only = {
+              "resourcemanager.projects.get",
+              "resourcemanager.projects.getIamPolicy",
+          }
+          forbidden_mutation = set(requested) - required_read_only
+
+          print("GRANTED_PROJECT_PERMISSIONS=" + json.dumps(sorted(granted)))
+          missing_read_only = sorted(required_read_only - granted)
+          unexpected_mutation = sorted(forbidden_mutation & granted)
+
+          if missing_read_only:
               raise SystemExit(
-                  "unexpected project authority on identity-only deployer: "
-                  + ",".join(granted)
+                  "missing required read-only project visibility: "
+                  + ",".join(missing_read_only)
               )
+          if unexpected_mutation:
+              raise SystemExit(
+                  "unexpected project mutation authority on read-only deployer: "
+                  + ",".join(unexpected_mutation)
+              )
+
+          project_req = urllib.request.Request(
+              "https://cloudresourcemanager.googleapis.com/v1/projects/oceanic-toolbox-386903",
+              headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]},
+          )
+          with urllib.request.urlopen(project_req, timeout=20) as response:
+              project = json.load(response)
+
+          if str(project.get("projectNumber")) != "786667867165":
+              raise SystemExit("project identity readback mismatch")
+
+          print("READ_ONLY_PROJECT_VISIBILITY=PASS")
+          print("PROJECT_ID_READBACK=" + str(project.get("projectId")))
+          print("PROJECT_NUMBER_READBACK=" + str(project.get("projectNumber")))
           print("PROJECT_MUTATION_AUTHORITY=NONE")
-          print("RESULT=ZERO_COST_IDENTITY_BOUNDARY_PASS")
+          print("RESULT=ZERO_COST_READ_ONLY_BOUNDARY_PASS")
           PY
