@@ -49,6 +49,15 @@ _ALLOWED_DISPOSITIONS = frozenset(
 _MAX_ITEM_SUMMARY_CHARS = 2000
 _MAX_TOTAL_SUMMARY_CHARS = 12000
 _RV_REF_PREFIX = "REQUIREMENTS:RV-"
+_WORK_IDENTITY_MARKER = "WORK_IDENTITY_V1="
+_WORK_IDENTITY_FIELDS = (
+    "work_key",
+    "project_scope",
+    "logical_target",
+    "objective",
+    "deliverable_identity",
+    "acceptance_identity",
+)
 
 
 @dataclass(frozen=True)
@@ -299,6 +308,103 @@ def _bind_context_work_identity(
     )
 
 
+def _current_control_work_identity(
+    *,
+    receipt: PreModelContextReceipt,
+    request: PreModelContextRequest,
+    items: tuple[AdmittedContextItem, ...],
+    semantic_fingerprint: str,
+) -> ContextBoundWorkIdentity | None:
+    candidates: list[tuple[AdmittedContextItem, dict[str, object]]] = []
+    decoder = json.JSONDecoder()
+    for item in items:
+        if (
+            item.kind not in {"CURRENT_CONTROL", "CONTINUATION"}
+            or item.applicability != "APPLICABLE"
+            or item.ref not in receipt.authority_refs
+        ):
+            continue
+        try:
+            decoded_summary = json.loads(item.summary)
+        except json.JSONDecodeError as exc:
+            raise ValueError("PRE_MODEL_WORK_IDENTITY_CURRENT_ROW_INVALID") from exc
+
+        def strings(value: object) -> list[str]:
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, list):
+                result: list[str] = []
+                for child in value:
+                    result.extend(strings(child))
+                return result
+            return []
+
+        for text_value in strings(decoded_summary):
+            marker_index = text_value.find(_WORK_IDENTITY_MARKER)
+            if marker_index < 0:
+                continue
+            payload_text = text_value[marker_index + len(_WORK_IDENTITY_MARKER):].lstrip()
+            try:
+                payload, _ = decoder.raw_decode(payload_text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("PRE_MODEL_WORK_IDENTITY_JSON_INVALID") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("PRE_MODEL_WORK_IDENTITY_OBJECT_REQUIRED")
+            candidates.append((item, payload))
+
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError("PRE_MODEL_WORK_IDENTITY_AMBIGUOUS")
+
+    item, payload = candidates[0]
+    unknown = sorted(set(payload) - set(_WORK_IDENTITY_FIELDS))
+    missing = [field for field in _WORK_IDENTITY_FIELDS if field not in payload]
+    if unknown:
+        raise ValueError("PRE_MODEL_WORK_IDENTITY_UNKNOWN_FIELD:" + ",".join(unknown))
+    if missing:
+        raise ValueError("PRE_MODEL_WORK_IDENTITY_FIELD_MISSING:" + ",".join(missing))
+
+    values = {field: str(payload[field]).strip() for field in _WORK_IDENTITY_FIELDS}
+    if any(not value for value in values.values()):
+        raise ValueError("PRE_MODEL_WORK_IDENTITY_FIELD_EMPTY")
+    if item.project_scope and values["project_scope"] != item.project_scope:
+        raise ValueError("PRE_MODEL_WORK_IDENTITY_PROJECT_SCOPE_MISMATCH")
+
+    intent_ref = direct_hao_intent_ref(
+        user_text=request.user_text,
+        actor=request.actor,
+        event_id=request.event_id,
+    )
+    if not intent_ref:
+        raise ValueError("PRE_MODEL_WORK_IDENTITY_DIRECT_HAO_INTENT_REQUIRED")
+
+    seed = CanonicalWorkIdentitySeed(
+        work_key=values["work_key"],
+        project_scope=values["project_scope"],
+        logical_target=values["logical_target"],
+        objective=values["objective"],
+        deliverable_identity=values["deliverable_identity"],
+        acceptance_identity=values["acceptance_identity"],
+        field_sources=tuple(
+            (field, "CURRENT_AUTHORITY", item.ref)
+            for field in _WORK_IDENTITY_FIELDS
+        ),
+    )
+    projection = resolve_work_identity_projection(
+        seed,
+        checkpoint_id=receipt.checkpoint_id,
+        task=receipt.task,
+        operational_version=receipt.operational_version,
+        authority_refs=receipt.authority_refs,
+        intent_refs=(intent_ref,),
+    )
+    return _bind_context_work_identity(
+        projection,
+        semantic_fingerprint=semantic_fingerprint,
+    )
+
+
 def _required_rv_cell(row: list[object], index: int, code: str) -> str:
     if index >= len(row):
         raise ValueError(code)
@@ -441,12 +547,19 @@ class ContextBoundPreModelGateway:
                     semantic_fingerprint=fingerprint,
                 )
             else:
-                work_identity = _requirement_verification_work_identity(
+                work_identity = _current_control_work_identity(
                     receipt=structural.receipt,
                     request=request,
                     items=items,
                     semantic_fingerprint=fingerprint,
                 )
+                if work_identity is None:
+                    work_identity = _requirement_verification_work_identity(
+                        receipt=structural.receipt,
+                        request=request,
+                        items=items,
+                        semantic_fingerprint=fingerprint,
+                    )
         except ValueError as exc:
             return ContextBoundAdmission(False, str(exc))
 
