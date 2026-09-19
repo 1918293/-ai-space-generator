@@ -152,6 +152,22 @@ jobs:
           assert body["code"] == "REQUEST_SCHEMA_EXACT_USER_TEXT_ONLY"
           print("CALLER_MODE_SPOOF_FAIL_CLOSED=PASS")
 
+          log_path = "/tmp/runtime-v2-field.log"
+          selftest_deadline = time.time() + 8
+          while True:
+              try:
+                  log_text = open(log_path, encoding="utf-8").read()
+              except FileNotFoundError:
+                  log_text = ""
+              if '"result": "PASS"' in log_text:
+                  break
+              if time.time() >= selftest_deadline:
+                  raise SystemExit("built-in startup selftest did not complete")
+              time.sleep(0.25)
+
+          assert '"provider_mutation": false' in log_text
+          assert '"gcp_production": false' in log_text
+          print("STARTUP_SELFTEST_READBACK=PASS")
           print("PERSISTENT_GCP_RESOURCES=NONE")
           print("GCP_MUTATION_ATTEMPTED=false")
           print("RESULT=ZERO_COST_FIELD_VALIDATION_PASS")
