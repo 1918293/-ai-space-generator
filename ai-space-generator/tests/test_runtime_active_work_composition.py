@@ -268,9 +268,9 @@ def non_rv_identity_values():
                     "ref": NON_RV_IDENTITY_REF,
                     "kind": "CURRENT_CONTROL",
                     "spreadsheet_id": "hao-current-sheet",
-                    "range_a1": "06_Config!A553:F553",
+                    "range_a1": "06_Config!F553:F553",
                     "source_file_id": "hao-current-sheet",
-                    "project_scope": "PROJECT_HAO",
+                    "project_scope": "HAO_SYSTEM",
                     "applicability": "APPLICABLE",
                     "disposition": "APPLY",
                 }
@@ -282,23 +282,19 @@ def non_rv_identity_values():
 class NonRvIdentityReader:
     def read_range(self, spreadsheet_id, range_a1):
         assert spreadsheet_id == "hao-current-sheet"
-        assert range_a1 == "06_Config!A553:F553"
+        assert range_a1 == "06_Config!F553:F553"
         identity = {
-            "work_key": "RUNTIME_V2_ACCEPTANCE_STATE",
-            "project_scope": "PROJECT_HAO",
-            "logical_target": "PR17_RUNTIME_V2",
-            "objective": "Close the Runtime v2 root-fix path without bypass.",
-            "deliverable_identity": "BOUNDED_RUNTIME_V2_ENGINEERING",
-            "acceptance_identity": "ACTIVE_WORK_CHECKED_BEFORE_CONSEQUENTIAL_ACTION",
+            "work_key": "HAO_SYSTEM:RUNTIME_V2",
+            "project_scope": "HAO_SYSTEM",
+            "logical_target": "PR17_RUNTIME_V2_CONTROL_PLANE",
+            "objective": "NON_BYPASSABLE_CURRENT_TO_ACTION_BINDING",
+            "deliverable_identity": "RUNTIME_V2_ENGINEERING_TO_DARK_PRIVATE_DEPLOYMENT",
+            "acceptance_identity": "SOURCE_BACKED_WORK_IDENTITY+ACTIVE_WORK_CLEAR_BEFORE_CONSEQUENTIAL_ACTION",
         }
         return [[
-            "RUNTIME_V2_ACCEPTANCE_STATE",
-            "CURRENT_STAGE=ENGINEERING_READINESS_PASS; WORK_IDENTITY_V1="
-            + json.dumps(identity, ensure_ascii=False, separators=(",", ":")),
-            "CURRENT",
-            "Hao",
-            "2026-09-20T02:14:00+08:00",
-            "existing Current owner carries its own work identity",
+            "Existing Current owner evidence. WORK_IDENTITY_V1="
+            + json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+            + "; IDENTITY_SOURCE_RANGE=06_Config!F553:F553"
         ]]
 
     def source_version(self, file_id):
@@ -452,7 +448,7 @@ def test_non_rv_consequential_action_executes_when_existing_current_owner_suppli
     assert model.calls == 1
     assert control_plane.calls == 1
     assert len(active_work.calls) >= 1
-    assert active_work.calls[-1][0] == "RUNTIME_V2_ACCEPTANCE_STATE"
+    assert active_work.calls[-1][0] == "HAO_SYSTEM:RUNTIME_V2"
     assert active_work.calls[-1][1].startswith("sha256:")
 
 
