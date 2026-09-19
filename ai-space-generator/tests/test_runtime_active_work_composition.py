@@ -187,6 +187,27 @@ S1_OWNER=CHATGPT_CURRENT_CHAT
     return CONTROL + s1 + empty_slot(2) + empty_slot(3) + empty_slot(4)
 
 
+def test_rv_composition_without_active_work_configuration_fails_closed_before_model():
+    model = ForbiddenModel()
+    consumer = build_runtime_reasoning_consumer(
+        values(),
+        state_source=StateSource(),
+        control_plane=ForbiddenControlPlane(),
+        reader=Reader(),
+        model=model,
+    )
+
+    result = consumer.prepare_user_turn(
+        "Auto > continue bounded Requirement Verification",
+        run_id="RUN-NO-ACTIVE-WORK-CONFIG",
+        event_id="EVENT-RV-051-NO-ACTIVE-WORK-CONFIG",
+    )
+
+    assert result.action_selected is False
+    assert result.code == "ACTIVE_WORK_CONFIGURATION_REQUIRED"
+    assert model.calls == 0
+
+
 def test_production_composition_injects_active_work_after_rv_identity_hydration():
     active_work = CapturingActiveWorkResolver()
     model = ForbiddenModel()
