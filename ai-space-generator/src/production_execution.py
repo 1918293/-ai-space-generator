@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import StrEnum
+from hashlib import sha256
 from typing import Protocol
 
 from .authoritative_completion import (
@@ -57,12 +59,96 @@ class ProductionSubmissionResult:
     code: str
 
 
+class TerminalDeliveryStatus(StrEnum):
+    PENDING = "PENDING"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+
+
+@dataclass(frozen=True)
+class TerminalDeliveryReceipt:
+    """Consumer-scoped terminal delivery evidence, separate from completion authority.
+
+    A runtime consumer acknowledgement proves only that the controllable consumer
+    accepted this terminal result. It never upgrades itself into native ChatGPT
+    field acceptance or any other external presentation guarantee.
+    """
+
+    delivery_id: str
+    run_id: str
+    status: TerminalDeliveryStatus
+    scope: str = "CONTROLLED_RUNTIME_CONSUMER_ONLY"
+    consumer: str = ""
+    consumer_receipt_id: str = ""
+    field_acceptance_proven: bool = False
+
+
 @dataclass(frozen=True)
 class ProductionExecutionResult:
     record: ExecutionRecord | None
     authoritative: bool
     code: str
     attestation: ExecutionAttestation | None = None
+    terminal_delivery: TerminalDeliveryReceipt | None = None
+
+    @property
+    def terminal_delivered(self) -> bool:
+        return (
+            self.terminal_delivery is not None
+            and self.terminal_delivery.status == TerminalDeliveryStatus.ACKNOWLEDGED
+        )
+
+
+def _pending_terminal_delivery(
+    attestation: ExecutionAttestation,
+) -> TerminalDeliveryReceipt:
+    digest = sha256(
+        f"{attestation.run_id}:{attestation.signature}".encode("utf-8")
+    ).hexdigest()
+    return TerminalDeliveryReceipt(
+        delivery_id="TERMINAL:" + digest,
+        run_id=attestation.run_id,
+        status=TerminalDeliveryStatus.PENDING,
+    )
+
+
+def acknowledge_terminal_delivery(
+    result: ProductionExecutionResult,
+    *,
+    consumer: str,
+    receipt_id: str,
+) -> ProductionExecutionResult:
+    """Acknowledge delivery by one controllable Runtime consumer.
+
+    This acknowledgement is intentionally conservative and consumer-scoped. It
+    does not claim that the native ChatGPT renderer, mobile app, or any other
+    external field actually displayed the terminal output.
+    """
+
+    consumer = consumer.strip()
+    receipt_id = receipt_id.strip()
+    if (
+        not result.authoritative
+        or result.attestation is None
+        or result.terminal_delivery is None
+    ):
+        raise ValueError("AUTHORITATIVE_COMPLETION_REQUIRED_FOR_TERMINAL_DELIVERY")
+    if not consumer or not receipt_id:
+        raise ValueError("TERMINAL_DELIVERY_CONSUMER_AND_RECEIPT_REQUIRED")
+
+    current = result.terminal_delivery
+    if current.status == TerminalDeliveryStatus.ACKNOWLEDGED:
+        if current.consumer == consumer and current.consumer_receipt_id == receipt_id:
+            return result
+        raise ValueError("TERMINAL_DELIVERY_ACK_CONFLICT")
+
+    acknowledged = replace(
+        current,
+        status=TerminalDeliveryStatus.ACKNOWLEDGED,
+        consumer=consumer,
+        consumer_receipt_id=receipt_id,
+        field_acceptance_proven=False,
+    )
+    return replace(result, terminal_delivery=acknowledged)
 
 
 @dataclass(frozen=True)
@@ -253,6 +339,7 @@ class ProductionExecutionService:
             True,
             commit.code,
             attestation,
+            terminal_delivery=_pending_terminal_delivery(attestation),
         )
 
     async def execute(
