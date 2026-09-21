@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from src.execution_control import (
@@ -362,9 +364,16 @@ def test_retry_is_allowed_only_when_material_delta_has_a_basis():
     assert changed.allowed is True
 
 
-def test_header_is_rendered_from_control_state_not_model_free_text():
+def test_header_is_rendered_from_control_state_and_fresh_time_source():
     record = base_record(mode=Mode.EXP, task="Stable Task")
-    assert render_header(record, date="2026-08-30", time_with_offset="09:15+08:00") == (
+    plus_8 = timezone(timedelta(hours=8))
+    observed = datetime(2026, 8, 30, 9, 15, 20, tzinfo=plus_8)
+    trusted_now = datetime(2026, 8, 30, 9, 15, 35, tzinfo=plus_8)
+    assert render_header(
+        record,
+        observed_at=observed,
+        trusted_now=trusted_now,
+    ) == (
         "[MODE=EXP][TASK=Stable Task]\n"
         "[DATE=2026-08-30][TIME=09:15+08:00]"
     )
