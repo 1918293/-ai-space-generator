@@ -27,7 +27,7 @@ from src.execution_control import (
     EvidenceReceipt,
     Mode,
     RunPhase,
-    render_header,
+    render_fresh_header,
 )
 from src.operational_state import ActiveOperationalState, CommandActor
 
@@ -208,6 +208,13 @@ class PassingVerifier:
                     claim_scope=proposal.action_id,
                 ),
                 EvidenceReceipt(
+                    evidence_id="GATE-20260921-BOUNDED-REPLAY",
+                    kind=EvidenceKind.ACCEPTANCE_GATE_PASS,
+                    passed=True,
+                    source="runtime-v2:bounded-replay",
+                    claim_scope=proposal.action_id,
+                ),
+                EvidenceReceipt(
                     evidence_id="ACCEPT-20260921-METADATA",
                     kind=EvidenceKind.ACCEPTANCE_GATE_PASS,
                     passed=True,
@@ -281,7 +288,7 @@ def test_fresh_header_output_guard_derives_date_and_time_from_one_source():
     observed = datetime(2026, 9, 21, 23, 1, 5, tzinfo=plus_8)
     now = datetime(2026, 9, 21, 23, 1, 20, tzinfo=plus_8)
 
-    assert render_header(state_record(), observed_at=observed, trusted_now=now) == (
+    assert render_fresh_header(state_record(), observed_at=observed, trusted_now=now) == (
         f"[MODE=EXP][TASK={TASK}]\n"
         "[DATE=2026-09-21][TIME=23:01+08:00]"
     )
@@ -293,14 +300,14 @@ def test_header_output_guard_rejects_stale_or_wrong_timezone_source():
     now = datetime(2026, 9, 21, 23, 3, 0, tzinfo=plus_8)
 
     with pytest.raises(ValueError, match="HEADER_TIMESTAMP_STALE"):
-        render_header(
+        render_fresh_header(
             state_record(),
             observed_at=now - timedelta(minutes=3),
             trusted_now=now,
         )
 
     with pytest.raises(ValueError, match="HEADER_LOCAL_OFFSET_REQUIRED"):
-        render_header(
+        render_fresh_header(
             state_record(),
             observed_at=datetime(2026, 9, 21, 15, 3, 0, tzinfo=utc),
             trusted_now=now,
@@ -310,7 +317,7 @@ def test_header_output_guard_rejects_stale_or_wrong_timezone_source():
 def test_header_output_guard_rejects_missing_timezone():
     plus_8 = timezone(timedelta(hours=8))
     with pytest.raises(ValueError, match="HEADER_OBSERVED_TIMEZONE_REQUIRED"):
-        render_header(
+        render_fresh_header(
             state_record(),
             observed_at=datetime(2026, 9, 21, 23, 1, 5),
             trusted_now=datetime(2026, 9, 21, 23, 1, 20, tzinfo=plus_8),
