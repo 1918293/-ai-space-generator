@@ -58,32 +58,59 @@ class ResponsesModelBoundary:
         *,
         model: str,
         max_output_tokens: int = 256,
+        reasoning_effort: str | None = None,
+        text_verbosity: str | None = None,
     ) -> None:
         normalized_model = model.strip()
         if not normalized_model:
             raise ValueError("RESPONSES_MODEL_REQUIRED")
         if max_output_tokens <= 0:
             raise ValueError("RESPONSES_MAX_OUTPUT_TOKENS_INVALID")
+
+        normalized_effort = None
+        if reasoning_effort is not None:
+            normalized_effort = reasoning_effort.strip().lower()
+            if normalized_effort not in {"none", "low", "medium"}:
+                raise ValueError("RESPONSES_REASONING_EFFORT_INVALID")
+
+        normalized_verbosity = None
+        if text_verbosity is not None:
+            normalized_verbosity = text_verbosity.strip().lower()
+            if normalized_verbosity not in {"low", "medium", "high"}:
+                raise ValueError("RESPONSES_TEXT_VERBOSITY_INVALID")
+
         self._client = client
         self._model = normalized_model
         self._max_output_tokens = max_output_tokens
+        self._reasoning_effort = normalized_effort
+        self._text_verbosity = normalized_verbosity
 
     def invoke(self, model_input: VerifiedModelInput) -> object:
-        return self._client.responses.create(
-            model=self._model,
-            instructions=_trusted_runtime_instructions(model_input.receipt),
-            input=model_input.user_text,
-            store=False,
-            tool_choice="none",
-            max_output_tokens=self._max_output_tokens,
-            reasoning={"context": "current_turn"},
-        )
+        reasoning: dict[str, str] = {"context": "current_turn"}
+        if self._reasoning_effort is not None:
+            reasoning["effort"] = self._reasoning_effort
+
+        request: dict[str, object] = {
+            "model": self._model,
+            "instructions": _trusted_runtime_instructions(model_input.receipt),
+            "input": model_input.user_text,
+            "store": False,
+            "tool_choice": "none",
+            "max_output_tokens": self._max_output_tokens,
+            "reasoning": reasoning,
+        }
+        if self._text_verbosity is not None:
+            request["text"] = {"verbosity": self._text_verbosity}
+
+        return self._client.responses.create(**request)
 
 
 def build_openai_responses_boundary(
     *,
     model: str,
     max_output_tokens: int = 256,
+    reasoning_effort: str | None = None,
+    text_verbosity: str | None = None,
 ) -> ResponsesModelBoundary:
     """Construct the official OpenAI client lazily for a server-side runtime."""
 
@@ -93,4 +120,6 @@ def build_openai_responses_boundary(
         OpenAI(),
         model=model,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        text_verbosity=text_verbosity,
     )
