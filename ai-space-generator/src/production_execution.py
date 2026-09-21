@@ -79,7 +79,12 @@ class TerminalDeliveryReceipt:
     scope: str = "CONTROLLED_RUNTIME_CONSUMER_ONLY"
     consumer: str = ""
     consumer_receipt_id: str = ""
-    field_acceptance_proven: bool = False
+
+    @property
+    def field_acceptance_proven(self) -> bool:
+        # A consumer-scoped Runtime acknowledgement is deliberately incapable
+        # of minting native/external field acceptance.
+        return False
 
 
 @dataclass(frozen=True)
@@ -146,7 +151,6 @@ def acknowledge_terminal_delivery(
         status=TerminalDeliveryStatus.ACKNOWLEDGED,
         consumer=consumer,
         consumer_receipt_id=receipt_id,
-        field_acceptance_proven=False,
     )
     return replace(result, terminal_delivery=acknowledged)
 
