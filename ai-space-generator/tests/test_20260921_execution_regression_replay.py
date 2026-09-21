@@ -207,6 +207,14 @@ class PassingVerifier:
                     source="runtime-v2:bounded-replay",
                     claim_scope=proposal.action_id,
                 ),
+                EvidenceReceipt(
+                    evidence_id="ACCEPT-20260921-METADATA",
+                    kind=EvidenceKind.ACCEPTANCE_GATE_PASS,
+                    passed=True,
+                    source="runtime-v2:bounded-replay",
+                    claim_scope=proposal.action_id,
+                    gate_id="BOUNDED_TOOL_DISPATCH_REPLAY",
+                ),
             ),
         )
 
