@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 
 import pytest
@@ -60,11 +61,14 @@ def test_projection_text_cannot_spoof_mode_even_with_same_source_fingerprint():
 def test_projection_header_renders_from_current_state_only_after_freshness_check():
     current = record(mode=Mode.EXP, task="Current task")
     projection = make_projection(current, projection_id="HANDOFF-R1")
+    plus_8 = timezone(timedelta(hours=8))
+    observed = datetime(2026, 8, 30, 9, 50, 20, tzinfo=plus_8)
+    trusted_now = datetime(2026, 8, 30, 9, 50, 35, tzinfo=plus_8)
     header = render_projection_header(
         projection,
         current,
-        date="2026-08-30",
-        time_with_offset="09:50+08:00",
+        observed_at=observed,
+        trusted_now=trusted_now,
     )
     assert header.startswith("[MODE=EXP][TASK=Current task]")
 
@@ -73,6 +77,6 @@ def test_projection_header_renders_from_current_state_only_after_freshness_check
         render_projection_header(
             projection,
             stale_current,
-            date="2026-08-30",
-            time_with_offset="09:51+08:00",
+            observed_at=observed,
+            trusted_now=trusted_now,
         )
