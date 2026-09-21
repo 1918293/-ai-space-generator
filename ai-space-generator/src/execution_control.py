@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -476,7 +477,38 @@ def can_retry(record: ExecutionRecord, *, mechanism: str, material_delta: bool, 
     return ControlDecision(True, "RETRY_ALLOWED")
 
 
-def render_header(record: ExecutionRecord, *, date: str, time_with_offset: str) -> str:
-    if not date.strip() or not time_with_offset.strip():
-        raise ValueError("DATE_AND_TIME_REQUIRED")
-    return f"[MODE={record.mode.value}][TASK={record.task}]\n[DATE={date}][TIME={time_with_offset}]"
+def render_header(
+    record: ExecutionRecord,
+    *,
+    observed_at: datetime,
+    trusted_now: datetime,
+    max_age_seconds: float = 90.0,
+    max_future_skew_seconds: float = 5.0,
+) -> str:
+    """Render the Hao status header only from a fresh trusted +08:00 timestamp.
+
+    The model/caller cannot provide independent DATE/TIME strings. Runtime derives
+    both fields from one timezone-aware observation and rejects stale, future, or
+    non-Taipei-offset observations before final rendering.
+    """
+    if max_age_seconds <= 0 or max_future_skew_seconds < 0:
+        raise ValueError("HEADER_FRESHNESS_WINDOW_INVALID")
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("HEADER_OBSERVED_TIMEZONE_REQUIRED")
+    if trusted_now.tzinfo is None or trusted_now.utcoffset() is None:
+        raise ValueError("HEADER_TRUSTED_NOW_TIMEZONE_REQUIRED")
+    if observed_at.utcoffset() != timedelta(hours=8):
+        raise ValueError("HEADER_LOCAL_OFFSET_REQUIRED")
+
+    age_seconds = (trusted_now - observed_at).total_seconds()
+    if age_seconds > max_age_seconds:
+        raise ValueError("HEADER_TIMESTAMP_STALE")
+    if age_seconds < -max_future_skew_seconds:
+        raise ValueError("HEADER_TIMESTAMP_FROM_FUTURE")
+
+    date = observed_at.strftime("%Y-%m-%d")
+    time_with_offset = observed_at.strftime("%H:%M+08:00")
+    return (
+        f"[MODE={record.mode.value}][TASK={record.task}]\n"
+        f"[DATE={date}][TIME={time_with_offset}]"
+    )
