@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from src.action_catalog import ActionBinding, ActionCatalog, ModelActionIntent
 from src.authoritative_completion import CompletionAttestor, SQLiteAuthoritativeCompletionStore
 from src.control_gateway import (
@@ -20,7 +22,9 @@ from src.execution_control import (
 from src.operational_state import ActiveOperationalState
 from src.production_execution import (
     ProductionExecutionService,
+    TerminalDeliveryStatus,
     UncontrolledEffectReport,
+    acknowledge_terminal_delivery,
     quarantine_uncontrolled_effect,
 )
 from src.temporal_control import DurableRunResult
@@ -243,6 +247,82 @@ def test_production_facade_is_the_only_path_that_mints_and_commits_completion(tm
     assert result.attestation.operational_version == 12
     assert result.attestation.task == "Production cutover"
     assert result.code == "AUTHORITATIVE_COMPLETION_COMMITTED"
+    assert result.terminal_delivery is not None
+    assert result.terminal_delivery.status == TerminalDeliveryStatus.PENDING
+    assert result.terminal_delivered is False
+    assert result.terminal_delivery.field_acceptance_proven is False
+
+
+def test_terminal_delivery_requires_explicit_consumer_ack_and_never_implies_native_field_pass(
+    tmp_path,
+):
+    import asyncio
+
+    result = asyncio.run(
+        service(tmp_path).execute(
+            state(),
+            request(),
+            issued_at="2026-09-22T00:58:35+08:00",
+        )
+    )
+    pending = result.terminal_delivery
+    assert pending is not None
+    assert pending.status == TerminalDeliveryStatus.PENDING
+    assert pending.scope == "CONTROLLED_RUNTIME_CONSUMER_ONLY"
+    assert pending.consumer == ""
+    assert pending.consumer_receipt_id == ""
+    assert pending.field_acceptance_proven is False
+
+    acknowledged = acknowledge_terminal_delivery(
+        result,
+        consumer="runtime-http",
+        receipt_id="HTTP-200:RUN-PROD-1",
+    )
+    assert acknowledged.terminal_delivery is not None
+    assert acknowledged.terminal_delivery.delivery_id == pending.delivery_id
+    assert acknowledged.terminal_delivery.status == TerminalDeliveryStatus.ACKNOWLEDGED
+    assert acknowledged.terminal_delivery.consumer == "runtime-http"
+    assert acknowledged.terminal_delivery.consumer_receipt_id == "HTTP-200:RUN-PROD-1"
+    assert acknowledged.terminal_delivery.field_acceptance_proven is False
+    assert acknowledged.terminal_delivered is True
+
+    assert (
+        acknowledge_terminal_delivery(
+            acknowledged,
+            consumer="runtime-http",
+            receipt_id="HTTP-200:RUN-PROD-1",
+        )
+        == acknowledged
+    )
+    with pytest.raises(ValueError, match="TERMINAL_DELIVERY_ACK_CONFLICT"):
+        acknowledge_terminal_delivery(
+            acknowledged,
+            consumer="different-consumer",
+            receipt_id="OTHER-ACK",
+        )
+
+
+def test_non_authoritative_result_cannot_be_promoted_to_terminal_delivery(tmp_path):
+    import asyncio
+
+    result = asyncio.run(
+        service(tmp_path, close=False).execute(
+            state(),
+            request(),
+            issued_at="2026-09-22T00:58:35+08:00",
+        )
+    )
+    assert result.terminal_delivery is None
+    assert result.terminal_delivered is False
+    with pytest.raises(
+        ValueError,
+        match="AUTHORITATIVE_COMPLETION_REQUIRED_FOR_TERMINAL_DELIVERY",
+    ):
+        acknowledge_terminal_delivery(
+            result,
+            consumer="runtime-http",
+            receipt_id="HTTP-200:BLOCKED",
+        )
 
 
 def test_nonclosed_controlled_run_cannot_mint_authoritative_completion(tmp_path):
