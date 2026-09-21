@@ -38,6 +38,9 @@ jobs:
           python -m pytest tests -q
           --ignore=tests/test_core.py
           --ignore=tests/test_validation.py
+      - name: Run zero-cost reasoning-effort request-path benchmark
+        if: ${{ github.head_ref == 'exp/20260922-reasoning-effort-benchmark' }}
+        run: python benchmarks/benchmark_responses_profiles.py
 
   legacy-app-gate:
     name: legacy-app-gate
