@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from src.controlled_runner import ToolOutcome, VerificationOutcome, run_controlled_action
 from src.execution_control import (
     ActionArchetype,
@@ -97,7 +98,12 @@ class PassingVerifier:
 
 def test_regression_mode_render_cannot_diverge_from_control_state():
     current = record(mode=Mode.EXP, task="Stable task")
-    header = render_header(current, date="2026-08-30", time_with_offset="09:45+08:00")
+    plus_8 = timezone(timedelta(hours=8))
+    header = render_header(
+        current,
+        observed_at=datetime(2026, 8, 30, 9, 45, 10, tzinfo=plus_8),
+        trusted_now=datetime(2026, 8, 30, 9, 45, 25, tzinfo=plus_8),
+    )
     assert header.startswith("[MODE=EXP][TASK=Stable task]")
     assert "MODE=SYS" not in header
 
