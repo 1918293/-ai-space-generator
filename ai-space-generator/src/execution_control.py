@@ -477,10 +477,56 @@ def can_retry(record: ExecutionRecord, *, mechanism: str, material_delta: bool, 
     return ControlDecision(True, "RETRY_ALLOWED")
 
 
-def render_header(record: ExecutionRecord, *, date: str, time_with_offset: str) -> str:
-    """Backward-compatible pure renderer from Runtime-owned control state."""
-    if not date.strip() or not time_with_offset.strip():
-        raise ValueError("DATE_AND_TIME_REQUIRED")
+def render_header(
+    record: ExecutionRecord,
+    *,
+    date: str | None = None,
+    time_with_offset: str | None = None,
+    observed_at: datetime | None = None,
+    trusted_now: datetime | None = None,
+    max_age_seconds: float = 90.0,
+    max_future_skew_seconds: float = 5.0,
+) -> str:
+    """Render a Hao header from either the legacy or fresh guarded call surface.
+
+    New Runtime callers should provide observed_at + trusted_now so DATE/TIME are
+    derived from one fresh timezone-aware +08:00 source. The legacy date/time
+    pair remains supported for existing historical/projection compatibility.
+    Mixed or partial call shapes fail closed.
+    """
+    strict_supplied = observed_at is not None or trusted_now is not None
+    legacy_supplied = date is not None or time_with_offset is not None
+    if strict_supplied and legacy_supplied:
+        raise ValueError("HEADER_TIME_SOURCE_AMBIGUOUS")
+
+    if strict_supplied:
+        if observed_at is None or trusted_now is None:
+            raise ValueError("HEADER_FRESH_TIME_PAIR_REQUIRED")
+        if max_age_seconds <= 0 or max_future_skew_seconds < 0:
+            raise ValueError("HEADER_FRESHNESS_WINDOW_INVALID")
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("HEADER_OBSERVED_TIMEZONE_REQUIRED")
+        if trusted_now.tzinfo is None or trusted_now.utcoffset() is None:
+            raise ValueError("HEADER_TRUSTED_NOW_TIMEZONE_REQUIRED")
+        if observed_at.utcoffset() != timedelta(hours=8):
+            raise ValueError("HEADER_LOCAL_OFFSET_REQUIRED")
+
+        age_seconds = (trusted_now - observed_at).total_seconds()
+        if age_seconds > max_age_seconds:
+            raise ValueError("HEADER_TIMESTAMP_STALE")
+        if age_seconds < -max_future_skew_seconds:
+            raise ValueError("HEADER_TIMESTAMP_FROM_FUTURE")
+
+        date = observed_at.strftime("%Y-%m-%d")
+        time_with_offset = observed_at.strftime("%H:%M+08:00")
+    else:
+        if date is None or time_with_offset is None:
+            raise ValueError("DATE_AND_TIME_REQUIRED")
+        date = date.strip()
+        time_with_offset = time_with_offset.strip()
+        if not date or not time_with_offset:
+            raise ValueError("DATE_AND_TIME_REQUIRED")
+
     return f"[MODE={record.mode.value}][TASK={record.task}]\n[DATE={date}][TIME={time_with_offset}]"
 
 
@@ -492,29 +538,11 @@ def render_fresh_header(
     max_age_seconds: float = 90.0,
     max_future_skew_seconds: float = 5.0,
 ) -> str:
-    """Guard current Hao output with one fresh, timezone-aware +08:00 source.
-
-    This is the enforcement entrypoint for current output. The legacy pure
-    renderer remains available for historical/projection compatibility, while
-    new Runtime output must pass freshness here before rendering.
-    """
-    if max_age_seconds <= 0 or max_future_skew_seconds < 0:
-        raise ValueError("HEADER_FRESHNESS_WINDOW_INVALID")
-    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
-        raise ValueError("HEADER_OBSERVED_TIMEZONE_REQUIRED")
-    if trusted_now.tzinfo is None or trusted_now.utcoffset() is None:
-        raise ValueError("HEADER_TRUSTED_NOW_TIMEZONE_REQUIRED")
-    if observed_at.utcoffset() != timedelta(hours=8):
-        raise ValueError("HEADER_LOCAL_OFFSET_REQUIRED")
-
-    age_seconds = (trusted_now - observed_at).total_seconds()
-    if age_seconds > max_age_seconds:
-        raise ValueError("HEADER_TIMESTAMP_STALE")
-    if age_seconds < -max_future_skew_seconds:
-        raise ValueError("HEADER_TIMESTAMP_FROM_FUTURE")
-
+    """Explicit fresh-output entrypoint; delegates to the dual-surface renderer."""
     return render_header(
         record,
-        date=observed_at.strftime("%Y-%m-%d"),
-        time_with_offset=observed_at.strftime("%H:%M+08:00"),
+        observed_at=observed_at,
+        trusted_now=trusted_now,
+        max_age_seconds=max_age_seconds,
+        max_future_skew_seconds=max_future_skew_seconds,
     )
