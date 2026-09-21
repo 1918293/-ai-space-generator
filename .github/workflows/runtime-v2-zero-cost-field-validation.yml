@@ -1,0 +1,187 @@
+name: Runtime v2 Zero-Cost Field Validation
+
+on:
+  push:
+    branches:
+      - exp/execution-control-plane-v1
+    paths:
+      - .github/workflows/runtime-v2-zero-cost-field-validation.yml
+      - ai-space-generator/src/field_consumer_exp.py
+      - ai-space-generator/src/context_bound_reasoning.py
+      - ai-space-generator/src/context_reasoning_consumer.py
+      - ai-space-generator/src/control_gateway.py
+      - ai-space-generator/src/mcp_reasoning_ingress.py
+      - ai-space-generator/requirements-control.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-v2-zero-cost-field-validation
+  cancel-in-progress: false
+
+jobs:
+  field-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+
+    defaults:
+      run:
+        working-directory: ai-space-generator
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ai-space-generator/requirements-control.txt
+
+      - name: Install bounded Runtime dependencies
+        run: python -m pip install --upgrade -r requirements-control.txt
+
+      - name: Launch existing Runtime v2 field consumer on loopback
+        shell: bash
+        env:
+          RENDER_GIT_COMMIT: ${{ github.sha }}
+          HAO_CANONICAL_SNAPSHOT_VERSION: 06_Config!B553:F553@2026-09-20T05:55:28+08:00
+        run: |
+          set -euo pipefail
+          token="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::${token}"
+          echo "HAO_FIELD_TOKEN=${token}" >> "${GITHUB_ENV}"
+          echo "HAO_FIELD_EXPECTED_SUBJECT=hao-field-exp" >> "${GITHUB_ENV}"
+          echo "PORT=10000" >> "${GITHUB_ENV}"
+          HAO_FIELD_TOKEN="${token}"           HAO_FIELD_EXPECTED_SUBJECT="hao-field-exp"           PORT=10000           RENDER_GIT_COMMIT="${RENDER_GIT_COMMIT}"           HAO_CANONICAL_SNAPSHOT_VERSION="${HAO_CANONICAL_SNAPSHOT_VERSION}"             python -m src.field_consumer_exp >/tmp/runtime-v2-field.log 2>&1 &
+          echo "FIELD_PID=$!" >> "${GITHUB_ENV}"
+
+      - name: Exercise natural-language field turn and fail-closed boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            if [ -n "${FIELD_PID:-}" ]; then
+              kill "${FIELD_PID}" 2>/dev/null || true
+              wait "${FIELD_PID}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          base = "http://127.0.0.1:10000"
+          token = os.environ["HAO_FIELD_TOKEN"]
+
+          def request(path, *, payload=None, bearer=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              headers = {}
+              if payload is not None:
+                  headers["Content-Type"] = "application/json"
+              if bearer is not None:
+                  headers["Authorization"] = "Bearer " + bearer
+              req = urllib.request.Request(
+                  base + path,
+                  data=data,
+                  headers=headers,
+                  method="GET" if payload is None else "POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=5) as response:
+                      return response.status, json.loads(response.read().decode())
+              except urllib.error.HTTPError as exc:
+                  return exc.code, json.loads(exc.read().decode())
+
+          deadline = time.time() + 20
+          while True:
+              try:
+                  status, health = request("/healthz")
+                  if status == 200:
+                      break
+              except Exception:
+                  pass
+              if time.time() >= deadline:
+                  raise SystemExit("field consumer did not become healthy")
+              time.sleep(0.25)
+
+          assert health["artifactRole"] == "EXP_DEPLOYED_FIELD_CONSUMER"
+          assert health["providerMutation"] is False
+          assert health["gcpProduction"] is False
+          print("FIELD_HTTP_HEALTH=PASS")
+
+          status, body = request(
+              "/v1/reason",
+              bearer=token,
+              payload={"user_text": "Auto > 繼續以免費方案驗證目前 Runtime v2 工作。"},
+          )
+          assert status == 200, (status, body)
+          assert body["ok"] is True
+          assert body["code"] == "MODEL_INTENT_RESOLVED_TO_TRUSTED_BINDING"
+          assert body["action_selected"] is True
+          assert body["provider_mutation_performed"] is False
+          assert str(body["decision_id"]).startswith("DECISION:")
+          assert ":formal.persist" in str(body["action_id"])
+          print("AUTHORIZED_NATURAL_LANGUAGE_TURN=PASS")
+          print("PROVIDER_MUTATION_PERFORMED=false")
+
+          status, body = request(
+              "/v1/reason",
+              payload={"user_text": "Auto"},
+          )
+          assert status == 401
+          assert body["code"] == "AUTHENTICATION_REQUIRED"
+          print("UNAUTHENTICATED_FAIL_CLOSED=PASS")
+
+          status, body = request(
+              "/v1/reason",
+              bearer=token,
+              payload={"user_text": "Auto", "mode": "SYS"},
+          )
+          assert status == 400
+          assert body["code"] == "REQUEST_SCHEMA_EXACT_USER_TEXT_ONLY"
+          print("CALLER_MODE_SPOOF_FAIL_CLOSED=PASS")
+
+          log_path = "/tmp/runtime-v2-field.log"
+          selftest_deadline = time.time() + 8
+          while True:
+              try:
+                  log_text = open(log_path, encoding="utf-8").read()
+              except FileNotFoundError:
+                  log_text = ""
+              if '"result": "PASS"' in log_text:
+                  break
+              if time.time() >= selftest_deadline:
+                  raise SystemExit("built-in startup selftest did not complete")
+              time.sleep(0.25)
+
+          assert '"provider_mutation": false' in log_text
+          assert '"gcp_production": false' in log_text
+          print("STARTUP_SELFTEST_READBACK=PASS")
+          print("PERSISTENT_GCP_RESOURCES=NONE")
+          print("GCP_MUTATION_ATTEMPTED=false")
+          print("RESULT=ZERO_COST_FIELD_VALIDATION_PASS")
+          PY
+
+      - name: Verify built-in field-consumer regression surface
+        run: python -m pytest -q tests/test_field_consumer_exp.py
+
+      - name: Read back startup selftest evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/runtime-v2-field.log
+          grep -q '"result": "PASS"' /tmp/runtime-v2-field.log
+          grep -q '"provider_mutation": false' /tmp/runtime-v2-field.log
+          grep -q '"gcp_production": false' /tmp/runtime-v2-field.log
+          echo "STARTUP_SELFTEST_READBACK=PASS"

@@ -1,0 +1,148 @@
+name: Runtime v2 GCP Identity Smoke
+
+on:
+  push:
+    branches:
+      - exp/execution-control-plane-v1
+    paths:
+      - .github/workflows/runtime-v2-gcp-identity-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: runtime-v2-gcp-identity-smoke
+  cancel-in-progress: false
+
+jobs:
+  identity-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed on trusted shared ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/exp/execution-control-plane-v1"
+
+      - name: Authenticate with Google Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: oceanic-toolbox-386903
+          workload_identity_provider: projects/786667867165/locations/global/workloadIdentityPools/hao-runtime-v2-github/providers/shared-exp
+          service_account: hao-runtime-v2-deployer@oceanic-toolbox-386903.iam.gserviceaccount.com
+          token_format: access_token
+          create_credentials_file: false
+
+      - name: Verify short-lived token without project mutation
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ACCESS_TOKEN}"
+          python - <<'PY'
+          import json, os, urllib.parse, urllib.request
+          token = os.environ["ACCESS_TOKEN"]
+          url = "https://oauth2.googleapis.com/tokeninfo?" + urllib.parse.urlencode({"access_token": token})
+          with urllib.request.urlopen(url, timeout=20) as response:
+              data = json.load(response)
+          expires = int(data.get("expires_in", "0"))
+          if expires <= 0:
+              raise SystemExit("token is not live")
+          print("WIF_TOKEN_VALID=true")
+          print(f"TOKEN_EXPIRES_IN_SECONDS={expires}")
+          print("PROJECT_ID=oceanic-toolbox-386903")
+          print("PROJECT_NUMBER=786667867165")
+          print("RESULT=GITHUB_GCP_IDENTITY_SMOKE_PASS")
+          PY
+
+      - name: Verify zero-cost bridge has no project mutation authority
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, urllib.error, urllib.request
+
+          requested = [
+              "resourcemanager.projects.get",
+              "resourcemanager.projects.getIamPolicy",
+              "resourcemanager.projects.setIamPolicy",
+              "serviceusage.services.enable",
+              "storage.buckets.create",
+              "iam.serviceAccounts.create",
+              "iam.serviceAccounts.setIamPolicy",
+              "iam.workloadIdentityPools.create",
+              "artifactregistry.repositories.create",
+              "run.services.create",
+              "cloudsql.instances.create",
+              "compute.networks.create",
+              "secretmanager.secrets.create",
+          ]
+
+          req = urllib.request.Request(
+              "https://cloudresourcemanager.googleapis.com/v1/projects/oceanic-toolbox-386903:testIamPermissions",
+              data=json.dumps({"permissions": requested}).encode(),
+              headers={
+                  "Authorization": "Bearer " + os.environ["ACCESS_TOKEN"],
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  data = json.load(response)
+          except urllib.error.HTTPError as exc:
+              raw = exc.read().decode("utf-8", "replace")
+              try:
+                  err = json.loads(raw).get("error", {})
+              except Exception:
+                  err = {}
+              print(f"TEST_IAM_HTTP_STATUS={exc.code}")
+              print("TEST_IAM_ERROR_STATUS=" + str(err.get("status", "UNKNOWN")))
+              print("TEST_IAM_ERROR_MESSAGE=" + str(err.get("message", "UNKNOWN")))
+              raise SystemExit("testIamPermissions request failed")
+
+          granted = set(data.get("permissions", []))
+          required_read_only = {
+              "resourcemanager.projects.get",
+              "resourcemanager.projects.getIamPolicy",
+          }
+          forbidden_mutation = set(requested) - required_read_only
+
+          print("GRANTED_PROJECT_PERMISSIONS=" + json.dumps(sorted(granted)))
+          missing_read_only = sorted(required_read_only - granted)
+          unexpected_mutation = sorted(forbidden_mutation & granted)
+
+          if missing_read_only:
+              raise SystemExit(
+                  "missing required read-only project visibility: "
+                  + ",".join(missing_read_only)
+              )
+          if unexpected_mutation:
+              raise SystemExit(
+                  "unexpected project mutation authority on read-only deployer: "
+                  + ",".join(unexpected_mutation)
+              )
+
+          project_req = urllib.request.Request(
+              "https://cloudresourcemanager.googleapis.com/v1/projects/oceanic-toolbox-386903",
+              headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]},
+          )
+          with urllib.request.urlopen(project_req, timeout=20) as response:
+              project = json.load(response)
+
+          if str(project.get("projectNumber")) != "786667867165":
+              raise SystemExit("project identity readback mismatch")
+
+          print("READ_ONLY_PROJECT_VISIBILITY=PASS")
+          print("PROJECT_ID_READBACK=" + str(project.get("projectId")))
+          print("PROJECT_NUMBER_READBACK=" + str(project.get("projectNumber")))
+          print("PROJECT_MUTATION_AUTHORITY=NONE")
+          print("RESULT=ZERO_COST_READ_ONLY_BOUNDARY_PASS")
+          PY
