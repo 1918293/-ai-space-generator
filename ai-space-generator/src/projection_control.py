@@ -79,11 +79,18 @@ def render_projection_header(
     projection: ProjectionEnvelope,
     current: ExecutionRecord,
     *,
-    date: str,
-    time_with_offset: str,
+    observed_at: datetime,
+    trusted_now: datetime,
+    max_age_seconds: float = 90.0,
 ) -> str:
     validation = validate_projection(projection, current)
     if not validation.allowed:
         raise ValueError(validation.code)
-    # Render from authoritative current state, never from projection text.
-    return render_header(current, date=date, time_with_offset=time_with_offset)
+    # Render from authoritative current state and one fresh trusted time source,
+    # never from projection text or caller-authored DATE/TIME strings.
+    return render_header(
+        current,
+        observed_at=observed_at,
+        trusted_now=trusted_now,
+        max_age_seconds=max_age_seconds,
+    )
