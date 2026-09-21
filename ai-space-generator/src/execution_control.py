@@ -477,7 +477,14 @@ def can_retry(record: ExecutionRecord, *, mechanism: str, material_delta: bool, 
     return ControlDecision(True, "RETRY_ALLOWED")
 
 
-def render_header(
+def render_header(record: ExecutionRecord, *, date: str, time_with_offset: str) -> str:
+    """Backward-compatible pure renderer from Runtime-owned control state."""
+    if not date.strip() or not time_with_offset.strip():
+        raise ValueError("DATE_AND_TIME_REQUIRED")
+    return f"[MODE={record.mode.value}][TASK={record.task}]\n[DATE={date}][TIME={time_with_offset}]"
+
+
+def render_fresh_header(
     record: ExecutionRecord,
     *,
     observed_at: datetime,
@@ -485,11 +492,11 @@ def render_header(
     max_age_seconds: float = 90.0,
     max_future_skew_seconds: float = 5.0,
 ) -> str:
-    """Render the Hao status header only from a fresh trusted +08:00 timestamp.
+    """Guard current Hao output with one fresh, timezone-aware +08:00 source.
 
-    The model/caller cannot provide independent DATE/TIME strings. Runtime derives
-    both fields from one timezone-aware observation and rejects stale, future, or
-    non-Taipei-offset observations before final rendering.
+    This is the enforcement entrypoint for current output. The legacy pure
+    renderer remains available for historical/projection compatibility, while
+    new Runtime output must pass freshness here before rendering.
     """
     if max_age_seconds <= 0 or max_future_skew_seconds < 0:
         raise ValueError("HEADER_FRESHNESS_WINDOW_INVALID")
@@ -506,9 +513,8 @@ def render_header(
     if age_seconds < -max_future_skew_seconds:
         raise ValueError("HEADER_TIMESTAMP_FROM_FUTURE")
 
-    date = observed_at.strftime("%Y-%m-%d")
-    time_with_offset = observed_at.strftime("%H:%M+08:00")
-    return (
-        f"[MODE={record.mode.value}][TASK={record.task}]\n"
-        f"[DATE={date}][TIME={time_with_offset}]"
+    return render_header(
+        record,
+        date=observed_at.strftime("%Y-%m-%d"),
+        time_with_offset=observed_at.strftime("%H:%M+08:00"),
     )
