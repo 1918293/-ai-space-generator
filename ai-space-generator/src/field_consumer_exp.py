@@ -28,6 +28,8 @@ from .groq_free_benchmark import (
     build_groq_free_benchmark_client,
     run_groq_free_benchmark,
     run_groq_free_runtime_intent_benchmark,
+    run_groq_free_shadow_reliability_benchmark,
+    summarize_groq_shadow_reliability,
 )
 from .groq_free_provider import GROQ_GPT_OSS_20B, GroqFreeOnlyStop, groq_api_key_secret_file_status, load_groq_api_key
 
@@ -484,6 +486,108 @@ def run_optional_groq_free_benchmark() -> None:
         flush=True,
     )
 
+
+def run_optional_groq_shadow_reliability() -> None:
+    if os.environ.get("GROQ_SHADOW_RELIABILITY_ON_STARTUP", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+
+    run_id = os.environ.get("GROQ_SHADOW_RELIABILITY_RUN_ID", "").strip()
+    if not run_id:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "result": "BLOCK",
+                    "code": "GROQ_SHADOW_RELIABILITY_RUN_ID_REQUIRED",
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    try:
+        repetitions = int(os.environ.get("GROQ_SHADOW_REPETITIONS", "2"))
+    except ValueError:
+        repetitions = 0
+
+    key, key_source = load_groq_api_key()
+    if not key:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "runId": run_id,
+                    "result": "BLOCK",
+                    "code": "GROQ_API_KEY_REQUIRED",
+                    "groqApiKeySource": key_source,
+                    "providerMutation": False,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    try:
+        client = build_groq_free_benchmark_client(key)
+        results = run_groq_free_shadow_reliability_benchmark(
+            client,
+            repetitions=repetitions,
+        )
+        summary = summarize_groq_shadow_reliability(results)
+    except GroqFreeOnlyStop as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "runId": run_id,
+                    "result": "STOP",
+                    "code": str(exc),
+                    "freeOnly": True,
+                    "providerMutation": False,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "runId": run_id,
+                    "result": "FAIL",
+                    "code": type(exc).__name__,
+                    "freeOnly": True,
+                    "providerMutation": False,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    all_pass = all(item.get("quality_pass") is True for item in results)
+    print(
+        json.dumps(
+            {
+                "event": "hao_groq_shadow_reliability",
+                "runId": run_id,
+                "result": "PASS" if all_pass else "QUALITY_FAIL",
+                "freeOnly": True,
+                "providerMutation": False,
+                "calls": len(results),
+                "summary": summary,
+                "results": results,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def main() -> None:
     token = os.environ.get("HAO_FIELD_TOKEN", "").strip()
     subject = os.environ.get("HAO_FIELD_EXPECTED_SUBJECT", "hao-field-exp").strip()
@@ -513,6 +617,7 @@ def main() -> None:
     )
     threading.Thread(target=run_startup_selftest, args=(port, runtime), daemon=True).start()
     threading.Thread(target=run_optional_groq_free_benchmark, daemon=True).start()
+    threading.Thread(target=run_optional_groq_shadow_reliability, daemon=True).start()
     server.serve_forever()
 
 
