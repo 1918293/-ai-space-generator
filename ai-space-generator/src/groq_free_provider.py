@@ -21,6 +21,7 @@ GROQ_RESPONSES_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_GPT_OSS_20B = "openai/gpt-oss-20b"
 GROQ_INFERENCE_METRICS_HEADER = {"Groq-Beta": "inference-metrics"}
 GROQ_FREE_SERVICE_TIER = "on_demand"
+GROQ_API_KEY_SECRET_PATH = "/etc/secrets/GROQ_API_KEY"
 
 
 class GroqReasoningEffort(StrEnum):
@@ -182,6 +183,29 @@ class GroqFreeContextBoundIntentBoundary:
         return _parse_intent_output(model_input, _response_output_text(response))
 
 
+def load_groq_api_key() -> tuple[str, str]:
+    """Return the Groq key and its non-secret source label.
+
+    Environment variables remain authoritative. Render Secret Files are a
+    bounded fallback for deployments where a service-level secret is mounted
+    at /etc/secrets/GROQ_API_KEY instead of injected into the process env.
+    """
+
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if key:
+        return key, "env"
+
+    try:
+        with open(GROQ_API_KEY_SECRET_PATH, encoding="utf-8") as secret_file:
+            key = secret_file.read().strip()
+    except OSError:
+        key = ""
+
+    if key:
+        return key, "secret_file"
+    return "", "none"
+
+
 def _build_groq_openai_client(*, api_key: str):
     key = api_key.strip()
     if not key:
@@ -232,8 +256,9 @@ def build_groq_free_responses_boundary_from_env(
     reasoning_effort: GroqReasoningEffort | str,
     max_output_tokens: int = 256,
 ) -> GroqFreeResponsesBoundary:
+    api_key, _ = load_groq_api_key()
     return build_groq_free_responses_boundary(
-        api_key=os.environ.get("GROQ_API_KEY", ""),
+        api_key=api_key,
         reasoning_effort=reasoning_effort,
         max_output_tokens=max_output_tokens,
     )
@@ -244,8 +269,9 @@ def build_groq_free_context_bound_intent_boundary_from_env(
     reasoning_effort: GroqReasoningEffort | str,
     max_output_tokens: int = 512,
 ) -> GroqFreeContextBoundIntentBoundary:
+    api_key, _ = load_groq_api_key()
     return build_groq_free_context_bound_intent_boundary(
-        api_key=os.environ.get("GROQ_API_KEY", ""),
+        api_key=api_key,
         reasoning_effort=reasoning_effort,
         max_output_tokens=max_output_tokens,
     )
