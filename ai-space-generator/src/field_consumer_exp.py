@@ -400,6 +400,8 @@ def main() -> None:
                 "authorityInput": "STATIC_CANONICAL_SNAPSHOT_EXP",
                 "providerMutation": False,
                 "gcpProduction": False,
+                "groqCandidateModel": GROQ_GPT_OSS_20B,
+                "groqApiKeyConfigured": bool(os.environ.get("GROQ_API_KEY", "").strip()),
             },
             sort_keys=True,
         ),
