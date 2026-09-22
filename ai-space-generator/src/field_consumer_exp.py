@@ -93,12 +93,14 @@ class SnapshotSemanticResolver:
                 summary=(
                     "No-computer Task Router is an admission selector, not Authority. "
                     "Formal mutation must re-enter ACTION_ADMISSION_BINDING and the "
-                    "existing Single Write Gateway; Render/public Actions cannot write Authority."
+                    "existing Single Write Gateway; Render/public Actions cannot write Authority. "
+                    "Registered binding formal.persist has capability formal_persistence."
                 ),
                 source_version=source_version,
                 project_scope="HAO_SYSTEM",
                 applicability="STALE" if self.stale else "APPLICABLE",
                 disposition="APPLY",
+                binding_id="formal.persist",
             ),
             AdmittedContextItem(
                 ref=EXISTING_REF,
