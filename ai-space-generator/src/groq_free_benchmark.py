@@ -240,11 +240,13 @@ def _runtime_benchmark_model_input() -> ContextBoundModelInput:
                 kind="CURRENT_CONTROL",
                 summary=(
                     "Formal mutation must re-enter ACTION_ADMISSION_BINDING and the "
-                    "existing Single Write Gateway; provider/model output is not Authority."
+                    "existing Single Write Gateway; provider/model output is not Authority. "
+                    "Registered binding formal.persist has capability formal_persistence."
                 ),
                 source_version="06_Config:CURRENT",
                 project_scope="HAO_SYSTEM",
                 disposition="APPLY",
+                binding_id=RUNTIME_EXPECTED_BINDING,
             ),
             AdmittedContextItem(
                 ref=RUNTIME_EXISTING_REF,
