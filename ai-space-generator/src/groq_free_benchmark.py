@@ -4,6 +4,10 @@ import json
 import time
 from typing import Any, Protocol
 
+from .context_bound_reasoning import AdmittedContextItem, ContextBoundModelInput
+from .context_bound_responses import _parse_intent_output, _trusted_runtime_instructions
+from .control_gateway import PreModelContextReceipt
+from .execution_control import Mode
 from .groq_free_provider import (
     GROQ_FREE_SERVICE_TIER,
     GROQ_GPT_OSS_20B,
@@ -190,6 +194,152 @@ def run_groq_free_benchmark(
                 "service_tier": GROQ_FREE_SERVICE_TIER,
                 "wall_ms": wall_ms,
                 "quality_pass": _quality_pass(parsed),
+                "provider_metrics": _provider_metrics(parsed),
+                "rate_limits": headers,
+            }
+        )
+
+        remaining_calls = len(efforts) - index - 1
+        remaining_requests = _remaining_requests(headers)
+        if remaining_calls and remaining_requests is not None and remaining_requests < remaining_calls:
+            raise GroqFreeOnlyStop("GROQ_FREE_REMAINING_REQUESTS_INSUFFICIENT_STOP")
+
+    return results
+
+
+RUNTIME_CURRENT_REF = "CURRENT:ACTION_ADMISSION_BINDING"
+RUNTIME_EXISTING_REF = "PR17:CURRENT"
+RUNTIME_REGRESSION_REF = "REG:R051-NON-BYPASSABLE"
+RUNTIME_EXPECTED_CAPABILITY = "formal_persistence"
+RUNTIME_EXPECTED_BINDING = "formal.persist"
+RUNTIME_BENCHMARK_USER_TEXT = (
+    "Auto > prepare a bounded formal persistence delta using the existing Google Drive "
+    "write gateway. Preserve the current EXP Mode and TASK. Do not bypass Runtime-owned "
+    "admission or create a parallel authority."
+)
+
+
+def _runtime_benchmark_model_input() -> ContextBoundModelInput:
+    receipt = PreModelContextReceipt(
+        checkpoint_id="R1",
+        mode=Mode.EXP,
+        task="Hao System｜Runtime v2 deployed field consumer",
+        operational_version=1,
+        authority_refs=(RUNTIME_CURRENT_REF,),
+        existing_work_refs=(RUNTIME_EXISTING_REF,),
+        prior_attempt_refs=(),
+        regression_refs=(RUNTIME_REGRESSION_REF,),
+        reuse_disposition="REUSE",
+        context_fingerprint="sha256:groq-runtime-intent-benchmark",
+    )
+    return ContextBoundModelInput(
+        receipt=receipt,
+        admitted_context=(
+            AdmittedContextItem(
+                ref=RUNTIME_CURRENT_REF,
+                kind="CURRENT_CONTROL",
+                summary=(
+                    "Formal mutation must re-enter ACTION_ADMISSION_BINDING and the "
+                    "existing Single Write Gateway; provider/model output is not Authority."
+                ),
+                source_version="06_Config:CURRENT",
+                project_scope="HAO_SYSTEM",
+                disposition="APPLY",
+            ),
+            AdmittedContextItem(
+                ref=RUNTIME_EXISTING_REF,
+                kind="EXISTING_WORK",
+                summary=(
+                    "Reuse the existing Runtime v2 context-bound reasoning and control "
+                    "plane; do not create a parallel policy engine or execution authority."
+                ),
+                source_version="PR17:CURRENT",
+                project_scope="HAO_SYSTEM",
+                disposition="REUSE",
+            ),
+            AdmittedContextItem(
+                ref=RUNTIME_REGRESSION_REF,
+                kind="REGRESSION",
+                summary=(
+                    "Caller-supplied Mode, TASK, Authority, model intent and binding "
+                    "metadata must not bypass Runtime-owned admission."
+                ),
+                source_version="R051-current",
+                project_scope="HAO_SYSTEM",
+                disposition="APPLY",
+            ),
+        ),
+        semantic_fingerprint="sha256:groq-runtime-intent-benchmark",
+        user_text=RUNTIME_BENCHMARK_USER_TEXT,
+    )
+
+
+def run_groq_free_runtime_intent_benchmark(
+    client: RawResponsesClient,
+) -> list[dict[str, object]]:
+    """Exercise the current trusted prompt + parser seam with the real provider."""
+
+    model_input = _runtime_benchmark_model_input()
+    efforts = (
+        GroqReasoningEffort.LOW,
+        GroqReasoningEffort.MEDIUM,
+        GroqReasoningEffort.HIGH,
+    )
+    results: list[dict[str, object]] = []
+
+    for index, effort in enumerate(efforts):
+        started = time.perf_counter()
+        try:
+            raw = client.responses.with_raw_response.create(
+                model=GROQ_GPT_OSS_20B,
+                instructions=_trusted_runtime_instructions(model_input),
+                input=model_input.user_text,
+                tool_choice="none",
+                max_output_tokens=1024,
+                reasoning={"effort": effort.value},
+                service_tier=GROQ_FREE_SERVICE_TIER,
+                extra_headers=GROQ_INFERENCE_METRICS_HEADER,
+            )
+            parsed = raw.parse()
+        except Exception as exc:
+            status = _http_status(exc)
+            if status == 429:
+                raise GroqFreeOnlyStop("GROQ_FREE_QUOTA_EXHAUSTED_STOP") from exc
+            if status == 402:
+                raise GroqFreeOnlyStop("GROQ_FREE_PAYMENT_REQUIRED_STOP") from exc
+            raise
+
+        wall_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        headers = _safe_rate_limit_headers(raw.headers)
+        quality_pass = False
+        capability = ""
+        binding_id = ""
+        reported_refs: list[str] = []
+        parse_error = ""
+        try:
+            intent = _parse_intent_output(model_input, _extract_output_text(parsed))
+            capability = intent.requested_capability
+            binding_id = intent.binding_id
+            reported_refs = list(intent.model_reported_used_refs)
+            quality_pass = (
+                capability == RUNTIME_EXPECTED_CAPABILITY
+                and binding_id == RUNTIME_EXPECTED_BINDING
+                and bool(reported_refs)
+            )
+        except ValueError as exc:
+            parse_error = str(exc)
+
+        results.append(
+            {
+                "effort": effort.value,
+                "model": GROQ_GPT_OSS_20B,
+                "service_tier": GROQ_FREE_SERVICE_TIER,
+                "wall_ms": wall_ms,
+                "quality_pass": quality_pass,
+                "requested_capability": capability,
+                "binding_id": binding_id,
+                "reported_refs": reported_refs,
+                "parse_error": parse_error,
                 "provider_metrics": _provider_metrics(parsed),
                 "rate_limits": headers,
             }
