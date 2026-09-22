@@ -17,6 +17,7 @@ from src.groq_free_provider import (
     GroqReasoningEffort,
     build_groq_free_context_bound_intent_boundary,
     build_groq_free_responses_boundary,
+    groq_api_key_secret_file_status,
     load_groq_api_key,
 )
 
@@ -299,3 +300,30 @@ def test_load_groq_api_key_reports_none_when_env_and_secret_file_are_absent(monk
 
     assert key == ""
     assert source == "none"
+
+
+
+def test_groq_secret_file_status_reports_missing(monkeypatch, tmp_path):
+    secret_path = tmp_path / "missing"
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(secret_path))
+
+    status = groq_api_key_secret_file_status()
+
+    assert status == {"exists": False, "readable": False, "nonempty": False}
+
+
+def test_groq_secret_file_status_reports_empty_and_nonempty(monkeypatch, tmp_path):
+    secret_path = tmp_path / "GROQ_API_KEY"
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(secret_path))
+
+    secret_path.write_text("", encoding="utf-8")
+    empty_status = groq_api_key_secret_file_status()
+    assert empty_status["exists"] is True
+    assert empty_status["readable"] is True
+    assert empty_status["nonempty"] is False
+
+    secret_path.write_text("file-key\n", encoding="utf-8")
+    nonempty_status = groq_api_key_secret_file_status()
+    assert nonempty_status["exists"] is True
+    assert nonempty_status["readable"] is True
+    assert nonempty_status["nonempty"] is True
