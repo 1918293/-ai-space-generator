@@ -167,7 +167,7 @@ def run_groq_free_benchmark(
                 instructions=BENCHMARK_INSTRUCTIONS,
                 input=BENCHMARK_INPUT,
                 tool_choice="none",
-                max_output_tokens=192,
+                max_output_tokens=1024,
                 reasoning={"effort": effort.value},
                 service_tier=GROQ_FREE_SERVICE_TIER,
                 extra_headers=GROQ_INFERENCE_METRICS_HEADER,
