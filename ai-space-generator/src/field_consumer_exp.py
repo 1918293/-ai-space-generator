@@ -24,6 +24,7 @@ from .execution_control import ActionArchetype, ActionExternality, Mode
 from .mcp_control_bridge import HaoMCPIdentityPolicy, MCPPrincipal, SCOPE_EXECUTE
 from .mcp_reasoning_ingress import AuthenticatedMCPReasoningIngress
 from .operational_state import ActiveOperationalState, CommandActor
+from .groq_free_provider import GROQ_GPT_OSS_20B
 
 
 TASK = "Hao System｜Runtime v2 deployed field consumer"
