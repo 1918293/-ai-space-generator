@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+import src.groq_free_provider as groq_provider
+
 from src.context_bound_reasoning import AdmittedContextItem, ContextBoundModelInput
 from src.control_gateway import PreModelContextReceipt, VerifiedModelInput
 from src.execution_control import Mode
@@ -15,6 +17,7 @@ from src.groq_free_provider import (
     GroqReasoningEffort,
     build_groq_free_context_bound_intent_boundary,
     build_groq_free_responses_boundary,
+    load_groq_api_key,
 )
 
 
@@ -257,3 +260,42 @@ def test_current_context_bound_seam_reuses_existing_parser_guards():
         match="RESPONSES_INTENT_RUNTIME_FIELD_OR_UNKNOWN_KEY:mode",
     ):
         boundary.invoke(context_bound_model_input())
+
+
+
+def test_load_groq_api_key_prefers_environment(monkeypatch, tmp_path):
+    secret_path = tmp_path / "GROQ_API_KEY"
+    secret_path.write_text("file-key\n", encoding="utf-8")
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(secret_path))
+    monkeypatch.setenv("GROQ_API_KEY", "env-key")
+
+    key, source = load_groq_api_key()
+
+    assert key == "env-key"
+    assert source == "env"
+
+
+def test_load_groq_api_key_falls_back_to_render_secret_file(monkeypatch, tmp_path):
+    secret_path = tmp_path / "GROQ_API_KEY"
+    secret_path.write_text("file-key\n", encoding="utf-8")
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(secret_path))
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    key, source = load_groq_api_key()
+
+    assert key == "file-key"
+    assert source == "secret_file"
+
+
+def test_load_groq_api_key_reports_none_when_env_and_secret_file_are_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        groq_provider,
+        "GROQ_API_KEY_SECRET_PATH",
+        str(tmp_path / "missing"),
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    key, source = load_groq_api_key()
+
+    assert key == ""
+    assert source == "none"
