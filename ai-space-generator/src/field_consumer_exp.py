@@ -24,7 +24,11 @@ from .execution_control import ActionArchetype, ActionExternality, Mode
 from .mcp_control_bridge import HaoMCPIdentityPolicy, MCPPrincipal, SCOPE_EXECUTE
 from .mcp_reasoning_ingress import AuthenticatedMCPReasoningIngress
 from .operational_state import ActiveOperationalState, CommandActor
-from .groq_free_benchmark import build_groq_free_benchmark_client, run_groq_free_benchmark
+from .groq_free_benchmark import (
+    build_groq_free_benchmark_client,
+    run_groq_free_benchmark,
+    run_groq_free_runtime_intent_benchmark,
+)
 from .groq_free_provider import GROQ_GPT_OSS_20B, GroqFreeOnlyStop, groq_api_key_secret_file_status, load_groq_api_key
 
 
@@ -424,7 +428,8 @@ def run_optional_groq_free_benchmark() -> None:
 
     try:
         client = build_groq_free_benchmark_client(key)
-        results = run_groq_free_benchmark(client)
+        policy_results = run_groq_free_benchmark(client)
+        runtime_intent_results = run_groq_free_runtime_intent_benchmark(client)
     except GroqFreeOnlyStop as exc:
         print(
             json.dumps(
@@ -461,10 +466,16 @@ def run_optional_groq_free_benchmark() -> None:
             {
                 "event": "hao_groq_free_benchmark",
                 "runId": run_id,
-                "result": "PASS" if all(item.get("quality_pass") is True for item in results) else "QUALITY_FAIL",
+                "result": (
+                    "PASS"
+                    if all(item.get("quality_pass") is True for item in policy_results)
+                    and all(item.get("quality_pass") is True for item in runtime_intent_results)
+                    else "QUALITY_FAIL"
+                ),
                 "freeOnly": True,
-                "calls": len(results),
-                "results": results,
+                "calls": len(policy_results) + len(runtime_intent_results),
+                "policy_results": policy_results,
+                "runtime_intent_results": runtime_intent_results,
             },
             sort_keys=True,
         ),
