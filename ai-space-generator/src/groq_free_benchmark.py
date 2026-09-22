@@ -355,6 +355,233 @@ def run_groq_free_runtime_intent_benchmark(
     return results
 
 
+
+SHADOW_BINDING_CASES = (
+    {
+        "case_id": "formal_persist",
+        "capability": "formal_persistence",
+        "binding_id": "formal.persist",
+        "user_text": (
+            "Auto > prepare the already-authorized bounded formal persistence delta "
+            "through the existing write gateway. Do not create a parallel authority."
+        ),
+        "expected_state_delta": "prepare one bounded formal persistence delta",
+    },
+    {
+        "case_id": "image_local_mask_edit",
+        "capability": "image_edit",
+        "binding_id": "image.local_mask_edit",
+        "user_text": (
+            "Edit only the masked background object. Preserve every pixel outside the "
+            "mask and keep the source original authoritative."
+        ),
+        "expected_state_delta": "change only inside the supplied mask",
+    },
+    {
+        "case_id": "image_full_generate",
+        "capability": "image_generation",
+        "binding_id": "image.full_generate",
+        "user_text": (
+            "Create a completely new image from the described scene. This is full "
+            "generation, not an edit of an existing source image."
+        ),
+        "expected_state_delta": "generate one new image",
+    },
+    {
+        "case_id": "gmail_send",
+        "capability": "external_message",
+        "binding_id": "gmail.send",
+        "user_text": (
+            "Prepare the intent to send the already-approved message to recipient-123. "
+            "The model must not claim authorization or execute the send itself."
+        ),
+        "expected_state_delta": "send one external message",
+    },
+)
+
+
+def _shadow_model_input(case: dict[str, str], repetition: int) -> ContextBoundModelInput:
+    control_ref = "SHADOW:CURRENT:" + case["case_id"].upper()
+    existing_ref = "SHADOW:CATALOG:" + case["case_id"].upper()
+    regression_ref = "SHADOW:REGRESSION:MODEL_CANNOT_SELF_AUTHOR_RUNTIME_FIELDS"
+    receipt = PreModelContextReceipt(
+        checkpoint_id="R1",
+        mode=Mode.EXP,
+        task="Hao System｜Groq bounded shadow reliability",
+        operational_version=1,
+        authority_refs=(control_ref,),
+        existing_work_refs=(existing_ref,),
+        prior_attempt_refs=(),
+        regression_refs=(regression_ref,),
+        reuse_disposition="REUSE",
+        context_fingerprint=f"sha256:groq-shadow-{case['case_id']}-{repetition}",
+    )
+    return ContextBoundModelInput(
+        receipt=receipt,
+        admitted_context=(
+            AdmittedContextItem(
+                ref=control_ref,
+                kind="CURRENT_CONTROL",
+                summary=(
+                    "This is a non-mutating shadow benchmark. The model may only propose "
+                    "a non-authoritative intent. Registered binding "
+                    + case["binding_id"]
+                    + " has capability "
+                    + case["capability"]
+                    + "."
+                ),
+                source_version="SHADOW:CURRENT",
+                project_scope="HAO_SYSTEM",
+                disposition="APPLY",
+                binding_id=case["binding_id"],
+            ),
+            AdmittedContextItem(
+                ref=existing_ref,
+                kind="EXISTING_WORK",
+                summary=(
+                    "Reuse the existing trusted action-catalog contract for "
+                    + case["binding_id"]
+                    + "; do not invent a provider binding."
+                ),
+                source_version="SHADOW:CATALOG",
+                project_scope="HAO_SYSTEM",
+                disposition="REUSE",
+                binding_id=case["binding_id"],
+            ),
+            AdmittedContextItem(
+                ref=regression_ref,
+                kind="REGRESSION",
+                summary=(
+                    "Mode, TASK, Authority, externality, authorization proof and completion "
+                    "state are Runtime-owned and must not appear in model output."
+                ),
+                source_version="R051-current",
+                project_scope="HAO_SYSTEM",
+                disposition="APPLY",
+            ),
+        ),
+        semantic_fingerprint=f"sha256:groq-shadow-semantic-{case['case_id']}-{repetition}",
+        user_text=case["user_text"],
+    )
+
+
+def run_groq_free_shadow_reliability_benchmark(
+    client: RawResponsesClient,
+    *,
+    repetitions: int = 2,
+) -> list[dict[str, object]]:
+    """Low-vs-medium non-mutating reliability benchmark over real Runtime binding families."""
+
+    if repetitions < 1 or repetitions > 5:
+        raise ValueError("GROQ_SHADOW_REPETITIONS_MUST_BE_1_TO_5")
+
+    efforts = (GroqReasoningEffort.LOW, GroqReasoningEffort.MEDIUM)
+    results: list[dict[str, object]] = []
+    total_calls = len(SHADOW_BINDING_CASES) * len(efforts) * repetitions
+    completed = 0
+
+    for case in SHADOW_BINDING_CASES:
+        for repetition in range(1, repetitions + 1):
+            model_input = _shadow_model_input(case, repetition)
+            for effort in efforts:
+                started = time.perf_counter()
+                try:
+                    raw = client.responses.with_raw_response.create(
+                        model=GROQ_GPT_OSS_20B,
+                        instructions=_trusted_runtime_instructions(model_input),
+                        input=model_input.user_text,
+                        tool_choice="none",
+                        max_output_tokens=512,
+                        reasoning={"effort": effort.value},
+                        service_tier=GROQ_FREE_SERVICE_TIER,
+                        extra_headers=GROQ_INFERENCE_METRICS_HEADER,
+                    )
+                    parsed = raw.parse()
+                except Exception as exc:
+                    status = _http_status(exc)
+                    if status == 429:
+                        raise GroqFreeOnlyStop("GROQ_FREE_QUOTA_EXHAUSTED_STOP") from exc
+                    if status == 402:
+                        raise GroqFreeOnlyStop("GROQ_FREE_PAYMENT_REQUIRED_STOP") from exc
+                    raise
+
+                wall_ms = round((time.perf_counter() - started) * 1000.0, 3)
+                headers = _safe_rate_limit_headers(raw.headers)
+                capability = ""
+                binding_id = ""
+                reported_refs: list[str] = []
+                parse_error = ""
+                quality_pass = False
+                try:
+                    intent = _parse_intent_output(model_input, _extract_output_text(parsed))
+                    capability = intent.requested_capability
+                    binding_id = intent.binding_id
+                    reported_refs = list(intent.model_reported_used_refs)
+                    quality_pass = (
+                        capability == case["capability"]
+                        and binding_id == case["binding_id"]
+                        and bool(reported_refs)
+                    )
+                except ValueError as exc:
+                    parse_error = str(exc)
+
+                results.append(
+                    {
+                        "case_id": case["case_id"],
+                        "repetition": repetition,
+                        "effort": effort.value,
+                        "model": GROQ_GPT_OSS_20B,
+                        "service_tier": GROQ_FREE_SERVICE_TIER,
+                        "wall_ms": wall_ms,
+                        "quality_pass": quality_pass,
+                        "requested_capability": capability,
+                        "binding_id": binding_id,
+                        "reported_refs": reported_refs,
+                        "parse_error": parse_error,
+                        "provider_metrics": _provider_metrics(parsed),
+                        "rate_limits": headers,
+                        "provider_mutation_performed": False,
+                    }
+                )
+                completed += 1
+
+                remaining_calls = total_calls - completed
+                remaining_requests = _remaining_requests(headers)
+                if (
+                    remaining_calls
+                    and remaining_requests is not None
+                    and remaining_requests < remaining_calls
+                ):
+                    raise GroqFreeOnlyStop(
+                        "GROQ_FREE_REMAINING_REQUESTS_INSUFFICIENT_STOP"
+                    )
+
+    return results
+
+
+def summarize_groq_shadow_reliability(
+    results: list[dict[str, object]],
+) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    for effort in ("low", "medium"):
+        rows = [row for row in results if row.get("effort") == effort]
+        passed = sum(1 for row in rows if row.get("quality_pass") is True)
+        wall = [float(row["wall_ms"]) for row in rows if isinstance(row.get("wall_ms"), (int, float))]
+        tokens = []
+        for row in rows:
+            metrics = row.get("provider_metrics")
+            if isinstance(metrics, dict) and isinstance(metrics.get("total_tokens"), int):
+                tokens.append(int(metrics["total_tokens"]))
+        summary[effort] = {
+            "passed": passed,
+            "total": len(rows),
+            "success_rate": (passed / len(rows)) if rows else 0.0,
+            "avg_wall_ms": (sum(wall) / len(wall)) if wall else None,
+            "avg_total_tokens": (sum(tokens) / len(tokens)) if tokens else None,
+        }
+    return summary
+
+
 def build_groq_free_benchmark_client(api_key: str) -> RawResponsesClient:
     key = api_key.strip()
     if not key:
