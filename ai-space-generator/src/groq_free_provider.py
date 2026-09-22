@@ -22,6 +22,7 @@ GROQ_GPT_OSS_20B = "openai/gpt-oss-20b"
 GROQ_INFERENCE_METRICS_HEADER = {"Groq-Beta": "inference-metrics"}
 GROQ_FREE_SERVICE_TIER = "on_demand"
 GROQ_API_KEY_SECRET_PATH = "/etc/secrets/GROQ_API_KEY"
+GROQ_API_KEY_SERVICE_ROOT_PATH = "../GROQ_API_KEY"
 
 
 class GroqReasoningEffort(StrEnum):
@@ -183,21 +184,28 @@ class GroqFreeContextBoundIntentBoundary:
         return _parse_intent_output(model_input, _response_output_text(response))
 
 
-def groq_api_key_secret_file_status() -> dict[str, bool]:
-    """Return non-secret diagnostics for the expected Render Secret File."""
-
-    exists = os.path.exists(GROQ_API_KEY_SECRET_PATH)
-    readable = os.access(GROQ_API_KEY_SECRET_PATH, os.R_OK) if exists else False
+def _secret_file_status(path: str) -> dict[str, bool]:
+    exists = os.path.exists(path)
+    readable = os.access(path, os.R_OK) if exists else False
     nonempty = False
     if exists:
         try:
-            nonempty = os.path.getsize(GROQ_API_KEY_SECRET_PATH) > 0
+            nonempty = os.path.getsize(path) > 0
         except OSError:
             nonempty = False
     return {
         "exists": exists,
         "readable": readable,
         "nonempty": nonempty,
+    }
+
+
+def groq_api_key_secret_file_status() -> dict[str, dict[str, bool]]:
+    """Return non-secret diagnostics for Render Secret File locations."""
+
+    return {
+        "etc_secrets": _secret_file_status(GROQ_API_KEY_SECRET_PATH),
+        "service_root": _secret_file_status(GROQ_API_KEY_SERVICE_ROOT_PATH),
     }
 
 
@@ -213,14 +221,18 @@ def load_groq_api_key() -> tuple[str, str]:
     if key:
         return key, "env"
 
-    try:
-        with open(GROQ_API_KEY_SECRET_PATH, encoding="utf-8") as secret_file:
-            key = secret_file.read().strip()
-    except OSError:
-        key = ""
+    for path, source in (
+        (GROQ_API_KEY_SECRET_PATH, "secret_file"),
+        (GROQ_API_KEY_SERVICE_ROOT_PATH, "service_root_secret_file"),
+    ):
+        try:
+            with open(path, encoding="utf-8") as secret_file:
+                key = secret_file.read().strip()
+        except OSError:
+            key = ""
+        if key:
+            return key, source
 
-    if key:
-        return key, "secret_file"
     return "", "none"
 
 
