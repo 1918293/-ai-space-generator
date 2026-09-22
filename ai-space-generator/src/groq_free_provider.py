@@ -183,6 +183,24 @@ class GroqFreeContextBoundIntentBoundary:
         return _parse_intent_output(model_input, _response_output_text(response))
 
 
+def groq_api_key_secret_file_status() -> dict[str, bool]:
+    """Return non-secret diagnostics for the expected Render Secret File."""
+
+    exists = os.path.exists(GROQ_API_KEY_SECRET_PATH)
+    readable = os.access(GROQ_API_KEY_SECRET_PATH, os.R_OK) if exists else False
+    nonempty = False
+    if exists:
+        try:
+            nonempty = os.path.getsize(GROQ_API_KEY_SECRET_PATH) > 0
+        except OSError:
+            nonempty = False
+    return {
+        "exists": exists,
+        "readable": readable,
+        "nonempty": nonempty,
+    }
+
+
 def load_groq_api_key() -> tuple[str, str]:
     """Return the Groq key and its non-secret source label.
 
