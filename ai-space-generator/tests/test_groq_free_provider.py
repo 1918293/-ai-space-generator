@@ -3,6 +3,7 @@ import pytest
 from src.control_gateway import PreModelContextReceipt, VerifiedModelInput
 from src.execution_control import Mode
 from src.groq_free_provider import (
+    GROQ_FREE_SERVICE_TIER,
     GROQ_GPT_OSS_20B,
     GROQ_INFERENCE_METRICS_HEADER,
     GroqFreeOnlyStop,
@@ -67,6 +68,7 @@ def test_only_supported_reasoning_efforts_are_forwarded(effort, expected):
     assert request["model"] == GROQ_GPT_OSS_20B
     assert request["reasoning"] == {"effort": expected}
     assert request["tool_choice"] == "none"
+    assert request["service_tier"] == GROQ_FREE_SERVICE_TIER
     assert request["extra_headers"] == GROQ_INFERENCE_METRICS_HEADER
     assert "store" not in request
     assert "previous_response_id" not in request
