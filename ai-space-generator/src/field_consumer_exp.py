@@ -25,7 +25,7 @@ from .mcp_control_bridge import HaoMCPIdentityPolicy, MCPPrincipal, SCOPE_EXECUT
 from .mcp_reasoning_ingress import AuthenticatedMCPReasoningIngress
 from .operational_state import ActiveOperationalState, CommandActor
 from .groq_free_benchmark import build_groq_free_benchmark_client, run_groq_free_benchmark
-from .groq_free_provider import GROQ_GPT_OSS_20B, GroqFreeOnlyStop, load_groq_api_key
+from .groq_free_provider import GROQ_GPT_OSS_20B, GroqFreeOnlyStop, groq_api_key_secret_file_status, load_groq_api_key
 
 
 TASK = "Hao System｜Runtime v2 deployed field consumer"
@@ -491,6 +491,7 @@ def main() -> None:
                 "groqCandidateModel": GROQ_GPT_OSS_20B,
                 "groqApiKeyConfigured": bool(load_groq_api_key()[0]),
                 "groqApiKeySource": load_groq_api_key()[1],
+                "groqSecretFileStatus": groq_api_key_secret_file_status(),
                 "groqEnvKeys": sorted(name for name in os.environ if name.startswith("GROQ")),
             },
             sort_keys=True,
