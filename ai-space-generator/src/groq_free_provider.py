@@ -10,7 +10,7 @@ from .responses_model_boundary import _trusted_runtime_instructions
 
 GROQ_RESPONSES_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_GPT_OSS_20B = "openai/gpt-oss-20b"
-GROQ_INFERENCE_METRICS_HEADER = {"Groq-Beta": "inference-metrics"}
+GROQ_INFERENCE_METRICS_HEADER = {"Groq-Beta": "inference-metrics"}\nGROQ_FREE_SERVICE_TIER = "on_demand"
 
 
 class GroqReasoningEffort(StrEnum):
