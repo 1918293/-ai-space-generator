@@ -10,7 +10,8 @@ from .responses_model_boundary import _trusted_runtime_instructions
 
 GROQ_RESPONSES_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_GPT_OSS_20B = "openai/gpt-oss-20b"
-GROQ_INFERENCE_METRICS_HEADER = {"Groq-Beta": "inference-metrics"}\nGROQ_FREE_SERVICE_TIER = "on_demand"
+GROQ_INFERENCE_METRICS_HEADER = {"Groq-Beta": "inference-metrics"}
+GROQ_FREE_SERVICE_TIER = "on_demand"
 
 
 class GroqReasoningEffort(StrEnum):
@@ -44,15 +45,7 @@ def _http_status(exc: BaseException) -> int | None:
 
 
 class GroqFreeResponsesBoundary:
-    """Single-provider Groq Responses adapter for Hao FREE_ONLY experiments.
-
-    Contract:
-    - fixed Groq endpoint/client supplied by the builder;
-    - fixed GPT-OSS 20B model by default;
-    - only low/medium/high reasoning efforts;
-    - no unsupported OpenAI Responses fields such as store/previous_response_id;
-    - 429 and explicit payment-required responses stop instead of falling back.
-    """
+    """Single-provider Groq Responses adapter for Hao FREE_ONLY experiments."""
 
     def __init__(
         self,
@@ -89,6 +82,7 @@ class GroqFreeResponsesBoundary:
                 tool_choice="none",
                 max_output_tokens=self._max_output_tokens,
                 reasoning={"effort": self._effort.value},
+                service_tier=GROQ_FREE_SERVICE_TIER,
                 extra_headers=GROQ_INFERENCE_METRICS_HEADER,
             )
         except Exception as exc:
