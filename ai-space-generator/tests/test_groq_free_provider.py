@@ -304,26 +304,43 @@ def test_load_groq_api_key_reports_none_when_env_and_secret_file_are_absent(monk
 
 
 def test_groq_secret_file_status_reports_missing(monkeypatch, tmp_path):
-    secret_path = tmp_path / "missing"
-    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(secret_path))
+    etc_path = tmp_path / "missing-etc"
+    root_path = tmp_path / "missing-root"
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(etc_path))
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SERVICE_ROOT_PATH", str(root_path))
 
     status = groq_api_key_secret_file_status()
 
-    assert status == {"exists": False, "readable": False, "nonempty": False}
+    assert status == {
+        "etc_secrets": {"exists": False, "readable": False, "nonempty": False},
+        "service_root": {"exists": False, "readable": False, "nonempty": False},
+    }
 
 
 def test_groq_secret_file_status_reports_empty_and_nonempty(monkeypatch, tmp_path):
-    secret_path = tmp_path / "GROQ_API_KEY"
-    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(secret_path))
+    etc_path = tmp_path / "etc-key"
+    root_path = tmp_path / "root-key"
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(etc_path))
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SERVICE_ROOT_PATH", str(root_path))
 
-    secret_path.write_text("", encoding="utf-8")
-    empty_status = groq_api_key_secret_file_status()
-    assert empty_status["exists"] is True
-    assert empty_status["readable"] is True
-    assert empty_status["nonempty"] is False
+    etc_path.write_text("", encoding="utf-8")
+    root_path.write_text("file-key\n", encoding="utf-8")
+    status = groq_api_key_secret_file_status()
 
-    secret_path.write_text("file-key\n", encoding="utf-8")
-    nonempty_status = groq_api_key_secret_file_status()
-    assert nonempty_status["exists"] is True
-    assert nonempty_status["readable"] is True
-    assert nonempty_status["nonempty"] is True
+    assert status["etc_secrets"] == {"exists": True, "readable": True, "nonempty": False}
+    assert status["service_root"] == {"exists": True, "readable": True, "nonempty": True}
+
+
+
+def test_load_groq_api_key_falls_back_to_service_root_secret_file(monkeypatch, tmp_path):
+    etc_path = tmp_path / "missing-etc"
+    root_path = tmp_path / "GROQ_API_KEY"
+    root_path.write_text("root-key\n", encoding="utf-8")
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SECRET_PATH", str(etc_path))
+    monkeypatch.setattr(groq_provider, "GROQ_API_KEY_SERVICE_ROOT_PATH", str(root_path))
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    key, source = load_groq_api_key()
+
+    assert key == "root-key"
+    assert source == "service_root_secret_file"
