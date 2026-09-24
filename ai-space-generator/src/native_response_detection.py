@@ -31,6 +31,8 @@ class DetectionOutcome(StrEnum):
     AMBIGUOUS_DELIVERY = "AMBIGUOUS_DELIVERY"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     UNKNOWN_EFFECT = "UNKNOWN_EFFECT"
+    # Reporting-only bounded positive label. The turn classifier must never
+    # emit this as a fallback for unmatched or contradictory evidence.
     SCOPED_POSITIVE = "SCOPED_POSITIVE"
 
 
@@ -78,27 +80,25 @@ def classify_native_outcome(
         return DetectionOutcome.UNKNOWN_EFFECT
 
     required_readback_ok = not persistence_required or evidence.readback_observed
-    if evidence.terminal_message_observed and required_readback_ok:
-        if evidence.native_error_class == NativeErrorClass.NONE:
-            return DetectionOutcome.COMPLETE_VERIFIED
 
+    # Positive completion is whitelist-only: verified terminal delivery, no
+    # native error signal, and every required readback satisfied.
     if (
         evidence.execution_started
-        and not evidence.terminal_message_observed
-        and evidence.native_error_class
-        in {
-            NativeErrorClass.STOPPED_THINKING,
-            NativeErrorClass.STREAM_INTERRUPTED,
-            NativeErrorClass.TIMEOUT,
-            NativeErrorClass.OTHER,
-        }
+        and evidence.terminal_message_observed
+        and evidence.native_error_class == NativeErrorClass.NONE
+        and required_readback_ok
     ):
+        return DetectionOutcome.COMPLETE_VERIFIED
+
+    # Once execution has started, every non-whitelisted terminal state is
+    # ambiguous delivery. This includes missing terminal evidence, absent UI
+    # error labels, and contradictory terminal+error observations.
+    if evidence.execution_started:
         return DetectionOutcome.AMBIGUOUS_DELIVERY
 
-    if not evidence.execution_started and evidence.native_error_class != NativeErrorClass.NONE:
-        return DetectionOutcome.EXECUTION_FAILED
-
-    return DetectionOutcome.SCOPED_POSITIVE
+    # A continuation that never demonstrably started is not positive evidence.
+    return DetectionOutcome.EXECUTION_FAILED
 
 
 def admit_diagnostic_retest(
