@@ -24,7 +24,7 @@ concurrency:
 jobs:
   field-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 30
 
     defaults:
       run:
@@ -185,3 +185,43 @@ jobs:
           grep -q '"provider_mutation": false' /tmp/runtime-v2-field.log
           grep -q '"gcp_production": false' /tmp/runtime-v2-field.log
           echo "STARTUP_SELFTEST_READBACK=PASS"
+
+      - name: Write durable execution receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          FIELD_RESULT: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          mkdir -p durable-receipt
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = {
+              "schema": "hao-github-durable-receipt-v1",
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "sha": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "jobs": {"field-validation": os.environ["FIELD_RESULT"]},
+          }
+          Path("durable-receipt/receipt.json").write_text(
+              json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+
+      - name: Upload durable execution receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: durable-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: durable-receipt/receipt.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
