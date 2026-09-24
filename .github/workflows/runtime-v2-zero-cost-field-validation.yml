@@ -186,11 +186,18 @@ jobs:
           grep -q '"gcp_production": false' /tmp/runtime-v2-field.log
           echo "STARTUP_SELFTEST_READBACK=PASS"
 
+
+  durable-receipt:
+    name: durable-receipt
+    if: ${{ always() }}
+    needs:
+      - field-validation
+    runs-on: ubuntu-latest
+    steps:
       - name: Write durable execution receipt
-        if: ${{ always() }}
         shell: bash
         env:
-          FIELD_RESULT: ${{ job.status }}
+          FIELD_RESULT: ${{ needs.field-validation.result }}
         run: |
           set -euo pipefail
           mkdir -p durable-receipt
@@ -215,7 +222,6 @@ jobs:
           )
           print(json.dumps(receipt, sort_keys=True))
           PY
-
       - name: Upload durable execution receipt
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
