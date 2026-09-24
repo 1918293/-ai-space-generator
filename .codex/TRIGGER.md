@@ -1,0 +1,1 @@
+Codex: execute the revised `.codex/CODEX_TASK.md` on `auto/chenghe428-v0.3`. It is now rebased to the actual current `main`; do not force-apply the historical v0.2 patch. Keep the do-not-merge guard and report `ORIGINAL_SELFTEST_MISSING` if the original runtime self-test is unavailable.
