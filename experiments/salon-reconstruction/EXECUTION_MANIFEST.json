@@ -1,0 +1,132 @@
+{
+  "status": "EXP_ACTIVE_RECONSTRUCTION",
+  "version": "0.8",
+  "privacy": "Do not commit portrait/source/control images or plaintext generated portrait outputs to this public repository. Runtime assets must stay private/local or encrypted in transit.",
+  "promotion_rule": "No generated result is promoted to Accepted Baseline without explicit user approval.",
+  "profile": {
+    "file": "profiles/upper_body_strong_slim_v01.json",
+    "revision": 2,
+    "primary_objective": "Clearly and substantially slimmer upper-body appearance at first glance with same-person and garment identity preserved."
+  },
+  "canonical_spine": [
+    "profiles/upper_body_strong_slim_v01.json",
+    "run_hf_zero_fast_salon.py",
+    ".github/workflows/salon-private-zero-run.yml",
+    ".github/workflows/salon-runner-validation.yml"
+  ],
+  "free_zero_runner": {
+    "file": "run_hf_zero_fast_salon.py",
+    "single_authority": true,
+    "backends": {
+      "lightning": {
+        "space": "LPX55/Qwen-Image-Edit-2511-Turbo-Lightning",
+        "status": "REAL_PRIVATE_PORTRAIT_EXECUTED",
+        "role": "strong reconstruction explorer",
+        "default_steps": 4,
+        "credential_required": false,
+        "quality_boundary": "Strong slimming is proven, but tested garment/hand/phone preservation is insufficient."
+      },
+      "lora_fast": {
+        "space": "prithivMLmods/Qwen-Image-Edit-2511-LoRAs-Fast",
+        "status": "CONTRACT_AND_SYNTHETIC_PATH_VALIDATED",
+        "role": "next garment-aware comparator",
+        "default_lora": "Studio-DeLight",
+        "default_steps": 4,
+        "credential_required": false
+      }
+    },
+    "input_modes": [
+      "source_only",
+      "source_garment",
+      "source_garment_structure"
+    ],
+    "variants": [
+      "preserve_garment",
+      "strong_keypoints",
+      "identity_first"
+    ]
+  },
+  "private_execution": {
+    "preferred_workflow": ".github/workflows/salon-private-zero-run.yml",
+    "transport": "ephemeral RSA public-key exchange + encrypted private URL manifest + encrypted one-day result artifact",
+    "plaintext_committed": false,
+    "cleanup": "always() removes private runtime material",
+    "real_portrait_execution": "PASS"
+  },
+  "simple_presigned_execution": {
+    "workflow": ".github/workflows/salon-hf-zero.yml",
+    "required_secrets": [
+      "SALON_PACK_URL",
+      "SALON_RESULT_UPLOAD_URL"
+    ],
+    "model_credential_required": false,
+    "supports_backend_selection": true
+  },
+  "actual_private_portrait_tests": [
+    {
+      "id": "lightning_v1_source_garment_keypoints",
+      "status": "REJECT_HIGH_INFORMATION_VALUE",
+      "finding": "Strong first-glance slimming succeeded; shirt construction and hand/phone relations drifted too far."
+    },
+    {
+      "id": "lightning_v2_source_garment_silhouette",
+      "status": "REJECT",
+      "finding": "Standalone silhouette behaved partly as appearance/content rather than pure geometry; garment identity degraded."
+    },
+    {
+      "id": "lightning_v3_source_garment",
+      "status": "HARD_REJECT",
+      "finding": "Removing explicit structure did not solve garment preservation."
+    }
+  ],
+  "derived_evidence": {
+    "strong_body_reconstruction": "PROVEN",
+    "lightning_as_controlnet_equivalent": "DISPROVEN_FOR_CURRENT_WORKFLOW",
+    "garment_hard_preservation": "UNRESOLVED",
+    "hands_phone_preservation": "UNRESOLVED",
+    "more_tps_or_stronger_2d_warp": "LOW_INFORMATION_GAIN",
+    "next_high_value_test": "lora_fast + preserve_garment using the same private source and garment reference"
+  },
+  "fallbacks": {
+    "qwencloud_hosted": {
+      "file": "run_qwencloud_salon.py",
+      "model_default": "qwen-image-3.0-pro",
+      "status": "RUNNER_READY_NOT_REAL_EXECUTED",
+      "required_env": [
+        "DASHSCOPE_API_KEY"
+      ]
+    },
+    "qwen_lightx2v_fp8": {
+      "file": "run_qwen_lightx2v_fp8.sh",
+      "status": "RUNNER_READY_NOT_EXECUTED"
+    },
+    "qwen_self_hosted": {
+      "file": "run_qwen_salon.py",
+      "status": "RUNNER_READY_NOT_EXECUTED"
+    },
+    "fitvton": {
+      "file": "run_fitvton_salon.sh",
+      "status": "RUNNER_READY_NOT_EXECUTED",
+      "role": "garment-fit comparator"
+    },
+    "mhr_instanthmr": {
+      "status": "STATIC_RESEARCH_ONLY_NOT_RUNTIME_EXECUTED",
+      "role": "future authoritative body geometry lane"
+    }
+  },
+  "validation": {
+    "cheap_pr_validation": ".github/workflows/salon-runner-validation.yml",
+    "manual_zero_validation": ".github/workflows/salon-hf-zero-validation.yml",
+    "compile_syntax": "PASS",
+    "qwencloud_dry_run": "PASS",
+    "lightning_synthetic_zero_inference": "PASS",
+    "private_real_portrait_zero_inference": "PASS"
+  },
+  "external_attempts": {
+    "adobe_firefly": "ATTEMPTED_FAILED_ACCESS_DENIED",
+    "picsart": "PREFLIGHT_VALID_CREDIT_GATED",
+    "github_hosted_gpu": "NOT_AVAILABLE"
+  },
+  "temporary_material_policy": "Probe/smoke workflows and runtime-private encrypted transport remnants are not canonical project assets; remove after the consolidated spine passes CI and private-run regression validation.",
+  "next_gate": "Run the same private portrait through lora_fast preserve_garment, then compare against rejected Lightning V1/V2/V3 before any further architecture expansion."
+}

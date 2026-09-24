@@ -1,0 +1,17 @@
+name: Salon HF Zero Alt Probe (Deprecated)
+
+# Historical one-off probe. Superseded by salon-hf-zero-validation.yml.
+# Kept temporarily for traceability; it must not consume CI/Zero resources automatically.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deprecated:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Deprecated: use .github/workflows/salon-hf-zero-validation.yml"
+          echo "Current canonical backends are validated through the unified Salon Zero runner."
