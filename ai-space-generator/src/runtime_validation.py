@@ -158,6 +158,7 @@ def run_integrity_validation(
     relations: Iterable[Mapping[str, Any]],
     valid_subject_ids: Iterable[str],
     *,
+    valid_object_ids: Iterable[str] | None = None,
     intake_records: Iterable[Mapping[str, Any]] | None = None,
     allowed_intake_statuses: Iterable[str] | None = None,
     intake_status_effective_from: str | None = None,
@@ -174,13 +175,19 @@ def run_integrity_validation(
 
     Allowed domains and lifecycle cutovers are caller-supplied from current
     Authority. GitHub never defines or expands those vocabularies itself.
+    Optional object endpoint validation is also caller-supplied so existing
+    subject-only relation checks remain backward compatible.
 
     Additional Intake and freshness contracts are enabled only when their
     required inputs are supplied, preserving backward compatibility with the
     original EVENT_ID_UNIQUE / RELATION_INTEGRITY runtime.
     """
     event_result = validate_event_id_unique(events)
-    relation_result = validate_relation_integrity(relations, valid_subject_ids)
+    relation_result = validate_relation_integrity(
+        relations,
+        valid_subject_ids,
+        valid_object_ids,
+    )
 
     contracts: dict[str, dict[str, Any]] = {
         "EVENT_ID_UNIQUE": event_result,

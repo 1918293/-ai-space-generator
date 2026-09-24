@@ -34,6 +34,10 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
         return None
 
 
+def _is_timezone_aware(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None
+
+
 def validate_event_id_unique(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """Validate that every non-empty event_id appears exactly once."""
     ids = [_clean(row.get("event_id")) for row in events]
@@ -49,8 +53,13 @@ def validate_event_id_unique(events: Iterable[Mapping[str, Any]]) -> dict[str, A
 def validate_relation_integrity(
     relations: Iterable[Mapping[str, Any]],
     valid_subject_ids: Iterable[str],
+    valid_object_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    """Validate relation identity and subject referential integrity.
+    """Validate relation identity and deterministic endpoint integrity.
+
+    Subject referential integrity is always checked. Object referential integrity
+    is checked only when the caller supplies an explicit valid_object_ids domain,
+    preserving the original subject-only behavior for existing callers.
 
     This intentionally checks only deterministic structure. It does not decide
     whether a semantically valid relation type is the right interpretation.
@@ -67,15 +76,25 @@ def validate_relation_integrity(
         if not subject_id or subject_id not in subjects:
             missing_subject_rows.append({"row": index, "subject_id": subject_id})
 
+    invalid_object_rows: list[dict[str, Any]] = []
+    if valid_object_ids is not None:
+        objects = {_clean(value) for value in valid_object_ids if _clean(value)}
+        for index, row in enumerate(relation_rows):
+            object_id = _clean(row.get("object_id"))
+            if not object_id or object_id not in objects:
+                invalid_object_rows.append({"row": index, "object_id": object_id})
+
     return {
         "hard_gate_pass": (
             not missing_relation_ids
             and not duplicate_relation_ids
             and not missing_subject_rows
+            and not invalid_object_rows
         ),
         "missing_relation_id_rows": missing_relation_ids,
         "duplicate_relation_ids": duplicate_relation_ids,
         "invalid_subject_rows": missing_subject_rows,
+        "invalid_object_rows": invalid_object_rows,
     }
 
 
@@ -147,18 +166,33 @@ def validate_supersedes_integrity(
 def validate_supersedes_temporal_order(
     intake_records: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Flag supersedes edges whose source timestamp precedes the target timestamp.
+    """Flag unresolved timestamps, timezone mismatches, and temporal inversions.
 
     This is a structural anomaly detector. A flagged inversion may be intentional
     correction evidence, but it must remain explicit rather than silently passing.
+    Mixed timezone-awareness also fails closed rather than guessing a timezone or
+    raising a TypeError during comparison.
     """
     rows = list(intake_records)
-    by_id = {
-        _clean(row.get("record_id")): row
-        for row in rows
-        if _clean(row.get("record_id"))
-    }
+    by_id: dict[str, tuple[int, Mapping[str, Any], datetime | None]] = {}
     invalid_timestamp_rows: list[dict[str, Any]] = []
+
+    for index, row in enumerate(rows):
+        record_id = _clean(row.get("record_id"))
+        captured_raw = row.get("captured_at")
+        captured_at = _parse_iso_datetime(captured_raw)
+        if record_id:
+            by_id[record_id] = (index, row, captured_at)
+            if captured_at is None:
+                invalid_timestamp_rows.append(
+                    {
+                        "row": index,
+                        "record_id": record_id,
+                        "captured_at": _clean(captured_raw),
+                    }
+                )
+
+    timezone_mismatch_rows: list[dict[str, Any]] = []
     inversions: list[dict[str, Any]] = []
 
     for index, row in enumerate(rows):
@@ -166,27 +200,33 @@ def validate_supersedes_temporal_order(
         source_raw = row.get("captured_at")
         source_time = _parse_iso_datetime(source_raw)
         if source_id and source_time is None:
-            invalid_timestamp_rows.append(
-                {"row": index, "record_id": source_id, "captured_at": _clean(source_raw)}
-            )
             continue
 
         for target_id in _split_refs(row.get("supersedes")):
-            target = by_id.get(target_id)
-            if target is None:
+            target_entry = by_id.get(target_id)
+            if target_entry is None:
                 continue
+
+            _, target, target_time = target_entry
             target_raw = target.get("captured_at")
-            target_time = _parse_iso_datetime(target_raw)
             if target_time is None:
-                invalid_timestamp_rows.append(
+                continue
+            if source_time is None:
+                continue
+
+            if _is_timezone_aware(source_time) != _is_timezone_aware(target_time):
+                timezone_mismatch_rows.append(
                     {
                         "row": index,
-                        "record_id": target_id,
-                        "captured_at": _clean(target_raw),
+                        "record_id": source_id,
+                        "captured_at": _clean(source_raw),
+                        "supersedes": target_id,
+                        "target_captured_at": _clean(target_raw),
                     }
                 )
                 continue
-            if source_time is not None and source_time < target_time:
+
+            if source_time < target_time:
                 inversions.append(
                     {
                         "row": index,
@@ -199,8 +239,13 @@ def validate_supersedes_temporal_order(
                 )
 
     return {
-        "hard_gate_pass": not invalid_timestamp_rows and not inversions,
+        "hard_gate_pass": (
+            not invalid_timestamp_rows
+            and not timezone_mismatch_rows
+            and not inversions
+        ),
         "invalid_timestamp_rows": invalid_timestamp_rows,
+        "timezone_mismatch_rows": timezone_mismatch_rows,
         "temporal_inversions": inversions,
     }
 
