@@ -71,6 +71,12 @@ def classify_native_outcome(
     if evidence.tool_effect_state == ToolEffectState.UNKNOWN:
         return DetectionOutcome.UNKNOWN_EFFECT
 
+    # Persistence-required work is not verified until its required readback is
+    # observed. If execution already started, fail closed rather than minting a
+    # positive outcome from a terminal message alone.
+    if persistence_required and evidence.execution_started and not evidence.readback_observed:
+        return DetectionOutcome.UNKNOWN_EFFECT
+
     required_readback_ok = not persistence_required or evidence.readback_observed
     if evidence.terminal_message_observed and required_readback_ok:
         if evidence.native_error_class == NativeErrorClass.NONE:
