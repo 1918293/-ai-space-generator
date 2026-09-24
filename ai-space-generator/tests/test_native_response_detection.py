@@ -74,6 +74,29 @@ def test_not_started_without_error_is_execution_failed_not_positive():
     assert classify_native_outcome(sample) == DetectionOutcome.EXECUTION_FAILED
 
 
+def test_turn_classifier_never_mints_scoped_positive_from_raw_turn_evidence():
+    for execution_started in (False, True):
+        for tool_effect_state in ToolEffectState:
+            for readback_observed in (False, True):
+                for terminal_message_observed in (False, True):
+                    for native_error_class in NativeErrorClass:
+                        for persistence_required in (False, True):
+                            sample = evidence(
+                                execution_started=execution_started,
+                                tool_effect_state=tool_effect_state,
+                                readback_observed=readback_observed,
+                                terminal_message_observed=terminal_message_observed,
+                                native_error_class=native_error_class,
+                            )
+                            assert (
+                                classify_native_outcome(
+                                    sample,
+                                    persistence_required=persistence_required,
+                                )
+                                != DetectionOutcome.SCOPED_POSITIVE
+                            )
+
+
 def test_unknown_consequential_effect_fails_closed_before_delivery_classification():
     sample = evidence(tool_effect_state=ToolEffectState.UNKNOWN)
     assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.UNKNOWN_EFFECT
