@@ -49,6 +49,31 @@ def test_missing_required_readback_fails_closed_even_with_terminal_message():
     assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.UNKNOWN_EFFECT
 
 
+def test_missing_terminal_without_native_error_still_is_ambiguous_delivery():
+    sample = evidence(native_error_class=NativeErrorClass.NONE)
+    assert classify_native_outcome(sample) == DetectionOutcome.AMBIGUOUS_DELIVERY
+
+
+def test_terminal_plus_native_error_is_not_positive_completion():
+    sample = evidence(
+        terminal_message_observed=True,
+        native_error_class=NativeErrorClass.STREAM_INTERRUPTED,
+    )
+    assert classify_native_outcome(sample) == DetectionOutcome.AMBIGUOUS_DELIVERY
+
+
+def test_not_started_without_error_is_execution_failed_not_positive():
+    sample = evidence(
+        execution_started=False,
+        tool_dispatch_observed=False,
+        tool_effect_state=ToolEffectState.NONE,
+        readback_observed=False,
+        terminal_message_observed=False,
+        native_error_class=NativeErrorClass.NONE,
+    )
+    assert classify_native_outcome(sample) == DetectionOutcome.EXECUTION_FAILED
+
+
 def test_unknown_consequential_effect_fails_closed_before_delivery_classification():
     sample = evidence(tool_effect_state=ToolEffectState.UNKNOWN)
     assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.UNKNOWN_EFFECT
