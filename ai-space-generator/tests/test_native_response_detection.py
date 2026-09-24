@@ -40,6 +40,15 @@ def test_verified_terminal_and_required_readback_is_complete_verified():
     assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.COMPLETE_VERIFIED
 
 
+def test_missing_required_readback_fails_closed_even_with_terminal_message():
+    sample = evidence(
+        readback_observed=False,
+        terminal_message_observed=True,
+        native_error_class=NativeErrorClass.NONE,
+    )
+    assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.UNKNOWN_EFFECT
+
+
 def test_unknown_consequential_effect_fails_closed_before_delivery_classification():
     sample = evidence(tool_effect_state=ToolEffectState.UNKNOWN)
     assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.UNKNOWN_EFFECT
