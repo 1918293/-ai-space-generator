@@ -41,6 +41,28 @@ python app.py
 
 開啟終端機顯示的本機網址，通常是 `http://127.0.0.1:7860`。
 
+## iPhone 本機人像（Draw Things）
+
+`draw-things-portrait.js` 是 Draw Things 的本機人像工作流。它不使用本專案的 Hugging Face 遠端生成路徑，也不按張消耗雲端生成額度。
+
+工作流會：
+
+1. 在 Draw Things 內要求選取一張成人參考照片。
+2. 自動下載並使用 `Realistic Vision v5.1 (8-bit)` 與 `IP Adapter Plus Face (SD v1.x)`。
+3. 以 512 × 768、單張輸出執行本機生成。
+4. 以 IP Adapter Face 控制人物辨識度，預設強度 0.74，可在 0.55–0.90 間調整。
+5. 生成完整頭到腳、自然比例、低 AI 感的寫實人像，並存入 Draw Things 可用的 Pictures 位置。
+
+參考照片只在 Draw Things 的本機工作流中選取；本 Repository 不保存或提交參考照片。
+
+使用方式：
+
+1. 在 Draw Things 的 Scripts 功能建立或匯入 `draw-things-portrait.js`。
+2. 執行腳本。
+3. 選取參考照片。
+4. 保持預設 Identity strength，或依需要調整。
+5. 按下 Generate。第一次執行會先下載必要模型，後續可直接在裝置上重複生成。
+
 ## 啟用遠端 AI
 
 複製環境變數範例：
@@ -89,6 +111,7 @@ docker run --rm -p 7860:7860 --env-file .env ai-space-generator
 ```text
 ai-space-generator/
 ├── app.py
+├── draw-things-portrait.js
 ├── src/core.py
 ├── tests/test_core.py
 ├── requirements.txt
