@@ -1,0 +1,147 @@
+name: Hao Open Portrait Runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/portrait-open-runtime.yml"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish one-time encryption public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p portrait-runtime
+          RUN_ID="${GITHUB_RUN_ID}"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/portrait-private.pem
+          openssl pkey -in /tmp/portrait-private.pem -pubout -out portrait-runtime/public.pem
+          printf '%s\n' "$RUN_ID" > portrait-runtime/session.txt
+          git config user.name "hao-open-runtime"
+          git config user.email "actions@users.noreply.github.com"
+          git add portrait-runtime/public.pem portrait-runtime/session.txt
+          git commit -m "runtime: publish one-time portrait key $RUN_ID" || true
+          git push origin HEAD:main
+
+      - name: Wait for encrypted reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID}"
+          for i in $(seq 1 120); do
+            git fetch origin main
+            git reset --hard origin/main
+            if [ -f "portrait-runtime/${RUN_ID}.key.enc.b64" ] && [ -f "portrait-runtime/${RUN_ID}.ref.enc.b64" ]; then
+              echo "Encrypted reference received."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for encrypted reference." >&2
+          exit 1
+
+      - name: Decrypt reference in runner memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID}"
+          mkdir -p /tmp/portrait-input
+          base64 -d "portrait-runtime/${RUN_ID}.key.enc.b64" > /tmp/portrait-input/key.enc
+          base64 -d "portrait-runtime/${RUN_ID}.ref.enc.b64" > /tmp/portrait-input/ref.enc
+          openssl pkeyutl -decrypt             -inkey /tmp/portrait-private.pem             -in /tmp/portrait-input/key.enc             -out /tmp/portrait-input/pass.txt             -pkeyopt rsa_padding_mode:oaep             -pkeyopt rsa_oaep_md:sha256
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000             -in /tmp/portrait-input/ref.enc             -out /tmp/portrait-input/reference.jpg             -pass file:/tmp/portrait-input/pass.txt
+          file /tmp/portrait-input/reference.jpg
+          sha256sum /tmp/portrait-input/reference.jpg
+
+      - name: Prepare protected outpaint canvas
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          from PIL import Image, ImageFilter, ImageDraw
+          from pathlib import Path
+          src=Path('/tmp/portrait-input/reference.jpg')
+          out=Path('/tmp/portrait-work')
+          out.mkdir(parents=True, exist_ok=True)
+          im=Image.open(src).convert('RGB')
+          W,H=512,1024
+          ref_h=640
+          ref=im.resize((W,ref_h),Image.Resampling.LANCZOS)
+          strip=ref.crop((0,ref_h-48,W,ref_h)).filter(ImageFilter.GaussianBlur(20))
+          bg=strip.resize((W,H-ref_h),Image.Resampling.BILINEAR)
+          init=Image.new('RGB',(W,H),(232,226,220))
+          init.paste(ref,(0,0))
+          init.paste(bg,(0,ref_h))
+          mirror=ref.crop((0,ref_h-96,W,ref_h)).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+          mirror=mirror.resize((W,160),Image.Resampling.LANCZOS)
+          init.paste(mirror,(0,ref_h))
+          init.save(out/'init.png')
+
+          mask=Image.new('L',(W,H),0)
+          d=ImageDraw.Draw(mask)
+          for y in range(580,H):
+              v=255 if y>=628 else max(0,min(255,round((y-580)/48*255)))
+              d.line((0,y,W,y),fill=v)
+          mask.save(out/'mask.png')
+          print('source',im.size,'proxy',(W,H))
+          PY
+
+      - name: Download open-source runtime and model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sdcpp
+          curl -fL --retry 5 --retry-delay 3             "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-920-2f88688/sd-master-2f88688-bin-Linux-Ubuntu-24.04-x86_64.zip"             -o /tmp/sdcpp/sd.zip
+          unzip -q /tmp/sdcpp/sd.zip -d /tmp/sdcpp/bin
+          curl -fL --retry 6 --retry-delay 5             "https://huggingface.co/gpustack/stable-diffusion-v1-5-inpainting-GGUF/resolve/main/stable-diffusion-v1-5-inpainting-Q4_0.gguf?download=true"             -o /tmp/sdcpp/inpaint-q4.gguf
+          sha256sum /tmp/sdcpp/inpaint-q4.gguf
+
+      - name: Generate lower body and background
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/sdcpp/bin
+          export LD_LIBRARY_PATH="$PWD"
+          ./sd-cli             -m /tmp/sdcpp/inpaint-q4.gguf             -i /tmp/portrait-work/init.png             --mask /tmp/portrait-work/mask.png             -W 512 -H 1024             --steps 28             --cfg-scale 6.0             --sampling-method dpm++2m             --scheduler karras             --strength 0.96             --diffusion-fa             --vae-tiling             -p "photorealistic full-body lifestyle portrait of the same adult woman, deep burgundy modern two-piece swimwear matching the visible gathered center-front top, matching simple swim bottoms, natural relaxed poolside pose, complete body continuing naturally to both feet, realistic adult proportions, accurate legs and feet, realistic fabric, natural skin texture, soft diffused daylight, clean minimal poolside architecture, high-end realistic photography, natural perspective, realistic shadows, healthy non-sexualized presentation"             -n "different person, changed face, artificial hair, wig, helmet hair, plastic skin, wax skin, over-smoothed skin, CGI, glamour pose, sexualized pose, exaggerated body proportions, bad anatomy, extra limbs, extra fingers, malformed hands, malformed feet, cropped feet, duplicate body, text, watermark"             -o /tmp/portrait-work/generated.png             -v
+
+      - name: Restore original pixels and produce final PNG
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          ref=Image.open('/tmp/portrait-input/reference.jpg').convert('RGB')
+          gen=Image.open('/tmp/portrait-work/generated.png').convert('RGB')
+          final_h=2244
+          up=gen.resize((ref.width,final_h),Image.Resampling.LANCZOS)
+          up.paste(ref,(0,0))
+          out=Path('/tmp/portrait-output')
+          out.mkdir(parents=True,exist_ok=True)
+          up.save(out/'hao-open-portrait.png')
+          gen.save(out/'generated-proxy.png')
+          Image.open('/tmp/portrait-work/mask.png').save(out/'generation-mask.png')
+          print('final',up.size,'original-preserved-region',(0,0,ref.width,ref.height))
+          PY
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-open-portrait-${{ github.run_id }}
+          path: /tmp/portrait-output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
