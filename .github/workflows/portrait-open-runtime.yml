@@ -18,12 +18,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Publish one-time encryption public key
         shell: bash
         run: |
           set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
           mkdir -p portrait-runtime
           RUN_ID="${GITHUB_RUN_ID}"
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/portrait-private.pem
@@ -33,7 +36,11 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add portrait-runtime/public.pem portrait-runtime/session.txt
           git commit -m "runtime: publish one-time portrait key $RUN_ID" || true
-          git push origin HEAD:main
+          if ! git push origin HEAD:main; then
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+          fi
 
       - name: Wait for encrypted reference chunks
         shell: bash
