@@ -35,21 +35,33 @@ jobs:
           git commit -m "runtime: publish one-time portrait key $RUN_ID" || true
           git push origin HEAD:main
 
-      - name: Wait for encrypted reference
+      - name: Wait for encrypted reference chunks
         shell: bash
         run: |
           set -euo pipefail
           RUN_ID="${GITHUB_RUN_ID}"
-          for i in $(seq 1 120); do
+          for i in $(seq 1 180); do
             git fetch origin main
             git reset --hard origin/main
-            if [ -f "portrait-runtime/${RUN_ID}.key.enc.b64" ] && [ -f "portrait-runtime/${RUN_ID}.ref.enc.b64" ]; then
-              echo "Encrypted reference received."
-              exit 0
+            MANIFEST="portrait-runtime/${RUN_ID}.manifest"
+            KEY="portrait-runtime/${RUN_ID}.key.enc.b64"
+            if [ -f "$MANIFEST" ] && [ -f "$KEY" ]; then
+              COUNT=$(tr -d '[:space:]' < "$MANIFEST")
+              if [[ "$COUNT" =~ ^[0-9]+$ ]] && [ "$COUNT" -gt 0 ]; then
+                COMPLETE=1
+                for n in $(seq 0 $((COUNT-1))); do
+                  PART=$(printf "portrait-runtime/%s.ref.part%02d" "$RUN_ID" "$n")
+                  [ -f "$PART" ] || COMPLETE=0
+                done
+                if [ "$COMPLETE" -eq 1 ]; then
+                  echo "Encrypted reference chunks received: $COUNT"
+                  exit 0
+                fi
+              fi
             fi
             sleep 5
           done
-          echo "Timed out waiting for encrypted reference." >&2
+          echo "Timed out waiting for encrypted reference chunks." >&2
           exit 1
 
       - name: Decrypt reference in runner memory
@@ -58,8 +70,14 @@ jobs:
           set -euo pipefail
           RUN_ID="${GITHUB_RUN_ID}"
           mkdir -p /tmp/portrait-input
+          COUNT=$(tr -d '[:space:]' < "portrait-runtime/${RUN_ID}.manifest")
           base64 -d "portrait-runtime/${RUN_ID}.key.enc.b64" > /tmp/portrait-input/key.enc
-          base64 -d "portrait-runtime/${RUN_ID}.ref.enc.b64" > /tmp/portrait-input/ref.enc
+          : > /tmp/portrait-input/ref.enc.b64
+          for n in $(seq 0 $((COUNT-1))); do
+            PART=$(printf "portrait-runtime/%s.ref.part%02d" "$RUN_ID" "$n")
+            cat "$PART" >> /tmp/portrait-input/ref.enc.b64
+          done
+          base64 -d /tmp/portrait-input/ref.enc.b64 > /tmp/portrait-input/ref.enc
           openssl pkeyutl -decrypt             -inkey /tmp/portrait-private.pem             -in /tmp/portrait-input/key.enc             -out /tmp/portrait-input/pass.txt             -pkeyopt rsa_padding_mode:oaep             -pkeyopt rsa_oaep_md:sha256
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000             -in /tmp/portrait-input/ref.enc             -out /tmp/portrait-input/reference.jpg             -pass file:/tmp/portrait-input/pass.txt
           file /tmp/portrait-input/reference.jpg
