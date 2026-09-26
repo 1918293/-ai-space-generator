@@ -63,6 +63,69 @@ python app.py
 4. 保持預設 Identity strength，或依需要調整。
 5. 按下 Generate。第一次執行會先下載必要模型，後續可直接在裝置上重複生成。
 
+## 人像生成工作流：目前收斂結論（2026-09-27）
+
+本段整理本次「同一成人女性＋指定深酒紅泳裝＋全身寫實人像」實測所得，作為後續避免重複探索的開發紀錄。
+
+### 需求邊界
+
+- 優先維持人物辨識度、臉部比例、酒紅長髮與自然膚質。
+- 泳裝以參考照中可見的深酒紅色、中央抓皺／結飾、簡潔剪裁為設計基準。
+- 全身需完整到腳，姿勢健康自然、非性感化，避免誇張身形、塑膠皮膚、AI 髮絲與手腳解剖錯誤。
+- 若採 outpaint／局部生成，原始保護區像素應回貼驗證；生成區與原圖區需明確分離。
+
+### 已驗證的開源候選
+
+- Draw Things：iPhone／iPad 本機生成路徑，可搭配 Realistic Vision 與 IP Adapter Plus Face；不按張消耗雲端 API credit。
+- PhotoMaker V2：適合人物身份保留，可與 IP-Adapter／ControlNet 組合。
+- PuLID／PuLID-FLUX：人物 ID 保留候選。
+- InstantID／InstantID-Rome：單張身份條件與構圖控制候選。
+- DreamO：ID／Try-On／Multi Condition 候選。
+- ComfyUI：適合桌面或持久 GPU runtime 的工作流編排。
+- stable-diffusion.cpp：可用於本機／自架推論，支援 img2img、inpaint、IP-Adapter、PhotoMaker、PuLID 等相關能力。
+
+### 架構結論
+
+GitHub 應負責：
+
+- 程式碼、workflow、版本控制與可重現設定。
+- build、測試、驗證與結果紀錄。
+- 不把一般 GitHub hosted CPU runner 當作常態影像推論伺服器。
+
+實際影像推論應優先放在：
+
+1. 手機本機 Draw Things；或
+2. 可持久保存模型與 runtime 的 GPU 執行環境。
+
+如此可避免每張圖重新下載模型、重新建立 runner、重做加密 handoff，也能避免按張 API credit。
+
+### GitHub Actions 實驗結果
+
+`.github/workflows/portrait-open-runtime.yml` 已證明以下步驟可以在 GitHub Actions 串起：
+
+- 一次性公開金鑰與加密參考圖 handoff。
+- runner 內解密參考圖。
+- 建立 512 × 1024 outpaint proxy 與 mask。
+- 下載 stable-diffusion.cpp 與 SD 1.5 inpainting GGUF。
+- 原圖保護區回貼與 artifact 輸出流程。
+
+但實測也確認：
+
+- hosted `ubuntu-24.04` runner 為 CPU 路徑，512 × 1024、28 steps 的 diffusion 推論耗時高。
+- 第一輪曾因等待 encrypted reference 超時。
+- rerun 曾遇到 workflow 自行 push `main` 與遠端新 commit 的 non-fast-forward；後續已加入 fresh fetch/reset 與 push 失敗時 rebase 重試。
+- 因此此 workflow 僅保留作實驗／驗證用途，不應作為日常人像生成的預設 runtime。
+
+目前實驗 run `36260231385` 已通過參考圖 handoff、解密、outpaint 準備及 runtime/model 下載；最後一次 readback 時仍停留在 CPU diffusion 生成階段，尚未形成已驗證最終影像。
+
+### 後續原則
+
+- 不再優先測試有按張點數限制的生成平台。
+- 不為同一任務反覆建立新的平行影像工作流。
+- 優先沿用現有 Draw Things／stable-diffusion.cpp 能力。
+- 真正需要遠端自動化時，先確認有可持久化的 GPU runtime，再把 GitHub 作為控制與版本層。
+- 未取得明確授權前，不建立付費 GPU 資源。
+
 ## 啟用遠端 AI
 
 複製環境變數範例：
