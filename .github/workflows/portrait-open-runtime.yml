@@ -1,10 +1,8 @@
 name: Hao Open Portrait Runtime
 
+# CPU-only proof workflow. Keep manual-only: hosted CPU diffusion is too slow for production use.
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/portrait-open-runtime.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
