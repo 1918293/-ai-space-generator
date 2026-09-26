@@ -114,9 +114,9 @@ GitHub 應負責：
 - hosted `ubuntu-24.04` runner 為 CPU 路徑，512 × 1024、28 steps 的 diffusion 推論耗時高。
 - 第一輪曾因等待 encrypted reference 超時。
 - rerun 曾遇到 workflow 自行 push `main` 與遠端新 commit 的 non-fast-forward；後續已加入 fresh fetch/reset 與 push 失敗時 rebase 重試。
-- 因此此 workflow 僅保留作實驗／驗證用途，不應作為日常人像生成的預設 runtime。
+- 因此此 workflow 僅保留作實驗／驗證用途，不應作為日常人像生成的預設 runtime；自 2026-09-27 起改為手動觸發，避免 README／程式變更意外再次啟動高耗時 CPU diffusion。
 
-目前實驗 run `36260231385` 已通過參考圖 handoff、解密、outpaint 準備及 runtime/model 下載；最後一次 readback 時仍停留在 CPU diffusion 生成階段，尚未形成已驗證最終影像。
+實驗 run `36260231385` 已完成參考圖 handoff、解密、outpaint 準備及 runtime/model 下載，但在 hosted CPU 上執行 diffusion 時於 45 分鐘 job timeout 被取消。日誌顯示僅完成 14/27 個 diffusion steps，每 step 約 154–160 秒，未進入原圖回貼與 artifact 上傳，因此沒有形成可驗證最終影像。此結果正式確認 GitHub hosted CPU runner 不適合作為本工作流的常態影像推論端。
 
 ### 後續原則
 
