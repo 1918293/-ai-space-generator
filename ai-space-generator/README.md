@@ -118,6 +118,15 @@ GitHub 應負責：
 
 實驗 run `36260231385` 已完成參考圖 handoff、解密、outpaint 準備及 runtime/model 下載，但在 hosted CPU 上執行 diffusion 時於 45 分鐘 job timeout 被取消。日誌顯示僅完成 14/27 個 diffusion steps，每 step 約 154–160 秒，未進入原圖回貼與 artifact 上傳，因此沒有形成可驗證最終影像。此結果正式確認 GitHub hosted CPU runner 不適合作為本工作流的常態影像推論端。
 
+後續 fast-path 實測已取得可用 artifact：
+
+- run `36283734965`：LCM CPU proof 成功。
+- run `36285228367`：pose-guided realistic portrait 成功，artifact `10920188488`。
+- run `36285789920`：以前一 pose-guided artifact 作 protected source，完成 lower-body outpaint、transition compositing 與 artifact upload，artifact `10920224824`。
+- run `36285789920` 的所有 workflow steps 均為 success；輸出尺寸 384 × 1152。
+- Visual QA：已達成直幅全身延伸與酒紅泳裝延續，但人物臉部／髮型相較原始 reference 仍有 identity drift，且腳部在水面／池邊交界不夠清楚。因此此輸出標記為 **candidate evidence**，不是 Production baseline。
+- 由於 GitHub hosted CPU 路徑已證明「可跑通但品質／解析度受限」，後續不再以增加 CPU workflow 次數作為主要改善手段；下一個高增益條件仍是可持久化 GPU runtime 或 Draw Things 本機 runtime。
+
 ### 後續原則
 
 - 不再優先測試有按張點數限制的生成平台。
