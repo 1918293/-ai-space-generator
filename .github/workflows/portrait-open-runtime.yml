@@ -1,8 +1,11 @@
 name: Hao Open Portrait Runtime
 
-# Pose-guided Realistic Vision + IP-Adapter proof. Keep manual-only after launch.
+# Lower-body outpaint of the validated pose-guided intermediate. Push-trigger is temporary for this launch.
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/portrait-open-runtime.yml"
 
 permissions:
   contents: write
@@ -35,3 +38,133 @@ jobs:
           git add portrait-runtime/public.pem portrait-runtime/session.txt
           git commit -m "runtime: publish one-time portrait key $RUN_ID" || true
           if ! git push origin HEAD:main; then
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+          fi
+
+      - name: Wait for encrypted reference chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID}"
+          for i in $(seq 1 120); do
+            git fetch origin main
+            git reset --hard origin/main
+            MANIFEST="portrait-runtime/${RUN_ID}.manifest"
+            KEY="portrait-runtime/${RUN_ID}.key.enc.b64"
+            if [ -f "$MANIFEST" ] && [ -f "$KEY" ]; then
+              COUNT=$(tr -d '[:space:]' < "$MANIFEST")
+              if [[ "$COUNT" =~ ^[0-9]+$ ]] && [ "$COUNT" -gt 0 ]; then
+                COMPLETE=1
+                for n in $(seq 0 $((COUNT-1))); do
+                  PART=$(printf "portrait-runtime/%s.ref.part%02d" "$RUN_ID" "$n")
+                  [ -f "$PART" ] || COMPLETE=0
+                done
+                if [ "$COMPLETE" -eq 1 ]; then
+                  echo "Encrypted reference chunks received: $COUNT"
+                  exit 0
+                fi
+              fi
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for encrypted reference chunks." >&2
+          exit 1
+
+      - name: Decrypt intermediate in runner memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID}"
+          mkdir -p /tmp/portrait-input
+          COUNT=$(tr -d '[:space:]' < "portrait-runtime/${RUN_ID}.manifest")
+          base64 -d "portrait-runtime/${RUN_ID}.key.enc.b64" > /tmp/portrait-input/key.enc
+          : > /tmp/portrait-input/ref.enc.b64
+          for n in $(seq 0 $((COUNT-1))); do
+            PART=$(printf "portrait-runtime/%s.ref.part%02d" "$RUN_ID" "$n")
+            cat "$PART" >> /tmp/portrait-input/ref.enc.b64
+          done
+          base64 -d /tmp/portrait-input/ref.enc.b64 > /tmp/portrait-input/ref.enc
+          openssl pkeyutl -decrypt             -inkey /tmp/portrait-private.pem             -in /tmp/portrait-input/key.enc             -out /tmp/portrait-input/pass.txt             -pkeyopt rsa_padding_mode:oaep             -pkeyopt rsa_oaep_md:sha256
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000             -in /tmp/portrait-input/ref.enc             -out /tmp/portrait-input/intermediate.jpg             -pass file:/tmp/portrait-input/pass.txt
+          file /tmp/portrait-input/intermediate.jpg
+          sha256sum /tmp/portrait-input/intermediate.jpg
+
+      - name: Build protected lower-body outpaint canvas
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          from PIL import Image, ImageFilter, ImageDraw
+          from pathlib import Path
+          src=Image.open('/tmp/portrait-input/intermediate.jpg').convert('RGB')
+          W,TOP_H,H=384,768,1152
+          ref=src.resize((W,TOP_H),Image.Resampling.LANCZOS)
+          strip=ref.crop((0,TOP_H-72,W,TOP_H)).filter(ImageFilter.GaussianBlur(24))
+          extension=strip.resize((W,H-TOP_H),Image.Resampling.BILINEAR)
+          init=Image.new('RGB',(W,H),(230,226,220))
+          init.paste(ref,(0,0))
+          init.paste(extension,(0,TOP_H))
+          mirror=ref.crop((0,TOP_H-120,W,TOP_H)).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+          mirror=mirror.resize((W,180),Image.Resampling.LANCZOS)
+          init.paste(mirror,(0,TOP_H))
+          Path('/tmp/portrait-work').mkdir(parents=True,exist_ok=True)
+          init.save('/tmp/portrait-work/init.png')
+
+          mask=Image.new('L',(W,H),0)
+          d=ImageDraw.Draw(mask)
+          for y in range(675,H):
+              v=255 if y>=760 else max(0,min(255,round((y-675)/85*255)))
+              d.line((0,y,W,y),fill=v)
+          mask.save('/tmp/portrait-work/mask.png')
+          ref.save('/tmp/portrait-work/top-reference.png')
+          print('proxy source',src.size,'working',init.size)
+          PY
+
+      - name: Download fast inpainting runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sdcpp/loras
+          curl -fL --retry 5 --retry-delay 3             "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-920-2f88688/sd-master-2f88688-bin-Linux-Ubuntu-24.04-x86_64.zip"             -o /tmp/sdcpp/sd.zip
+          unzip -q /tmp/sdcpp/sd.zip -d /tmp/sdcpp/bin
+          curl -fL --retry 6 --retry-delay 5             "https://huggingface.co/gpustack/stable-diffusion-v1-5-inpainting-GGUF/resolve/main/stable-diffusion-v1-5-inpainting-Q4_0.gguf?download=true"             -o /tmp/sdcpp/inpaint-q4.gguf
+          curl -fL --retry 6 --retry-delay 5             "https://huggingface.co/latent-consistency/lcm-lora-sdv1-5/resolve/main/pytorch_lora_weights.safetensors"             -o /tmp/sdcpp/loras/lcm-lora-sdv1-5.safetensors
+          sha256sum /tmp/sdcpp/inpaint-q4.gguf /tmp/sdcpp/loras/lcm-lora-sdv1-5.safetensors
+
+      - name: Extend legs and feet
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/sdcpp/bin
+          export LD_LIBRARY_PATH="$PWD"
+          ./sd-cli             -m /tmp/sdcpp/inpaint-q4.gguf             -i /tmp/portrait-work/init.png             --mask /tmp/portrait-work/mask.png             -W 384 -H 1152             --steps 5             --cfg-scale 1.0             --sampling-method lcm             --strength 0.98             --lora-model-dir /tmp/sdcpp/loras             --diffusion-fa             -p "photorealistic continuation of the same adult woman already visible above, complete her natural standing body from the existing upper thighs down through both knees, calves, ankles and both feet, both full feet visible resting naturally on the poolside floor, straight relaxed legs with subtle natural stance, realistic adult proportions, same natural skin tone, same deep burgundy modest swim bottoms, seamless anatomy and lighting continuity, soft diffused daylight, realistic poolside floor, realistic photography<lora:lcm-lora-sdv1-5:1>"             -n "cropped feet, missing feet, no feet, sitting, seated, crouching, kneeling, bent knee foreground, giant knee, foreground leg, crossed legs, extra legs, duplicate legs, extra feet, fused legs, malformed knees, malformed ankles, malformed feet, high heels, shoes, different swimsuit color, dress, text, watermark, CGI, cartoon"             -o /tmp/portrait-work/generated.png             -v
+
+      - name: Restore protected pixels and blend transition
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          init=Image.open('/tmp/portrait-work/init.png').convert('RGB')
+          gen=Image.open('/tmp/portrait-work/generated.png').convert('RGB')
+          mask=Image.open('/tmp/portrait-work/mask.png').convert('L')
+          final=Image.composite(gen,init,mask)
+          out=Path('/tmp/portrait-output')
+          out.mkdir(parents=True,exist_ok=True)
+          final.save(out/'full-body-outpaint.png')
+          mask.save(out/'generation-mask.png')
+          print('final',final.size)
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hao-open-portrait-fullbody-${{ github.run_id }}
+          path: /tmp/portrait-output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
