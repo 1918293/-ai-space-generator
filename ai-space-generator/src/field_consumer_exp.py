@@ -42,6 +42,7 @@ EXISTING_REF = "PR17:CURRENT"
 REGRESSION_REF = "REG:R051-NON-BYPASSABLE"
 EXPECTED_CODE = "MODEL_INTENT_RESOLVED_TO_TRUSTED_BINDING"
 ARTIFACT_ROLE = "EXP_DEPLOYED_FIELD_CONSUMER"
+LINEAR_WEBHOOK_SHADOW_CODE = "LINEAR_WEBHOOK_VERIFIED_SHADOW_ONLY"
 
 
 class StateSource:
@@ -293,7 +294,7 @@ class FieldRuntime:
         )
         return 200, {
             "ok": True,
-            "code": "LINEAR_WEBHOOK_VERIFIED_SHADOW_ONLY",
+            "code": LINEAR_WEBHOOK_SHADOW_CODE,
             "event_type": event_type,
             "event_action": action,
             "entity_id": entity_id,
