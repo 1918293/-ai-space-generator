@@ -1,8 +1,11 @@
 name: Hao Open Portrait Runtime
 
-# CPU-only proof workflow. Keep manual-only: hosted CPU diffusion is too slow for production use.
+# Fast CPU proof path. Push-trigger is temporary and will be switched back to manual after launch.
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/portrait-open-runtime.yml"
 
 permissions:
   contents: write
@@ -11,7 +14,7 @@ permissions:
 jobs:
   generate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           RUN_ID="${GITHUB_RUN_ID}"
-          for i in $(seq 1 180); do
+          for i in $(seq 1 120); do
             git fetch origin main
             git reset --hard origin/main
             MANIFEST="portrait-runtime/${RUN_ID}.manifest"
@@ -100,10 +103,10 @@ jobs:
           out=Path('/tmp/portrait-work')
           out.mkdir(parents=True, exist_ok=True)
           im=Image.open(src).convert('RGB')
-          W,H=512,1024
-          ref_h=640
+          W,H=384,896
+          ref_h=480
           ref=im.resize((W,ref_h),Image.Resampling.LANCZOS)
-          strip=ref.crop((0,ref_h-48,W,ref_h)).filter(ImageFilter.GaussianBlur(20))
+          strip=ref.crop((0,ref_h-48,W,ref_h)).filter(ImageFilter.GaussianBlur(18))
           bg=strip.resize((W,H-ref_h),Image.Resampling.BILINEAR)
           init=Image.new('RGB',(W,H),(232,226,220))
           init.paste(ref,(0,0))
@@ -115,55 +118,44 @@ jobs:
 
           mask=Image.new('L',(W,H),0)
           d=ImageDraw.Draw(mask)
-          for y in range(580,H):
-              v=255 if y>=628 else max(0,min(255,round((y-580)/48*255)))
+          for y in range(430,H):
+              v=255 if y>=480 else max(0,min(255,round((y-430)/50*255)))
               d.line((0,y,W,y),fill=v)
           mask.save(out/'mask.png')
           print('source',im.size,'proxy',(W,H))
           PY
 
-      - name: Download open-source runtime and model
+      - name: Download fast open-source runtime and models
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/sdcpp
+          mkdir -p /tmp/sdcpp/loras
           curl -fL --retry 5 --retry-delay 3             "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-920-2f88688/sd-master-2f88688-bin-Linux-Ubuntu-24.04-x86_64.zip"             -o /tmp/sdcpp/sd.zip
           unzip -q /tmp/sdcpp/sd.zip -d /tmp/sdcpp/bin
           curl -fL --retry 6 --retry-delay 5             "https://huggingface.co/gpustack/stable-diffusion-v1-5-inpainting-GGUF/resolve/main/stable-diffusion-v1-5-inpainting-Q4_0.gguf?download=true"             -o /tmp/sdcpp/inpaint-q4.gguf
-          sha256sum /tmp/sdcpp/inpaint-q4.gguf
+          curl -fL --retry 6 --retry-delay 5             "https://huggingface.co/latent-consistency/lcm-lora-sdv1-5/resolve/main/pytorch_lora_weights.safetensors"             -o /tmp/sdcpp/loras/lcm-lora-sdv1-5.safetensors
+          sha256sum /tmp/sdcpp/inpaint-q4.gguf /tmp/sdcpp/loras/lcm-lora-sdv1-5.safetensors
 
-      - name: Generate lower body and background
+      - name: Generate lower body and background fast
         shell: bash
         run: |
           set -euo pipefail
           cd /tmp/sdcpp/bin
           export LD_LIBRARY_PATH="$PWD"
-          ./sd-cli             -m /tmp/sdcpp/inpaint-q4.gguf             -i /tmp/portrait-work/init.png             --mask /tmp/portrait-work/mask.png             -W 512 -H 1024             --steps 28             --cfg-scale 6.0             --sampling-method dpm++2m             --scheduler karras             --strength 0.96             --diffusion-fa             --vae-tiling             -p "photorealistic full-body lifestyle portrait of the same adult woman, deep burgundy modern two-piece swimwear matching the visible gathered center-front top, matching simple swim bottoms, natural relaxed poolside pose, complete body continuing naturally to both feet, realistic adult proportions, accurate legs and feet, realistic fabric, natural skin texture, soft diffused daylight, clean minimal poolside architecture, high-end realistic photography, natural perspective, realistic shadows, healthy non-sexualized presentation"             -n "different person, changed face, artificial hair, wig, helmet hair, plastic skin, wax skin, over-smoothed skin, CGI, glamour pose, sexualized pose, exaggerated body proportions, bad anatomy, extra limbs, extra fingers, malformed hands, malformed feet, cropped feet, duplicate body, text, watermark"             -o /tmp/portrait-work/generated.png             -v
+          ./sd-cli             -m /tmp/sdcpp/inpaint-q4.gguf             -i /tmp/portrait-work/init.png             --mask /tmp/portrait-work/mask.png             -W 384 -H 896             --steps 5             --cfg-scale 1.0             --sampling-method lcm             --strength 0.98             --lora-model-dir /tmp/sdcpp/loras             --diffusion-fa             -p "photorealistic full-body lifestyle portrait continuation, same adult woman, deep burgundy modern two-piece swimwear matching the visible gathered center-front top, matching simple deep burgundy swim bottoms, natural relaxed standing poolside pose, complete legs continuing naturally to both feet, realistic adult proportions, accurate legs and feet, realistic fabric, natural skin texture, soft diffused daylight, clean minimal poolside architecture, realistic photography, natural perspective, realistic shadows, healthy non-sexualized presentation<lora:lcm-lora-sdv1-5:1>"             -n "different person, changed upper body, artificial hair, plastic skin, CGI, glamour pose, sexualized pose, exaggerated body proportions, bad anatomy, extra limbs, malformed feet, cropped feet, duplicate body, text, watermark"             -o /tmp/portrait-work/generated.png             -v
 
-      - name: Restore original pixels and produce final PNG
+      - name: Prepare proxy artifact
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from PIL import Image
-          from pathlib import Path
-          ref=Image.open('/tmp/portrait-input/reference.jpg').convert('RGB')
-          gen=Image.open('/tmp/portrait-work/generated.png').convert('RGB')
-          final_h=2244
-          up=gen.resize((ref.width,final_h),Image.Resampling.LANCZOS)
-          up.paste(ref,(0,0))
-          out=Path('/tmp/portrait-output')
-          out.mkdir(parents=True,exist_ok=True)
-          up.save(out/'hao-open-portrait.png')
-          gen.save(out/'generated-proxy.png')
-          Image.open('/tmp/portrait-work/mask.png').save(out/'generation-mask.png')
-          print('final',up.size,'original-preserved-region',(0,0,ref.width,ref.height))
-          PY
+          mkdir -p /tmp/portrait-output
+          cp /tmp/portrait-work/generated.png /tmp/portrait-output/generated-proxy.png
+          cp /tmp/portrait-work/mask.png /tmp/portrait-output/generation-mask.png
 
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
-          name: hao-open-portrait-${{ github.run_id }}
+          name: hao-open-portrait-fast-${{ github.run_id }}
           path: /tmp/portrait-output/
           if-no-files-found: error
           retention-days: 1
