@@ -1,11 +1,8 @@
 name: Hao Open Portrait Runtime
 
-# Artifact-chained lower-body outpaint. Push-trigger is temporary for this launch.
+# Artifact-chained lower-body outpaint. Keep manual-only after launch.
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/portrait-open-runtime.yml"
+  workflow_dispatch:
 
 concurrency:
   group: hao-open-portrait-runtime
