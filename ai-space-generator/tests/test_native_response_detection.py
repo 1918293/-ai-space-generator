@@ -3,6 +3,7 @@ from src.native_response_detection import (
     DetectionOutcome,
     NativeContinuationEvidence,
     NativeErrorClass,
+    RequiredInputState,
     ToolEffectState,
     admit_diagnostic_retest,
     classify_native_outcome,
@@ -47,6 +48,21 @@ def test_missing_required_readback_fails_closed_even_with_terminal_message():
         native_error_class=NativeErrorClass.NONE,
     )
     assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.UNKNOWN_EFFECT
+
+
+def test_started_with_required_input_missing_cannot_complete_verified():
+    sample = evidence(
+        required_input_state=RequiredInputState.MISSING,
+        terminal_message_observed=True,
+        native_error_class=NativeErrorClass.NONE,
+        failure_signature="required-input-timeout:encrypted-reference-chunks",
+        evidence_refs=(
+            "workflow_run:36285688704",
+            "workflow_job:108525919367",
+        ),
+    )
+    assert sample.required_input_state == RequiredInputState.MISSING
+    assert classify_native_outcome(sample) == DetectionOutcome.AMBIGUOUS_DELIVERY
 
 
 def test_missing_terminal_without_native_error_still_is_ambiguous_delivery():

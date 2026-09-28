@@ -18,6 +18,13 @@ class ToolEffectState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RequiredInputState(StrEnum):
+    NOT_REQUIRED = "not_required"
+    UNKNOWN = "unknown"
+    DELIVERED = "delivered"
+    MISSING = "missing"
+
+
 class NativeErrorClass(StrEnum):
     NONE = "none"
     STOPPED_THINKING = "stopped_thinking"
@@ -47,6 +54,7 @@ class NativeContinuationEvidence:
     tool_effect_state: ToolEffectState
     readback_observed: bool
     terminal_message_observed: bool
+    required_input_state: RequiredInputState = RequiredInputState.NOT_REQUIRED
     native_error_class: NativeErrorClass = NativeErrorClass.NONE
     conversation_id: str = ""
     public_status_snapshot: str = "unknown"
@@ -81,12 +89,22 @@ def classify_native_outcome(
 
     required_readback_ok = not persistence_required or evidence.readback_observed
 
+    # Required upstream input delivery is explicit evidence, not inferred from
+    # terminal/readback state. Missing or unknown delivery cannot be promoted
+    # to positive completion after execution has started.
+    required_input_ok = evidence.required_input_state in (
+        RequiredInputState.NOT_REQUIRED,
+        RequiredInputState.DELIVERED,
+    )
+
     # Positive completion is whitelist-only: verified terminal delivery, no
-    # native error signal, and every required readback satisfied.
+    # native error signal, required inputs delivered, and every required
+    # readback satisfied.
     if (
         evidence.execution_started
         and evidence.terminal_message_observed
         and evidence.native_error_class == NativeErrorClass.NONE
+        and required_input_ok
         and required_readback_ok
     ):
         return DetectionOutcome.COMPLETE_VERIFIED
