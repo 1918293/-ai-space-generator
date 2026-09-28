@@ -1,0 +1,98 @@
+name: Salon Hugging Face Zero Validation
+
+# Manual-only by design. Real Zero-GPU inference uses shared capacity and is already
+# execution-proven; normal PR CI only compiles/dry-runs the clients.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-zero-routes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install clients
+        run: python -m pip install --disable-pip-version-check gradio_client pillow
+
+      - name: Probe current fast Zero contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from gradio_client import Client
+
+          checks = {
+              'lora_fast': ('prithivMLmods/Qwen-Image-Edit-2511-LoRAs-Fast', '/edit_image'),
+              'lightning': ('LPX55/Qwen-Image-Edit-2511-Turbo-Lightning', '/infer'),
+          }
+          for name,(space,endpoint) in checks.items():
+              api = Client(space, verbose=False).view_api(return_format='dict')
+              named = api.get('named_endpoints') or {}
+              if endpoint not in named:
+                  raise SystemExit(f'{name}: missing {endpoint}; found {list(named)}')
+              print(name, 'contract=PASS', endpoint)
+          PY
+
+      - name: Build synthetic Salon pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/salon-zero-pack /tmp/salon-zero-output
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+
+          root = Path('/tmp/salon-zero-pack')
+          source = Image.new('RGB', (256, 256), (220, 210, 200))
+          d = ImageDraw.Draw(source)
+          d.ellipse((92, 28, 164, 100), fill=(170, 125, 95))
+          d.rectangle((72, 96, 184, 232), fill=(45, 45, 45))
+          source.save(root / '01_Source_Original.png')
+
+          garment = Image.new('RGB', (256, 256), (42, 42, 42))
+          gd = ImageDraw.Draw(garment)
+          gd.text((60, 112), 'CALIFORNIA', fill=(235, 210, 190))
+          garment.save(root / '02_Garment_Reference_CALIFORNIA.png')
+
+          structure = Image.new('RGB', (256, 256), 'black')
+          sd = ImageDraw.Draw(structure)
+          sd.line([(128, 36), (128, 208)], fill='white', width=6)
+          sd.line([(128, 92), (88, 142)], fill='white', width=6)
+          sd.line([(128, 92), (168, 142)], fill='white', width=6)
+          structure.save(root / '03_Target_Keypoints_UpperBody_Strong.png')
+          PY
+
+      - name: Execute Lightning runner synthetic smoke
+        env:
+          PACK_DIR: /tmp/salon-zero-pack
+          OUT_DIR: /tmp/salon-zero-output
+          HF_ZERO_BACKEND: lightning
+          HF_ZERO_INPUT_MODE: source_garment_structure
+          HF_ZERO_VARIANT: preserve_garment
+          HF_ZERO_STEPS: "1"
+          HF_ZERO_GUIDANCE: "1.0"
+          HF_ZERO_HEIGHT: "256"
+          HF_ZERO_WIDTH: "256"
+          SEED: "47"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python experiments/salon-reconstruction/run_hf_zero_fast_salon.py
+          test -s /tmp/salon-zero-output/hf_zero_lightning_preserve_garment.png
+          python - <<'PY'
+          from PIL import Image
+          with Image.open('/tmp/salon-zero-output/hf_zero_lightning_preserve_garment.png') as im:
+              im.verify()
+          print('Unified Lightning runner synthetic inference: PASS')
+          PY
+
+      - name: Clean synthetic files
+        if: always()
+        run: rm -rf /tmp/salon-zero-pack /tmp/salon-zero-output

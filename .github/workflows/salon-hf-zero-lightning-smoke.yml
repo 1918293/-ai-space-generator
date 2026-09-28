@@ -1,0 +1,16 @@
+name: Salon HF Zero Lightning Smoke (Deprecated)
+
+# Historical one-off Lightning smoke test. Superseded by the unified runner and
+# salon-hf-zero-validation.yml. Kept temporarily for traceability only.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deprecated:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Deprecated: use run_hf_zero_fast_salon.py + salon-hf-zero-validation.yml."
