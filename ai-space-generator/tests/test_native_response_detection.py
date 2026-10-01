@@ -7,6 +7,7 @@ from src.native_response_detection import (
     ToolEffectState,
     admit_diagnostic_retest,
     classify_native_outcome,
+    reconcile_tool_effect_state,
 )
 
 
@@ -116,6 +117,27 @@ def test_turn_classifier_never_mints_scoped_positive_from_raw_turn_evidence():
 def test_unknown_consequential_effect_fails_closed_before_delivery_classification():
     sample = evidence(tool_effect_state=ToolEffectState.UNKNOWN)
     assert classify_native_outcome(sample, persistence_required=True) == DetectionOutcome.UNKNOWN_EFFECT
+
+
+def test_conflicting_effect_evidence_fails_closed_to_unknown_effect():
+    reconciled = reconcile_tool_effect_state(effect_exists=False, verified=True)
+    assert reconciled == ToolEffectState.UNKNOWN
+
+    sample = evidence(
+        tool_effect_state=reconciled,
+        terminal_message_observed=True,
+        native_error_class=NativeErrorClass.NONE,
+    )
+    assert classify_native_outcome(sample, effect_required=True) == DetectionOutcome.UNKNOWN_EFFECT
+
+
+def test_effect_required_cannot_complete_without_verified_effect():
+    sample = evidence(
+        tool_effect_state=ToolEffectState.NONE,
+        terminal_message_observed=True,
+        native_error_class=NativeErrorClass.NONE,
+    )
+    assert classify_native_outcome(sample, effect_required=True) == DetectionOutcome.AMBIGUOUS_DELIVERY
 
 
 def test_same_surface_signature_and_environment_blocks_synthetic_retest():

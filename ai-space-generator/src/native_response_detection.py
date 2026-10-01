@@ -71,10 +71,25 @@ class DiagnosticAdmission:
     basis: tuple[str, ...] = ()
 
 
+def reconcile_tool_effect_state(
+    *,
+    effect_exists: bool | None,
+    verified: bool | None,
+) -> ToolEffectState:
+    # VERIFIED is granted only when existence and verification agree. Any
+    # contradictory or incomplete reconciliation evidence fails closed.
+    if effect_exists is True and verified is True:
+        return ToolEffectState.VERIFIED
+    if effect_exists is False and verified is False:
+        return ToolEffectState.NONE
+    return ToolEffectState.UNKNOWN
+
+
 def classify_native_outcome(
     evidence: NativeContinuationEvidence,
     *,
     persistence_required: bool = False,
+    effect_required: bool = False,
 ) -> DetectionOutcome:
     # Consequential effect ambiguity dominates delivery state. Never use a
     # missing terminal message as permission to replay an unknown side effect.
@@ -88,6 +103,7 @@ def classify_native_outcome(
         return DetectionOutcome.UNKNOWN_EFFECT
 
     required_readback_ok = not persistence_required or evidence.readback_observed
+    required_effect_ok = not effect_required or evidence.tool_effect_state == ToolEffectState.VERIFIED
 
     # Required upstream input delivery is explicit evidence, not inferred from
     # terminal/readback state. Missing or unknown delivery cannot be promoted
@@ -98,14 +114,15 @@ def classify_native_outcome(
     )
 
     # Positive completion is whitelist-only: verified terminal delivery, no
-    # native error signal, required inputs delivered, and every required
-    # readback satisfied.
+    # native error signal, required inputs delivered, every required readback
+    # satisfied, and every required effect verified.
     if (
         evidence.execution_started
         and evidence.terminal_message_observed
         and evidence.native_error_class == NativeErrorClass.NONE
         and required_input_ok
         and required_readback_ok
+        and required_effect_ok
     ):
         return DetectionOutcome.COMPLETE_VERIFIED
 
