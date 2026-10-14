@@ -245,6 +245,14 @@ def composite_preserving_unmasked(
     return Image.composite(candidate_rgb, original_rgb, mask_l)
 
 
+def mask_to_rgba_layer(mask: Image.Image) -> Image.Image:
+    """Encode an edit mask in the alpha channel expected by Gradio ImageMask/ImageEditor."""
+    mask_l = mask.convert("L")
+    layer = Image.new("RGBA", mask_l.size, (255, 255, 255, 0))
+    layer.putalpha(mask_l)
+    return layer
+
+
 def _seed_from_text(text: str) -> int:
     value = 2166136261
     for char in text:
@@ -362,7 +370,7 @@ def remote_inpaint(image: Image.Image, mask: Image.Image, prompt: str) -> Image.
         background_path = Path(temp_dir) / "background.png"
         mask_path = Path(temp_dir) / "mask.png"
         rgb.save(background_path, "PNG")
-        mask_l.save(mask_path, "PNG")
+        mask_to_rgba_layer(mask_l).save(mask_path, "PNG")
 
         client = Client(space_id, verbose=False)
         response = client.predict(
