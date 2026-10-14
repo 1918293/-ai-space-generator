@@ -39,7 +39,7 @@ with gr.Blocks(title="AI 空間生成器") as demo:
             )
 
         with gr.Tab("2　選取與生成"):
-            gr.Markdown("先把照片載入編輯器，再用筆刷塗選需要移除、替換或更換材質的區域。")
+            gr.Markdown("先把照片載入編輯器，再用筆刷塗選需要移除、替換、改色或更換背景的區域。")
             load_editor_button = gr.Button("載入照片到編輯器")
             editor = gr.ImageEditor(
                 label="塗選修改區域",
@@ -53,7 +53,7 @@ with gr.Blocks(title="AI 空間生成器") as demo:
 
             with gr.Row():
                 action = gr.Dropdown(
-                    ["移除物件", "替換／加入材質", "更換顏色"],
+                    ["移除物件", "替換／加入材質", "更換顏色", "更換背景（遮罩 inpainting）"],
                     value="替換／加入材質",
                     label="修改方式",
                 )
@@ -72,8 +72,13 @@ with gr.Blocks(title="AI 空間生成器") as demo:
                 strength = gr.Slider(0.1, 1.0, value=0.85, step=0.05, label="修改強度")
                 use_remote_ai = gr.Checkbox(
                     value=False,
-                    label="使用遠端 AI（需要部署者設定 HF_TOKEN）",
+                    label="使用遠端 AI（會將照片與遮罩傳到外部 Hugging Face 服務）",
                 )
+            gr.Markdown(
+                "**遠端 AI 提醒：** 只有勾選後才會傳送影像。背景 inpainting 預設使用公開 ZeroGPU 服務，"
+                "可能排隊或受每日額度限制；不應上傳未獲授權的敏感照片。",
+                elem_classes=["helper"],
+            )
             generate_button = gr.Button("生成空間示意", variant="primary")
             status = gr.Textbox(label="狀態", interactive=False)
             with gr.Row():
@@ -98,11 +103,13 @@ with gr.Blocks(title="AI 空間生成器") as demo:
 - 筆刷區域選取
 - 物件移除、材質與顏色的本機示意
 - 可選的遠端 image-to-image 生成
+- 可選的遮罩背景 inpainting（公開 Hugging Face ZeroGPU）
+- 遠端背景生成後再次用原圖像素回貼未選取區域
 - 未選取區域保留、前後比較與 PNG 下載
 
 ### 後續模組
 - 室內專用語意分割
-- 更精確的局部 inpainting
+- 更精確的局部 inpainting 與髮絲／物件邊界 refine
 - 2D 平面圖解析
 - 概念性 3D 空間與多視角一致生成
 - Web 3D／glTF 輸出
