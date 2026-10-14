@@ -352,6 +352,26 @@ def remote_generate(image: Image.Image, prompt: str) -> Image.Image:
 
 
 
+def _extract_gradio_result_path(response: Any) -> str | None:
+    """Normalize ImageSlider responses across Gradio client versions."""
+    value = response
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        value = value[1]
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+
+    if isinstance(value, dict):
+        value = value.get("path") or value.get("url")
+    elif hasattr(value, "path"):
+        value = value.path
+
+    if isinstance(value, (str, Path)):
+        return str(value)
+    return None
+
+
 def remote_inpaint(image: Image.Image, mask: Image.Image, prompt: str) -> Image.Image:
     """Call a public mask-aware Hugging Face Space without creating a paid provider secret."""
     from gradio_client import Client, handle_file
@@ -391,22 +411,12 @@ def remote_inpaint(image: Image.Image, mask: Image.Image, prompt: str) -> Image.
             api_name="/predict",
         )
 
-        # The SDXL inpainting Space returns an ImageSlider pair: (before, after).
-        result_ref: Any
-        if isinstance(response, (list, tuple)) and len(response) >= 2:
-            result_ref = response[1]
-        else:
-            result_ref = response
-
-        if isinstance(result_ref, dict):
-            result_ref = result_ref.get("path") or result_ref.get("url")
-        elif hasattr(result_ref, "path"):
-            result_ref = result_ref.path
-
-        if not result_ref:
+        # The SDXL Space exposes one ImageSlider output that contains (before, after).
+        result_path = _extract_gradio_result_path(response)
+        if not result_path:
             raise RuntimeError("遠端 inpainting 沒有回傳可讀取的結果影像。")
 
-        with Image.open(result_ref) as generated:
+        with Image.open(result_path) as generated:
             return ensure_rgb(generated)
 
 
