@@ -6,6 +6,7 @@ from src.core import (
     dominant_colours,
     local_transform,
     mask_from_editor,
+    mask_to_rgba_layer,
 )
 
 
@@ -63,3 +64,13 @@ def test_background_local_mode_requires_masked_remote_backend():
         assert "遠端 AI" in str(exc)
     else:
         raise AssertionError("background replacement should not fall back to local colour fill")
+
+
+
+def test_mask_to_rgba_layer_uses_mask_as_alpha():
+    mask = Image.new("L", (32, 32), 0)
+    ImageDraw.Draw(mask).rectangle((8, 8, 23, 23), fill=255)
+
+    layer = mask_to_rgba_layer(mask)
+    assert layer.mode == "RGBA"
+    assert np.array_equal(np.asarray(layer.getchannel("A")), np.asarray(mask))
