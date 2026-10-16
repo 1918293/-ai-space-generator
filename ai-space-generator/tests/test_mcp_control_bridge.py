@@ -10,9 +10,13 @@ from src.execution_control import (
     ActionArchetype,
     ActionExternality,
     ActionProposal,
+    CompletionClaim,
+    EvidenceKind,
+    EvidenceReceipt,
     ExecutionRecord,
     Mode,
     RunPhase,
+    can_claim,
 )
 from src.mcp_control_bridge import (
     HaoMCPIdentityPolicy,
@@ -376,6 +380,22 @@ def test_reconciliation_is_owner_bound_evidence_gated_and_retry_is_stable(tmp_pa
             authorization_target="recipient-1",
         )
         original_record = production.records[original.workflow_id]
+        stale_completion_evidence = tuple(
+            EvidenceReceipt(
+                evidence_id=f"OLD-{kind.value}",
+                kind=kind,
+                passed=True,
+                source="original-run",
+                claim_scope=original_record.action.action_id,
+            )
+            for kind in (
+                EvidenceKind.TOOL_RECEIPT,
+                EvidenceKind.STATE_READBACK,
+                EvidenceKind.VERIFICATION_PASS,
+                EvidenceKind.ACCEPTANCE_GATE_PASS,
+            )
+        )
+        original_record = replace(original_record, evidence=stale_completion_evidence)
         production.records[original.workflow_id] = replace(
             original_record,
             phase=RunPhase.UNSYNCED,
@@ -469,6 +489,11 @@ def test_reconciliation_is_owner_bound_evidence_gated_and_retry_is_stable(tmp_pa
         )
         retried_record = production.records[retried.workflow_id]
         assert retried.workflow_id != original.workflow_id
+        assert retried_record.action.action_id != original_record.action.action_id
+        assert retried_record.evidence == ()
+        retry_completion = can_claim(retried_record, CompletionClaim.COMPLETED)
+        assert retry_completion.allowed is False
+        assert retry_completion.code.startswith("MISSING_EVIDENCE:")
         assert retried.phase == RunPhase.AWAITING_HAO.value
         assert retried_record.action.capability == original_record.action.capability
         assert retried_record.action.action_id.endswith(":message.send")
