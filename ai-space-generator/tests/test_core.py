@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageCms, ImageDraw
 
 import src.core as core
 from src.core import assert_local_edit_integrity, dominant_colours, ensure_rgb, local_transform, mask_from_editor
@@ -148,3 +148,24 @@ def test_generate_design_png_readback_preserves_source_icc():
             assert saved.info.get("icc_profile") == profile
     finally:
         Path(output_path).unlink(missing_ok=True)
+
+
+
+def test_profiled_source_declared_srgb_runs_real_icc_transform(monkeypatch):
+    source_profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    image = Image.new("RGB", (100, 80), "white")
+    image.info["icc_profile"] = source_profile
+    mask = Image.new("L", image.size, 0)
+    ImageDraw.Draw(mask).rectangle((30, 20, 60, 50), fill=255)
+    monkeypatch.setenv("GENERATION_OUTPUT_COLORSPACE", "srgb")
+
+    def fake_remote_generate(crop, prompt):
+        return Image.new("RGB", crop.size, (32, 64, 96))
+
+    monkeypatch.setattr(core, "remote_generate", fake_remote_generate)
+    result, _, receipt = core.remote_generate_local(image, mask, "test")
+
+    assert receipt == "DECLARED_SRGB_TO_SOURCE_ICC"
+    assert result.info.get("icc_profile") == source_profile
+    assert core.assert_source_icc_preserved(image, result) == source_profile
+    assert core.assert_local_edit_integrity(image, result, mask) == 0
