@@ -1,7 +1,9 @@
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
 
-from src.core import dominant_colours, local_transform, mask_from_editor
+import src.core as core
+from src.core import assert_local_edit_integrity, dominant_colours, local_transform, mask_from_editor
 
 
 def test_dominant_colours_returns_hex():
@@ -30,3 +32,33 @@ def test_local_material_transform_preserves_unmasked_area():
     array = np.asarray(result)
     assert tuple(array[5, 5]) == (255, 255, 255)
     assert tuple(array[40, 40]) != (255, 255, 255)
+
+
+
+def test_remote_generate_local_never_sends_full_frame(monkeypatch):
+    image = Image.new("RGB", (120, 100), "white")
+    mask = Image.new("L", image.size, 0)
+    ImageDraw.Draw(mask).rectangle((40, 30, 70, 60), fill=255)
+    seen = {}
+
+    def fake_remote_generate(crop, prompt):
+        seen["size"] = crop.size
+        return Image.new("RGB", crop.size, "black")
+
+    monkeypatch.setattr(core, "remote_generate", fake_remote_generate)
+    result, bbox = core.remote_generate_local(image, mask, "test")
+
+    assert seen["size"] == (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    assert seen["size"] != image.size
+    assert assert_local_edit_integrity(image, result, mask) == 0
+
+
+def test_assert_local_edit_integrity_rejects_outside_mask_change():
+    source = Image.new("RGB", (40, 40), "white")
+    mask = Image.new("L", source.size, 0)
+    ImageDraw.Draw(mask).rectangle((15, 15, 25, 25), fill=255)
+    result = source.copy()
+    result.putpixel((2, 2), (0, 0, 0))
+
+    with pytest.raises(RuntimeError, match="LOCAL_EDIT_OUTSIDE_MASK_DIFF"):
+        assert_local_edit_integrity(source, result, mask)
