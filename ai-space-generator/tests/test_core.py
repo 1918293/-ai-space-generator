@@ -62,3 +62,16 @@ def test_assert_local_edit_integrity_rejects_outside_mask_change():
 
     with pytest.raises(RuntimeError, match="LOCAL_EDIT_OUTSIDE_MASK_DIFF"):
         assert_local_edit_integrity(source, result, mask)
+
+
+
+def test_remote_generate_local_rejects_whole_frame_mask(monkeypatch):
+    image = Image.new("RGB", (80, 80), "white")
+    mask = Image.new("L", image.size, 255)
+
+    def should_not_run(crop, prompt):
+        raise AssertionError("remote generation must not run for a whole-frame local-edit route")
+
+    monkeypatch.setattr(core, "remote_generate", should_not_run)
+    with pytest.raises(RuntimeError, match="LOCAL_EDIT_WHOLE_FRAME_ROUTE_BLOCKED"):
+        core.remote_generate_local(image, mask, "test")
