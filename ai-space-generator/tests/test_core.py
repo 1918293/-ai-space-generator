@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
-from pathlib import Path\n\nfrom PIL import Image, ImageDraw
+from pathlib import Path
+
+from PIL import Image, ImageDraw
 
 import src.core as core
 from src.core import assert_local_edit_integrity, dominant_colours, ensure_rgb, local_transform, mask_from_editor
