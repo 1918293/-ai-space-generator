@@ -1,0 +1,26 @@
+name: Local edit preaction validation
+
+on:
+  push:
+    branches:
+      - auto/local-edit-preaction-20261017
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ai-space-generator/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ai-space-generator/requirements.txt pytest
+      - name: Run regression suite
+        working-directory: ai-space-generator
+        run: pytest -q
