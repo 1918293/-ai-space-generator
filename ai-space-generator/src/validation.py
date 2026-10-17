@@ -131,3 +131,81 @@ def target_modified_ratio(
         "threshold": int(threshold),
         "semantic_removal_verified": False,
     }
+
+def composite_mask_only(
+    source: Image.Image | np.ndarray,
+    candidate: Image.Image | np.ndarray,
+    edit_mask: Image.Image | np.ndarray,
+) -> np.ndarray:
+    """Paste candidate pixels only inside edit_mask; keep all other source pixels bit-exact."""
+    src = np.asarray(source)
+    out = np.asarray(candidate)
+    edit = _binary_mask(edit_mask)
+
+    if src.shape != out.shape or src.shape[:2] != edit.shape:
+        raise ValueError("Source, candidate, and edit mask must have matching dimensions.")
+    if src.ndim not in (2, 3):
+        raise ValueError("Source and candidate must be 2-D grayscale or 3-D image arrays.")
+
+    composited = src.copy()
+    composited[edit] = out[edit]
+    return composited
+
+
+def verify_mask_lock(
+    source: Image.Image | np.ndarray,
+    result: Image.Image | np.ndarray,
+    edit_mask: Image.Image | np.ndarray,
+    protected_mask: Image.Image | np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Verify bit-exact preservation outside edit_mask and inside an optional protected region."""
+    src = np.asarray(source)
+    out = np.asarray(result)
+    edit = _binary_mask(edit_mask)
+    protected = (
+        np.zeros_like(edit, dtype=bool)
+        if protected_mask is None
+        else _binary_mask(protected_mask)
+    )
+
+    if (
+        src.shape != out.shape
+        or src.shape[:2] != edit.shape
+        or protected.shape != edit.shape
+    ):
+        raise ValueError(
+            "Source, result, edit mask, and protected mask must have matching dimensions."
+        )
+    if src.ndim not in (2, 3):
+        raise ValueError("Source and result must be 2-D grayscale or 3-D image arrays.")
+
+    diff = np.abs(src.astype(np.int64) - out.astype(np.int64))
+    changed = diff != 0 if diff.ndim == 2 else np.any(diff != 0, axis=2)
+
+    outside = ~edit
+    outside_changed_pixels = int(np.count_nonzero(changed & outside))
+    protected_changed_pixels = int(np.count_nonzero(changed & protected))
+    inside_changed_pixels = int(np.count_nonzero(changed & edit))
+
+    outside_max_channel_diff = int(diff[outside].max()) if np.any(outside) else 0
+    protected_max_channel_diff = int(diff[protected].max()) if np.any(protected) else 0
+    inside_max_channel_diff = int(diff[edit].max()) if np.any(edit) else 0
+
+    return {
+        "dimensions_match": True,
+        "edit_mask_pixels": int(np.count_nonzero(edit)),
+        "outside_changed_pixels": outside_changed_pixels,
+        "outside_max_channel_diff": outside_max_channel_diff,
+        "protected_changed_pixels": protected_changed_pixels,
+        "protected_max_channel_diff": protected_max_channel_diff,
+        "inside_changed_pixels": inside_changed_pixels,
+        "inside_max_channel_diff": inside_max_channel_diff,
+        "hard_lock_pass": bool(
+            outside_changed_pixels == 0
+            and outside_max_channel_diff == 0
+            and protected_changed_pixels == 0
+            and protected_max_channel_diff == 0
+            and inside_changed_pixels > 0
+        ),
+    }
+

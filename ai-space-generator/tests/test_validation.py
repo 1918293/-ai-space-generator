@@ -1,10 +1,13 @@
+import pytest
 import numpy as np
 from PIL import Image, ImageDraw
 
 from src.validation import (
+    composite_mask_only,
     target_modified_ratio,
     validate_object_role_contract,
     validate_remove_target_contract,
+    verify_mask_lock,
 )
 
 
@@ -88,3 +91,62 @@ def test_target_modified_ratio_supports_grayscale_arrays():
     assert qa["target_pixels_changed"] == int(np.count_nonzero(target))
     assert qa["target_modified_ratio"] == 1.0
     assert qa["semantic_removal_verified"] is False
+
+def _pixel_lock_fixture():
+    source = np.zeros((100, 100, 3), dtype=np.uint8)
+    source[..., 0] = 255
+    candidate = np.zeros_like(source)
+    candidate[..., 1] = 255
+    edit = np.zeros((100, 100), dtype=bool)
+    edit[35:65, 35:65] = True
+    protected = np.zeros((100, 100), dtype=bool)
+    protected[10:20, 10:20] = True
+    return source, candidate, edit, protected
+
+
+def test_mask_only_composite_is_bit_exact_outside_edit_mask():
+    source, candidate, edit, protected = _pixel_lock_fixture()
+    result = composite_mask_only(source, candidate, edit)
+    qa = verify_mask_lock(source, result, edit, protected)
+
+    assert qa["dimensions_match"] is True
+    assert qa["outside_changed_pixels"] == 0
+    assert qa["outside_max_channel_diff"] == 0
+    assert qa["protected_changed_pixels"] == 0
+    assert qa["protected_max_channel_diff"] == 0
+    assert qa["inside_changed_pixels"] == 900
+    assert qa["inside_max_channel_diff"] == 255
+    assert qa["hard_lock_pass"] is True
+
+
+def test_mask_lock_rejects_single_outside_pixel_drift():
+    source, candidate, edit, protected = _pixel_lock_fixture()
+    result = composite_mask_only(source, candidate, edit)
+    result[0, 0, 2] = 1
+
+    qa = verify_mask_lock(source, result, edit, protected)
+
+    assert qa["outside_changed_pixels"] == 1
+    assert qa["outside_max_channel_diff"] == 1
+    assert qa["hard_lock_pass"] is False
+
+
+def test_mask_lock_rejects_protected_region_change():
+    source, candidate, edit, protected = _pixel_lock_fixture()
+    overlapping_protected = protected.copy()
+    overlapping_protected[40, 40] = True
+    result = composite_mask_only(source, candidate, edit)
+
+    qa = verify_mask_lock(source, result, edit, overlapping_protected)
+
+    assert qa["protected_changed_pixels"] == 1
+    assert qa["protected_max_channel_diff"] == 255
+    assert qa["hard_lock_pass"] is False
+
+
+def test_mask_lock_shape_mismatch_fails_closed():
+    source, candidate, edit, protected = _pixel_lock_fixture()
+
+    with pytest.raises(ValueError, match="matching dimensions"):
+        verify_mask_lock(source, candidate[:-1], edit, protected)
+
