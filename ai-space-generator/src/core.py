@@ -329,6 +329,61 @@ def remote_generate(image: Image.Image, prompt: str) -> Image.Image:
     return ensure_rgb(result)
 
 
+def _local_generation_bbox(mask: Image.Image, padding_ratio: float = 0.08) -> tuple[int, int, int, int]:
+    """Return a padded bounding box around editable mask pixels."""
+    mask_np = np.asarray(mask.convert("L"), dtype=np.uint8)
+    ys, xs = np.where(mask_np > 8)
+    if xs.size == 0 or ys.size == 0:
+        raise ValueError("請先用筆刷標記需要修改的區域。")
+
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    span = max(x1 - x0, y1 - y0)
+    padding = max(8, round(span * float(padding_ratio)))
+    return (
+        max(0, x0 - padding),
+        max(0, y0 - padding),
+        min(mask.width, x1 + padding),
+        min(mask.height, y1 + padding),
+    )
+
+
+def remote_generate_local(image: Image.Image, mask: Image.Image, prompt: str) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """Run remote generation only on the editable region plus bounded context."""
+    rgb = ensure_rgb(image)
+    mask = mask.resize(rgb.size).convert("L")
+    bbox = _local_generation_bbox(mask)
+
+    source_crop = rgb.crop(bbox)
+    mask_crop = mask.crop(bbox)
+    candidate_crop = remote_generate(source_crop, prompt).resize(source_crop.size)
+    edited_crop = Image.composite(candidate_crop, source_crop, mask_crop)
+
+    result = rgb.copy()
+    result.paste(edited_crop, bbox[:2])
+    return result, bbox
+
+
+def assert_local_edit_integrity(source: Image.Image, result: Image.Image, mask: Image.Image) -> int:
+    """Fail closed if a local edit changes dimensions or any pixel outside the edit mask."""
+    source_rgb = ensure_rgb(source)
+    result_rgb = ensure_rgb(result)
+    if source_rgb.size != result_rgb.size:
+        raise RuntimeError(
+            f"LOCAL_EDIT_DIMENSION_MISMATCH: source={source_rgb.size}, result={result_rgb.size}"
+        )
+
+    mask_np = np.asarray(mask.resize(source_rgb.size).convert("L"), dtype=np.uint8)
+    editable = mask_np > 0
+    source_np = np.asarray(source_rgb, dtype=np.uint8)
+    result_np = np.asarray(result_rgb, dtype=np.uint8)
+    changed = np.any(source_np != result_np, axis=2)
+    outside_count = int(np.count_nonzero(changed & ~editable))
+    if outside_count:
+        raise RuntimeError(f"LOCAL_EDIT_OUTSIDE_MASK_DIFF: {outside_count} px")
+    return outside_count
+
+
 def generate_design(
     editor_value: dict[str, Any] | None,
     action: str,
@@ -347,22 +402,24 @@ def generate_design(
     try:
         if use_remote_ai:
             full_prompt = (
-                "Architectural interior design edit. Preserve the original camera angle, geometry, "
-                "windows, walls, and all unselected areas. "
+                "Architectural interior design local edit. Preserve camera geometry, lighting continuity, "
+                "windows, walls, and all pixels outside the supplied editable region. "
                 f"Requested action: {action}. Material: {material}. User instruction: {prompt or 'refine the selected area'}."
             )
-            candidate = remote_generate(background, full_prompt).resize(background.size)
-            result = Image.composite(candidate, background, mask)
-            mode = "遠端 AI 生成"
+            result, bbox = remote_generate_local(background, mask, full_prompt)
+            mode = f"遠端 AI 局部生成（{bbox[2] - bbox[0]} × {bbox[3] - bbox[1]} px crop）"
         else:
             result = local_transform(background, mask, action, material, colour, prompt, strength)
             mode = "本機示意模式"
+
+        outside_diff = assert_local_edit_integrity(background, result, mask)
 
         fd, output_path = tempfile.mkstemp(prefix="ai-space-generator-", suffix=".png")
         os.close(fd)
         result.save(output_path, "PNG")
         status = (
-            f"完成：{mode}。未選取區域維持原圖；結果屬概念示意，不作為施工、測量或結構判斷依據。"
+            f"完成：{mode}。Locality QA：PASS（mask 外差異 {outside_diff} px）；"
+            "結果屬概念示意，不作為施工、測量或結構判斷依據。"
         )
         return result, (background, result), status, output_path
     except Exception as exc:
