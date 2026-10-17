@@ -48,7 +48,8 @@ def test_remote_generate_local_never_sends_full_frame(monkeypatch):
         return Image.new("RGB", crop.size, "black")
 
     monkeypatch.setattr(core, "remote_generate", fake_remote_generate)
-    result, bbox = core.remote_generate_local(image, mask, "test")
+    result, bbox, color_receipt = core.remote_generate_local(image, mask, "test")
+    assert color_receipt == "SOURCE_UNPROFILED"
 
     assert seen["size"] == (bbox[2] - bbox[0], bbox[3] - bbox[1])
     assert seen["size"] != image.size
