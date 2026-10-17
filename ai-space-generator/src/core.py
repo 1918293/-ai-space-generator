@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 import cv2
 import numpy as np
-from PIL import ExifTags, Image, ImageColor, ImageDraw, ImageEnhance, ImageFilter
+from PIL import ExifTags, Image, ImageCms, ImageColor, ImageDraw, ImageEnhance, ImageFilter
 
 
 @dataclass(frozen=True)
@@ -20,8 +20,16 @@ class AnalysisResult:
     annotated: Image.Image
 
 
+def _icc_profile_bytes(image: Image.Image) -> bytes | None:
+    value = image.info.get("icc_profile")
+    if isinstance(value, (bytes, bytearray)) and value:
+        return bytes(value)
+    return None
+
+
 def ensure_rgb(image: Image.Image) -> Image.Image:
-    """Return an RGB copy with EXIF orientation applied."""
+    """Return an RGB copy with EXIF orientation applied and ICC metadata retained."""
+    icc_profile = _icc_profile_bytes(image)
     image = image.copy()
     try:
         from PIL import ImageOps
@@ -29,7 +37,10 @@ def ensure_rgb(image: Image.Image) -> Image.Image:
         image = ImageOps.exif_transpose(image)
     except Exception:
         pass
-    return image.convert("RGB")
+    rgb = image.convert("RGB")
+    if icc_profile:
+        rgb.info["icc_profile"] = icc_profile
+    return rgb
 
 
 def _rational_to_float(value: Any) -> float:
@@ -307,7 +318,11 @@ def local_transform(
 
     opacity = max(0.05, min(1.0, float(strength)))
     adjusted_mask = mask.point(lambda value: int(value * opacity))
-    return Image.composite(generated, rgb, adjusted_mask)
+    result = Image.composite(generated, rgb, adjusted_mask)
+    source_icc = _icc_profile_bytes(rgb)
+    if source_icc:
+        result.info["icc_profile"] = source_icc
+    return result
 
 
 def remote_generate(image: Image.Image, prompt: str) -> Image.Image:
@@ -329,6 +344,139 @@ def remote_generate(image: Image.Image, prompt: str) -> Image.Image:
     return ensure_rgb(result)
 
 
+def _local_generation_bbox(mask: Image.Image, padding_ratio: float = 0.08) -> tuple[int, int, int, int]:
+    """Return a padded bounding box around editable mask pixels."""
+    mask_np = np.asarray(mask.convert("L"), dtype=np.uint8)
+    ys, xs = np.where(mask_np > 8)
+    if xs.size == 0 or ys.size == 0:
+        raise ValueError("請先用筆刷標記需要修改的區域。")
+
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    span = max(x1 - x0, y1 - y0)
+    padding = max(8, round(span * float(padding_ratio)))
+    return (
+        max(0, x0 - padding),
+        max(0, y0 - padding),
+        min(mask.width, x1 + padding),
+        min(mask.height, y1 + padding),
+    )
+
+
+def _convert_candidate_to_source_profile(
+    candidate: Image.Image,
+    source_icc: bytes | None,
+    declared_output_colorspace: str,
+) -> tuple[Image.Image, str]:
+    """Color-manage a generated crop into the source working profile."""
+    candidate_rgb = ensure_rgb(candidate)
+    candidate_icc = _icc_profile_bytes(candidate_rgb)
+
+    if not source_icc:
+        return candidate_rgb, "SOURCE_UNPROFILED"
+
+    if candidate_icc == source_icc:
+        return candidate_rgb, "CANDIDATE_ICC_MATCHES_SOURCE"
+
+    if candidate_icc:
+        input_profile = ImageCms.ImageCmsProfile(io.BytesIO(candidate_icc))
+        receipt = "EMBEDDED_ICC_TO_SOURCE_ICC"
+    elif declared_output_colorspace == "srgb":
+        input_profile = ImageCms.createProfile("sRGB")
+        receipt = "DECLARED_SRGB_TO_SOURCE_ICC"
+    else:
+        raise RuntimeError("REMOTE_CANDIDATE_COLOR_PROFILE_UNKNOWN")
+
+    output_profile = ImageCms.ImageCmsProfile(io.BytesIO(source_icc))
+    converted = ImageCms.profileToProfile(
+        candidate_rgb,
+        input_profile,
+        output_profile,
+        outputMode="RGB",
+    )
+    converted.info["icc_profile"] = source_icc
+    return converted, receipt
+
+
+def remote_generate_local(
+    image: Image.Image,
+    mask: Image.Image,
+    prompt: str,
+) -> tuple[Image.Image, tuple[int, int, int, int], str]:
+    """Run remote generation only on bounded editable context with color admission."""
+    rgb = ensure_rgb(image)
+    mask = mask.resize(rgb.size).convert("L")
+    bbox = _local_generation_bbox(mask)
+    if bbox == (0, 0, rgb.width, rgb.height):
+        raise RuntimeError("LOCAL_EDIT_WHOLE_FRAME_ROUTE_BLOCKED")
+
+    source_icc = _icc_profile_bytes(rgb)
+    declared_output_colorspace = os.getenv("GENERATION_OUTPUT_COLORSPACE", "").strip().lower()
+    if source_icc and declared_output_colorspace not in {"srgb", "embedded"}:
+        raise RuntimeError("REMOTE_OUTPUT_COLORSPACE_UNDECLARED")
+
+    source_crop = rgb.crop(bbox)
+    if source_icc:
+        source_crop.info["icc_profile"] = source_icc
+    mask_crop = mask.crop(bbox)
+
+    candidate_crop = remote_generate(source_crop, prompt).resize(source_crop.size)
+    candidate_crop, color_receipt = _convert_candidate_to_source_profile(
+        candidate_crop,
+        source_icc,
+        declared_output_colorspace,
+    )
+    edited_crop = Image.composite(candidate_crop, source_crop, mask_crop)
+
+    result = rgb.copy()
+    result.paste(edited_crop, bbox[:2])
+    if source_icc:
+        result.info["icc_profile"] = source_icc
+    return result, bbox, color_receipt
+
+
+def assert_local_edit_integrity(source: Image.Image, result: Image.Image, mask: Image.Image) -> int:
+    """Fail closed if a local edit changes dimensions or any pixel outside the edit mask."""
+    source_rgb = ensure_rgb(source)
+    result_rgb = ensure_rgb(result)
+    if source_rgb.size != result_rgb.size:
+        raise RuntimeError(
+            f"LOCAL_EDIT_DIMENSION_MISMATCH: source={source_rgb.size}, result={result_rgb.size}"
+        )
+
+    mask_np = np.asarray(mask.resize(source_rgb.size).convert("L"), dtype=np.uint8)
+    editable = mask_np > 0
+    source_np = np.asarray(source_rgb, dtype=np.uint8)
+    result_np = np.asarray(result_rgb, dtype=np.uint8)
+    changed = np.any(source_np != result_np, axis=2)
+    outside_count = int(np.count_nonzero(changed & ~editable))
+    if outside_count:
+        raise RuntimeError(f"LOCAL_EDIT_OUTSIDE_MASK_DIFF: {outside_count} px")
+    return outside_count
+
+
+def assert_source_icc_preserved(source: Image.Image, result: Image.Image) -> bytes | None:
+    """Require exact source ICC bytes to survive when the source is profiled."""
+    source_icc = _icc_profile_bytes(source)
+    if not source_icc:
+        return None
+    result_icc = _icc_profile_bytes(result)
+    if result_icc != source_icc:
+        raise RuntimeError("LOCAL_EDIT_SOURCE_ICC_MISMATCH")
+    return source_icc
+
+
+def save_png_with_profile_readback(result: Image.Image, source: Image.Image, output_path: str) -> None:
+    """Save PNG and fail closed if source ICC bytes are not embedded exactly."""
+    source_icc = _icc_profile_bytes(source)
+    save_kwargs = {"icc_profile": source_icc} if source_icc else {}
+    result.save(output_path, "PNG", **save_kwargs)
+    if source_icc:
+        with Image.open(output_path) as saved:
+            if _icc_profile_bytes(saved) != source_icc:
+                raise RuntimeError("OUTPUT_ICC_READBACK_MISMATCH")
+
+
 def generate_design(
     editor_value: dict[str, Any] | None,
     action: str,
@@ -347,22 +495,28 @@ def generate_design(
     try:
         if use_remote_ai:
             full_prompt = (
-                "Architectural interior design edit. Preserve the original camera angle, geometry, "
-                "windows, walls, and all unselected areas. "
+                "Architectural interior design local edit. Preserve camera geometry, lighting continuity, "
+                "windows, walls, and all pixels outside the supplied editable region. "
                 f"Requested action: {action}. Material: {material}. User instruction: {prompt or 'refine the selected area'}."
             )
-            candidate = remote_generate(background, full_prompt).resize(background.size)
-            result = Image.composite(candidate, background, mask)
-            mode = "遠端 AI 生成"
+            result, bbox, color_receipt = remote_generate_local(background, mask, full_prompt)
+            mode = f"遠端 AI 局部生成（{bbox[2] - bbox[0]} × {bbox[3] - bbox[1]} px crop）"
         else:
             result = local_transform(background, mask, action, material, colour, prompt, strength)
+            color_receipt = "SOURCE_WORKING_PROFILE_PRESERVED" if _icc_profile_bytes(background) else "SOURCE_UNPROFILED"
             mode = "本機示意模式"
+
+        outside_diff = assert_local_edit_integrity(background, result, mask)
+        source_icc = assert_source_icc_preserved(background, result)
 
         fd, output_path = tempfile.mkstemp(prefix="ai-space-generator-", suffix=".png")
         os.close(fd)
-        result.save(output_path, "PNG")
+        save_png_with_profile_readback(result, background, output_path)
+        color_status = "ICC exact/readback PASS" if source_icc else "source unprofiled"
         status = (
-            f"完成：{mode}。未選取區域維持原圖；結果屬概念示意，不作為施工、測量或結構判斷依據。"
+            f"完成：{mode}。Locality QA：PASS（mask 外差異 {outside_diff} px）；"
+            f"Color QA：{color_status}（{color_receipt}）；"
+            "結果屬概念示意，不作為施工、測量或結構判斷依據。"
         )
         return result, (background, result), status, output_path
     except Exception as exc:
