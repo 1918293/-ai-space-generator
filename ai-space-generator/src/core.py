@@ -353,6 +353,8 @@ def remote_generate_local(image: Image.Image, mask: Image.Image, prompt: str) ->
     rgb = ensure_rgb(image)
     mask = mask.resize(rgb.size).convert("L")
     bbox = _local_generation_bbox(mask)
+    if bbox == (0, 0, rgb.width, rgb.height):
+        raise RuntimeError("LOCAL_EDIT_WHOLE_FRAME_ROUTE_BLOCKED")
 
     source_crop = rgb.crop(bbox)
     mask_crop = mask.crop(bbox)
