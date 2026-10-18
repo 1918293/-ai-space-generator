@@ -13,6 +13,12 @@ import cv2
 import numpy as np
 from PIL import ExifTags, Image, ImageColor, ImageDraw, ImageEnhance, ImageFilter
 
+from src.validation import (
+    composite_mask_only,
+    validate_edit_protected_contract,
+    verify_mask_lock,
+)
+
 
 @dataclass(frozen=True)
 class AnalysisResult:
@@ -21,7 +27,8 @@ class AnalysisResult:
 
 
 def ensure_rgb(image: Image.Image) -> Image.Image:
-    """Return an RGB copy with EXIF orientation applied."""
+    """Return an RGB copy with EXIF orientation applied and ICC profile preserved."""
+    source_icc = image.info.get("icc_profile")
     image = image.copy()
     try:
         from PIL import ImageOps
@@ -29,7 +36,10 @@ def ensure_rgb(image: Image.Image) -> Image.Image:
         image = ImageOps.exif_transpose(image)
     except Exception:
         pass
-    return image.convert("RGB")
+    rgb = image.convert("RGB")
+    if source_icc:
+        rgb.info["icc_profile"] = source_icc
+    return rgb
 
 
 def _rational_to_float(value: Any) -> float:
@@ -337,6 +347,7 @@ def generate_design(
     prompt: str,
     strength: float,
     use_remote_ai: bool,
+    protected_mask: Image.Image | np.ndarray | dict[str, Any] | None = None,
 ) -> tuple[Image.Image | None, tuple[Image.Image, Image.Image] | None, str, str | None]:
     background, mask = mask_from_editor(editor_value)
     if background is None or mask is None:
@@ -344,7 +355,26 @@ def generate_design(
     if not np.any(np.asarray(mask) > 8):
         return None, None, "尚未偵測到筆刷標記。請在照片上塗選要修改的區域。", None
 
+    source_icc = background.info.get("icc_profile")
+
     try:
+        normalized_protected_mask: Image.Image | np.ndarray | None = protected_mask
+        if isinstance(protected_mask, dict):
+            _, normalized_protected_mask = mask_from_editor(protected_mask)
+            if (
+                normalized_protected_mask is not None
+                and not np.any(np.asarray(normalized_protected_mask) > 8)
+            ):
+                normalized_protected_mask = None
+
+        if normalized_protected_mask is not None:
+            protection_qa = validate_edit_protected_contract(mask, normalized_protected_mask)
+            if not protection_qa["hard_gate_pass"]:
+                raise RuntimeError(
+                    "修改區與保護區重疊："
+                    f"edit_protected_overlap_pixels={protection_qa['edit_protected_overlap_pixels']}"
+                )
+
         if use_remote_ai:
             full_prompt = (
                 "Architectural interior design edit. Preserve the original camera angle, geometry, "
@@ -358,9 +388,32 @@ def generate_design(
             result = local_transform(background, mask, action, material, colour, prompt, strength)
             mode = "本機示意模式"
 
+        # Final hard lock: the generator is only a candidate producer.
+        # Re-composite against the canonical source so pixels outside the
+        # binary edit mask are guaranteed bit-exact before the PNG is saved.
+        locked = composite_mask_only(
+            np.asarray(background),
+            np.asarray(ensure_rgb(result)),
+            mask,
+        )
+        result = Image.fromarray(locked.astype(np.uint8, copy=False), mode="RGB")
+        if source_icc:
+            result.info["icc_profile"] = source_icc
+        lock_qa = verify_mask_lock(background, result, mask, normalized_protected_mask)
+        if not lock_qa["hard_lock_pass"]:
+            raise RuntimeError(
+                "局部像素鎖定驗證失敗："
+                f"edit_protected_overlap_pixels={lock_qa['edit_protected_overlap_pixels']}, "
+                f"outside_changed_pixels={lock_qa['outside_changed_pixels']}, "
+                f"outside_max_channel_diff={lock_qa['outside_max_channel_diff']}, "
+                f"protected_changed_pixels={lock_qa['protected_changed_pixels']}, "
+                f"inside_changed_pixels={lock_qa['inside_changed_pixels']}"
+            )
+
         fd, output_path = tempfile.mkstemp(prefix="ai-space-generator-", suffix=".png")
         os.close(fd)
-        result.save(output_path, "PNG")
+        save_options = {"icc_profile": source_icc} if source_icc else {}
+        result.save(output_path, "PNG", **save_options)
         status = (
             f"完成：{mode}。未選取區域維持原圖；結果屬概念示意，不作為施工、測量或結構判斷依據。"
         )

@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image, ImageDraw
 
-from src.core import dominant_colours, local_transform, mask_from_editor
+from src.core import dominant_colours, generate_design, local_transform, mask_from_editor
 
 
 def test_dominant_colours_returns_hex():
@@ -30,3 +30,135 @@ def test_local_material_transform_preserves_unmasked_area():
     array = np.asarray(result)
     assert tuple(array[5, 5]) == (255, 255, 255)
     assert tuple(array[40, 40]) != (255, 255, 255)
+
+def test_generate_design_restores_low_alpha_pixels_outside_binary_edit_mask(tmp_path):
+    background = Image.new("RGB", (32, 32), "white")
+    layer_array = np.zeros((32, 32, 4), dtype=np.uint8)
+    layer_array[10, 10] = (255, 0, 0, 4)
+    layer_array[11, 11] = (255, 0, 0, 255)
+    layer = Image.fromarray(layer_array, mode="RGBA")
+
+    result, _, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+    )
+
+    assert result is not None
+    assert output_path is not None
+    assert "完成" in status
+    assert result.getpixel((10, 10)) == (255, 255, 255)
+    assert result.getpixel((11, 11)) != (255, 255, 255)
+
+    # Delivery-layer readback: PNG encoding must not introduce any
+    # out-of-mask pixel drift after the in-memory hard lock passes.
+    allowed = layer_array[..., 3] > 8
+    source_array = np.asarray(background)
+    with Image.open(output_path) as saved:
+        saved_array = np.asarray(saved.convert("RGB"))
+    changed = np.any(saved_array != source_array, axis=2)
+    assert int(np.count_nonzero(changed & ~allowed)) == 0
+    assert int(np.count_nonzero(changed & allowed)) > 0
+
+
+def test_generate_design_preserves_source_icc_profile_and_dimensions():
+    background = Image.new("RGB", (40, 30), "white")
+    source_icc = b"hao-test-icc-profile"
+    background.info["icc_profile"] = source_icc
+
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((12, 8, 24, 20), fill=(255, 0, 0, 255))
+
+    result, _, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+    )
+
+    assert result is not None
+    assert output_path is not None
+    assert "完成" in status
+    assert result.size == background.size
+    assert result.info.get("icc_profile") == source_icc
+
+    with Image.open(output_path) as saved:
+        assert saved.size == background.size
+        assert saved.info.get("icc_profile") == source_icc
+
+
+def test_generate_design_rejects_protected_editor_overlap_before_generation(monkeypatch):
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+
+    protected_layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(protected_layer).point((15, 15), fill=(0, 255, 0, 255))
+    protected_editor = {
+        "background": background,
+        "layers": [protected_layer],
+        "composite": background,
+    }
+
+    def must_not_generate(*args, **kwargs):
+        raise AssertionError("generator must not run when edit/protected masks overlap")
+
+    monkeypatch.setattr("src.core.local_transform", must_not_generate)
+
+    result, comparison, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+        protected_editor,
+    )
+
+    assert result is None
+    assert comparison is None
+    assert output_path is None
+    assert "生成失敗" in status
+    assert "edit_protected_overlap_pixels=1" in status
+
+
+def test_generate_design_accepts_blank_protected_editor():
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+    blank_protected_editor = {
+        "background": background,
+        "layers": [],
+        "composite": background,
+    }
+
+    result, _, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+        blank_protected_editor,
+    )
+
+    assert result is not None
+    assert output_path is not None
+    assert "完成" in status
+
+
+def test_app_builds_with_protected_editor_surface():
+    import app
+
+    assert app.demo is not None
+    assert app.editor is not None
+    assert app.protected_editor is not None
