@@ -24,7 +24,7 @@ def _textured_scene(seed=385):
 
 
 def _strong_pair_metrics():
-    return {"good_matches": 120, "inliers": 110, "inlier_ratio": 110/120, "median_reprojection_px": 0.3, "inlier_coverage": 0.20}
+    return {"good_matches": 120, "inliers": 110, "inlier_ratio": 110/120, "median_reprojection_px": 0.3, "inlier_coverage": 0.20, "visible_ring_ssim": 0.95}
 
 
 def _strong_camera():
