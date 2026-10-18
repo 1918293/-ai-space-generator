@@ -20,7 +20,8 @@ DEFAULT_THRESHOLDS = {
     "min_donor_count": 2,
     "min_consensus_ssim": 0.85,
     "max_consensus_mae": 18.0,
-    "min_visible_ring_ssim": 0.80,\n    "min_visible_ring_structural_ssim": 0.91,
+    "min_visible_ring_ssim": 0.80,
+    "min_visible_ring_structural_ssim": 0.91,
     "min_visible_ring_ssim_per_donor": 0.91,
     "min_held_out_precision": 0.99,
     "min_fresh_holdout_admissions": 3,
@@ -183,6 +184,8 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
         reasons.append("DONOR_CONSENSUS_MAE_HIGH")
     if ring_ssim < t["min_visible_ring_ssim"]:
         reasons.append("VISIBLE_RING_SSIM_LOW")
+    if ring_structural_ssim < t["min_visible_ring_structural_ssim"]:
+        reasons.append("VISIBLE_RING_STRUCTURAL_SSIM_LOW")
 
     return {
         "decision": "ALLOW_RECONSTRUCTION_CANDIDATE" if not reasons else "HOLD",
