@@ -33,8 +33,8 @@ jobs:
           curl -fL --retry 4 --retry-all-errors --connect-timeout 20 "$SOURCE_URL" -o /tmp/img7009/source.jpeg
           echo "$SOURCE_SHA256  /tmp/img7009/source.jpeg" | sha256sum -c -
           curl -fL --retry 4 --retry-all-errors --connect-timeout 20 "$MODEL_URL" -o /tmp/img7009/migan_traced.pt
-          test "$(stat -c%s /tmp/img7009/big-lama.pt)" -gt 1000000
-          sha256sum /tmp/img7009/big-lama.pt > /tmp/img7009/model.sha256
+          test "$(stat -c%s /tmp/img7009/migan_traced.pt)" -gt 1000000
+          sha256sum /tmp/img7009/migan_traced.pt > /tmp/img7009/model.sha256
 
       - name: Install CPU inference dependencies
         shell: bash
