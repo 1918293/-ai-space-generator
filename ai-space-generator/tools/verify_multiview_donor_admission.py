@@ -20,7 +20,7 @@ DEFAULT_THRESHOLDS = {
     "min_donor_count": 2,
     "min_consensus_ssim": 0.85,
     "max_consensus_mae": 18.0,
-    "min_visible_ring_ssim": 0.80,
+    "min_visible_ring_ssim": 0.80,\n    "min_visible_ring_structural_ssim": 0.91,
     "min_visible_ring_ssim_per_donor": 0.91,
     "min_held_out_precision": 0.99,
     "min_fresh_holdout_admissions": 3,
@@ -173,6 +173,10 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
     consensus_ssim = _finite_number(region.get("consensus_ssim", 0), "consensus_ssim")
     consensus_mae = _finite_number(region.get("consensus_mae", float("inf")), "consensus_mae")
     ring_ssim = _finite_number(region.get("visible_ring_ssim", 0), "visible_ring_ssim")
+    ring_structural_ssim = _finite_number(
+        region.get("visible_ring_structural_ssim", 0),
+        "visible_ring_structural_ssim",
+    )
     if consensus_ssim < t["min_consensus_ssim"]:
         reasons.append("DONOR_CONSENSUS_SSIM_LOW")
     if consensus_mae > t["max_consensus_mae"]:
