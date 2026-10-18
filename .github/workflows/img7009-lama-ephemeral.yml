@@ -1,4 +1,4 @@
-name: IMG7009 LaMa Multipass Ephemeral
+name: IMG7009 MIGAN Multipass Ephemeral
 
 on:
   push:
@@ -26,13 +26,13 @@ jobs:
         env:
           SOURCE_URL: https://at.adobe.com/qHXvwbRKlMI1pFDM
           SOURCE_SHA256: 48ffd0b05fd39e233a14ce58cb6c7c5e23f65de7a9942c26833839a71e9bf5dc
-          MODEL_URL: https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt
+          MODEL_URL: https://github.com/Sanster/models/releases/download/migan/migan_traced.pt
         run: |
           set -euo pipefail
           mkdir -p /tmp/img7009
           curl -fL --retry 4 --retry-all-errors --connect-timeout 20 "$SOURCE_URL" -o /tmp/img7009/source.jpeg
           echo "$SOURCE_SHA256  /tmp/img7009/source.jpeg" | sha256sum -c -
-          curl -fL --retry 4 --retry-all-errors --connect-timeout 20 "$MODEL_URL" -o /tmp/img7009/big-lama.pt
+          curl -fL --retry 4 --retry-all-errors --connect-timeout 20 "$MODEL_URL" -o /tmp/img7009/migan_traced.pt
           test "$(stat -c%s /tmp/img7009/big-lama.pt)" -gt 1000000
           sha256sum /tmp/img7009/big-lama.pt > /tmp/img7009/model.sha256
 
@@ -44,7 +44,7 @@ jobs:
           python -m pip install --quiet numpy pillow
           python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Run LaMa and hard-lock outside mask
+      - name: Run MIGAN and hard-lock outside mask
         shell: bash
         run: |
           set -euo pipefail
@@ -57,8 +57,8 @@ jobs:
           
           root=Path('/tmp/img7009')
           src_path=root/'source.jpeg'
-          model_path=root/'big-lama.pt'
-          out_path=root/'IMG7009_LaMa_multipass_v2.png'
+          model_path=root/'migan_traced.pt'
+          out_path=root/'IMG7009_MIGAN_multipass_v3.png'
           overlay_path=root/'IMG7009_mask_overlay.png'
           mask_path=root/'mask.png'
           qa_path=root/'qa.json'
@@ -98,18 +98,9 @@ jobs:
           # Load once; run crop-triggered inference so each pass sees nearby structure instead of one 26% hole.
           model=torch.jit.load(str(model_path),map_location='cpu').eval()
           
-          def round_crop(lo,hi,limit,pad=176,mod=8):
-              lo=max(0,lo-pad); hi=min(limit,hi+pad)
-              size=hi-lo
-              rem=size%mod
-              if rem:
-                  grow=mod-rem
-                  add_hi=min(limit-hi,grow)
-                  hi+=add_hi
-                  grow-=add_hi
-                  lo=max(0,lo-grow)
-              return lo,hi
-          
+          def round_crop(lo,hi,limit,pad=128):
+              return max(0,lo-pad), min(limit,hi+pad)
+
           def infer_region(cur,mask,idx):
               ys,xs=np.where(mask)
               if not len(xs): return cur
@@ -117,20 +108,36 @@ jobs:
               y1,y2=round_crop(int(ys.min()),int(ys.max())+1,H)
               crop=cur[y1:y2,x1:x2]
               cm=mask[y1:y2,x1:x2]
-              image=torch.from_numpy(crop.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0)
-              mt=torch.from_numpy(cm.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+              ch,cw=crop.shape[:2]
+
+              # IOPaint MIGAN semantics: local crop, max-size 512, square pad, 4-channel [0.5-mask, erased RGB].
+              side=max(ch,cw)
+              pt=(side-ch)//2; pb=side-ch-pt
+              pl=(side-cw)//2; pr=side-cw-pl
+              padded=np.pad(crop,((pt,pb),(pl,pr),(0,0)),mode='reflect')
+              pm=np.pad(cm.astype(np.uint8),((pt,pb),(pl,pr)),mode='constant')
+              pi=np.array(Image.fromarray(padded,'RGB').resize((512,512),Image.Resampling.LANCZOS),dtype=np.uint8)
+              pmi=np.array(Image.fromarray(pm*255,'L').resize((512,512),Image.Resampling.NEAREST),dtype=np.uint8)>127
+
+              image=torch.from_numpy(pi.astype(np.float32)/255.0*2.0-1.0).permute(2,0,1).unsqueeze(0)
+              mt=torch.from_numpy(pmi.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+              erased=image*(1.0-mt)
+              inp=torch.cat([0.5-mt,erased],dim=1)
               with torch.inference_mode():
-                  pred=model(image,mt)
+                  pred=model(inp)
               if isinstance(pred,(tuple,list)): pred=pred[0]
-              pred=pred[0].permute(1,2,0).detach().cpu().numpy()
-              pred=np.clip(pred*255.0,0,255).round().astype(np.uint8)
+              pred=((pred.permute(0,2,3,1)*127.5+127.5).round().clamp(0,255).to(torch.uint8))[0].cpu().numpy()
+
+              # Back to the exact crop geometry, then accept model pixels only under the original mask.
+              pred_sq=np.array(Image.fromarray(pred,'RGB').resize((side,side),Image.Resampling.BICUBIC),dtype=np.uint8)
+              pred_crop=pred_sq[pt:pt+ch,pl:pl+cw]
               out=cur.copy()
               region=out[y1:y2,x1:x2]
-              region[cm]=pred[cm]
+              region[cm]=pred_crop[cm]
               out[y1:y2,x1:x2]=region
               Image.fromarray(out,'RGB').save(root/f'pass_{idx}.png',compress_level=6,icc_profile=icc)
               return out
-          
+
           cur=src.copy()
           for idx,m in enumerate(masks,1):
               cur=infer_region(cur,m,idx)
@@ -183,7 +190,7 @@ jobs:
         with:
           name: img7009-lama-bounded
           path: |
-            /tmp/img7009/IMG7009_LaMa_multipass_v2.png
+            /tmp/img7009/IMG7009_MIGAN_multipass_v3.png
             /tmp/img7009/IMG7009_mask_overlay.png
             /tmp/img7009/mask.png
             /tmp/img7009/qa.json
