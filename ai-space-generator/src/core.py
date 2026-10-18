@@ -13,7 +13,11 @@ import cv2
 import numpy as np
 from PIL import ExifTags, Image, ImageColor, ImageDraw, ImageEnhance, ImageFilter
 
-from src.validation import composite_mask_only, verify_mask_lock
+from src.validation import (
+    composite_mask_only,
+    validate_edit_protected_contract,
+    verify_mask_lock,
+)
 
 
 @dataclass(frozen=True)
@@ -354,6 +358,14 @@ def generate_design(
     source_icc = background.info.get("icc_profile")
 
     try:
+        if protected_mask is not None:
+            protection_qa = validate_edit_protected_contract(mask, protected_mask)
+            if not protection_qa["hard_gate_pass"]:
+                raise RuntimeError(
+                    "修改區與保護區重疊："
+                    f"edit_protected_overlap_pixels={protection_qa['edit_protected_overlap_pixels']}"
+                )
+
         if use_remote_ai:
             full_prompt = (
                 "Architectural interior design edit. Preserve the original camera angle, geometry, "
