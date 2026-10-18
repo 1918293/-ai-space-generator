@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 from PIL import ExifTags, Image, ImageColor, ImageDraw, ImageEnhance, ImageFilter
 
+from src.validation import composite_mask_only, verify_mask_lock
+
 
 @dataclass(frozen=True)
 class AnalysisResult:
@@ -357,6 +359,24 @@ def generate_design(
         else:
             result = local_transform(background, mask, action, material, colour, prompt, strength)
             mode = "本機示意模式"
+
+        # Final hard lock: the generator is only a candidate producer.
+        # Re-composite against the canonical source so pixels outside the
+        # binary edit mask are guaranteed bit-exact before the PNG is saved.
+        locked = composite_mask_only(
+            np.asarray(background),
+            np.asarray(ensure_rgb(result)),
+            mask,
+        )
+        result = Image.fromarray(locked.astype(np.uint8, copy=False), mode="RGB")
+        lock_qa = verify_mask_lock(background, result, mask)
+        if not lock_qa["hard_lock_pass"]:
+            raise RuntimeError(
+                "局部像素鎖定驗證失敗："
+                f"outside_changed_pixels={lock_qa['outside_changed_pixels']}, "
+                f"outside_max_channel_diff={lock_qa['outside_max_channel_diff']}, "
+                f"inside_changed_pixels={lock_qa['inside_changed_pixels']}"
+            )
 
         fd, output_path = tempfile.mkstemp(prefix="ai-space-generator-", suffix=".png")
         os.close(fd)
