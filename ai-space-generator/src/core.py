@@ -347,7 +347,7 @@ def generate_design(
     prompt: str,
     strength: float,
     use_remote_ai: bool,
-    protected_mask: Image.Image | np.ndarray | None = None,
+    protected_mask: Image.Image | np.ndarray | dict[str, Any] | None = None,
 ) -> tuple[Image.Image | None, tuple[Image.Image, Image.Image] | None, str, str | None]:
     background, mask = mask_from_editor(editor_value)
     if background is None or mask is None:
@@ -358,8 +358,17 @@ def generate_design(
     source_icc = background.info.get("icc_profile")
 
     try:
-        if protected_mask is not None:
-            protection_qa = validate_edit_protected_contract(mask, protected_mask)
+        normalized_protected_mask: Image.Image | np.ndarray | None = protected_mask
+        if isinstance(protected_mask, dict):
+            _, normalized_protected_mask = mask_from_editor(protected_mask)
+            if (
+                normalized_protected_mask is not None
+                and not np.any(np.asarray(normalized_protected_mask) > 8)
+            ):
+                normalized_protected_mask = None
+
+        if normalized_protected_mask is not None:
+            protection_qa = validate_edit_protected_contract(mask, normalized_protected_mask)
             if not protection_qa["hard_gate_pass"]:
                 raise RuntimeError(
                     "修改區與保護區重疊："
@@ -390,7 +399,7 @@ def generate_design(
         result = Image.fromarray(locked.astype(np.uint8, copy=False), mode="RGB")
         if source_icc:
             result.info["icc_profile"] = source_icc
-        lock_qa = verify_mask_lock(background, result, mask, protected_mask)
+        lock_qa = verify_mask_lock(background, result, mask, normalized_protected_mask)
         if not lock_qa["hard_lock_pass"]:
             raise RuntimeError(
                 "局部像素鎖定驗證失敗："
