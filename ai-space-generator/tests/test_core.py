@@ -94,13 +94,18 @@ def test_generate_design_preserves_source_icc_profile_and_dimensions():
         assert saved.info.get("icc_profile") == source_icc
 
 
-def test_generate_design_rejects_protected_mask_overlap_before_generation(monkeypatch):
+def test_generate_design_rejects_protected_editor_overlap_before_generation(monkeypatch):
     background = Image.new("RGB", (32, 32), "white")
     layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
     ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
 
-    protected = Image.new("L", background.size, 0)
-    ImageDraw.Draw(protected).point((15, 15), fill=255)
+    protected_layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(protected_layer).point((15, 15), fill=(0, 255, 0, 255))
+    protected_editor = {
+        "background": background,
+        "layers": [protected_layer],
+        "composite": background,
+    }
 
     def must_not_generate(*args, **kwargs):
         raise AssertionError("generator must not run when edit/protected masks overlap")
@@ -115,7 +120,7 @@ def test_generate_design_rejects_protected_mask_overlap_before_generation(monkey
         "oak",
         1.0,
         False,
-        protected,
+        protected_editor,
     )
 
     assert result is None
@@ -123,3 +128,29 @@ def test_generate_design_rejects_protected_mask_overlap_before_generation(monkey
     assert output_path is None
     assert "生成失敗" in status
     assert "edit_protected_overlap_pixels=1" in status
+
+
+def test_generate_design_accepts_blank_protected_editor():
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+    blank_protected_editor = {
+        "background": background,
+        "layers": [],
+        "composite": background,
+    }
+
+    result, _, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+        blank_protected_editor,
+    )
+
+    assert result is not None
+    assert output_path is not None
+    assert "完成" in status
