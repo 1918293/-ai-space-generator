@@ -92,3 +92,29 @@ def test_generate_design_preserves_source_icc_profile_and_dimensions():
     with Image.open(output_path) as saved:
         assert saved.size == background.size
         assert saved.info.get("icc_profile") == source_icc
+
+
+def test_generate_design_rejects_protected_mask_overlap():
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+
+    protected = Image.new("L", background.size, 0)
+    ImageDraw.Draw(protected).point((15, 15), fill=255)
+
+    result, comparison, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+        protected,
+    )
+
+    assert result is None
+    assert comparison is None
+    assert output_path is None
+    assert "生成失敗" in status
+    assert "edit_protected_overlap_pixels=1" in status
