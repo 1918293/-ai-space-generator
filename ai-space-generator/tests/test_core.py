@@ -54,6 +54,16 @@ def test_generate_design_restores_low_alpha_pixels_outside_binary_edit_mask(tmp_
     assert result.getpixel((10, 10)) == (255, 255, 255)
     assert result.getpixel((11, 11)) != (255, 255, 255)
 
+    # Delivery-layer readback: PNG encoding must not introduce any
+    # out-of-mask pixel drift after the in-memory hard lock passes.
+    allowed = layer_array[..., 3] > 8
+    source_array = np.asarray(background)
+    with Image.open(output_path) as saved:
+        saved_array = np.asarray(saved.convert("RGB"))
+    changed = np.any(saved_array != source_array, axis=2)
+    assert int(np.count_nonzero(changed & ~allowed)) == 0
+    assert int(np.count_nonzero(changed & allowed)) > 0
+
 
 def test_generate_design_preserves_source_icc_profile_and_dimensions():
     background = Image.new("RGB", (40, 30), "white")
