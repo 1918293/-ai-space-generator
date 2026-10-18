@@ -54,3 +54,31 @@ def test_generate_design_restores_low_alpha_pixels_outside_binary_edit_mask(tmp_
     assert result.getpixel((10, 10)) == (255, 255, 255)
     assert result.getpixel((11, 11)) != (255, 255, 255)
 
+
+def test_generate_design_preserves_source_icc_profile_and_dimensions():
+    background = Image.new("RGB", (40, 30), "white")
+    source_icc = b"hao-test-icc-profile"
+    background.info["icc_profile"] = source_icc
+
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((12, 8, 24, 20), fill=(255, 0, 0, 255))
+
+    result, _, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+    )
+
+    assert result is not None
+    assert output_path is not None
+    assert "完成" in status
+    assert result.size == background.size
+    assert result.info.get("icc_profile") == source_icc
+
+    with Image.open(output_path) as saved:
+        assert saved.size == background.size
+        assert saved.info.get("icc_profile") == source_icc
