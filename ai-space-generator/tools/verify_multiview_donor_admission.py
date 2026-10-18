@@ -20,7 +20,8 @@ DEFAULT_THRESHOLDS = {
     "min_donor_count": 2,
     "min_consensus_ssim": 0.85,
     "max_consensus_mae": 18.0,
-    "min_visible_ring_ssim": 0.80,\n    "min_visible_ring_ssim_per_donor": 0.91,\n    "min_visible_ring_ssim_per_donor": 0.91,
+    "min_visible_ring_ssim": 0.80,
+    "min_visible_ring_ssim_per_donor": 0.91,
     "min_held_out_precision": 0.99,
     "min_fresh_holdout_admissions": 3,
     "min_fresh_holdout_targets_with_admissions": 2,
@@ -150,23 +151,42 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
     donors = region.get("donors")
     if not isinstance(donors, list):
         raise ValueError("region.donors must be a list")
+
     pair_results = [assess_pair(d, t) for d in donors]
     reasons = list(camera_result["reasons"])
-    if len(donors) < t["min_donor_count"]: reasons.append("INSUFFICIENT_DONOR_COUNT")
-    if any(not r["pass"] for r in pair_results): reasons.append("DONOR_GEOMETRY_REJECTED")
+
+    donor_ring_ssim: list[float] = []
+    for i, donor in enumerate(donors):
+        score = _finite_number(
+            donor.get("visible_ring_ssim", 0),
+            f"donors[{i}].visible_ring_ssim",
+        )
+        donor_ring_ssim.append(score)
+        if score < t["min_visible_ring_ssim_per_donor"]:
+            reasons.append("DONOR_VISIBLE_RING_SSIM_BELOW_MIN")
+
+    if len(donors) < t["min_donor_count"]:
+        reasons.append("INSUFFICIENT_DONOR_COUNT")
+    if any(not r["pass"] for r in pair_results):
+        reasons.append("DONOR_GEOMETRY_REJECTED")
 
     consensus_ssim = _finite_number(region.get("consensus_ssim", 0), "consensus_ssim")
     consensus_mae = _finite_number(region.get("consensus_mae", float("inf")), "consensus_mae")
     ring_ssim = _finite_number(region.get("visible_ring_ssim", 0), "visible_ring_ssim")
-    if consensus_ssim < t["min_consensus_ssim"]: reasons.append("DONOR_CONSENSUS_SSIM_LOW")
-    if consensus_mae > t["max_consensus_mae"]: reasons.append("DONOR_CONSENSUS_MAE_HIGH")
-    if ring_ssim < t["min_visible_ring_ssim"]: reasons.append("VISIBLE_RING_SSIM_LOW")
+    if consensus_ssim < t["min_consensus_ssim"]:
+        reasons.append("DONOR_CONSENSUS_SSIM_LOW")
+    if consensus_mae > t["max_consensus_mae"]:
+        reasons.append("DONOR_CONSENSUS_MAE_HIGH")
+    if ring_ssim < t["min_visible_ring_ssim"]:
+        reasons.append("VISIBLE_RING_SSIM_LOW")
+
     return {
         "decision": "ALLOW_RECONSTRUCTION_CANDIDATE" if not reasons else "HOLD",
         "pass": not reasons,
         "reasons": reasons,
         "target_camera_result": camera_result,
-        "pair_results": pair_results,\n        "donor_visible_ring_ssim": donor_ring_ssim,\n        "donor_visible_ring_ssim": donor_ring_ssim,
+        "pair_results": pair_results,
+        "donor_visible_ring_ssim": donor_ring_ssim,
         "semantic_or_naturalness_verified": False,
         "final_delivery_authorized": False,
     }
