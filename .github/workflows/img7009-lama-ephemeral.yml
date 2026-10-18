@@ -1,0 +1,152 @@
+name: IMG7009 LaMa Ephemeral
+
+on:
+  push:
+    branches:
+      - tmp/img7009-lama-20261018
+    paths:
+      - .github/workflows/img7009-lama-ephemeral.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inpaint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download canonical source and LaMa model
+        shell: bash
+        env:
+          SOURCE_URL: https://at.adobe.com/qHXvwbRKlMI1pFDM
+          SOURCE_SHA256: 48ffd0b05fd39e233a14ce58cb6c7c5e23f65de7a9942c26833839a71e9bf5dc
+          MODEL_URL: https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/img7009
+          curl -fL --retry 4 --retry-all-errors --connect-timeout 20 "$SOURCE_URL" -o /tmp/img7009/source.jpeg
+          echo "$SOURCE_SHA256  /tmp/img7009/source.jpeg" | sha256sum -c -
+          curl -fL --retry 4 --retry-all-errors --connect-timeout 20 "$MODEL_URL" -o /tmp/img7009/big-lama.pt
+          test "$(stat -c%s /tmp/img7009/big-lama.pt)" -gt 1000000
+          sha256sum /tmp/img7009/big-lama.pt > /tmp/img7009/model.sha256
+
+      - name: Materialize authoritative editable mask
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/img7009/mask.b64 <<'EOF'
+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
+EOF
+          base64 -d /tmp/img7009/mask.b64 > /tmp/img7009/mask.png
+          echo "3c3ca98e2740fe8cc754992d71ecbb777127bfc206c8551ee23a56fc582afd79  /tmp/img7009/mask.png" | sha256sum -c -
+
+      - name: Install CPU inference dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy pillow
+          python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run LaMa and hard-lock outside mask
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/img7009/run.py <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          import numpy as np
+          import torch
+          from PIL import Image
+
+          root=Path('/tmp/img7009')
+          src_path=root/'source.jpeg'
+          mask_path=root/'mask.png'
+          model_path=root/'big-lama.pt'
+          out_path=root/'IMG7009_LaMa_masked_v1.png'
+          overlay_path=root/'IMG7009_mask_overlay.png'
+          qa_path=root/'qa.json'
+
+          src_pil=Image.open(src_path)
+          icc=src_pil.info.get('icc_profile')
+          src=np.array(src_pil.convert('RGB'),dtype=np.uint8)
+          mask=np.array(Image.open(mask_path).convert('L'),dtype=np.uint8)>0
+          if src.shape[:2] != mask.shape:
+              raise SystemExit(f'size mismatch: {src.shape[:2]} vs {mask.shape}')
+          h,w=mask.shape
+          if h%8 or w%8:
+              raise SystemExit('LaMa input dimensions must be divisible by 8 for this bounded run')
+
+          image=torch.from_numpy(src.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0)
+          m=torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+
+          model=torch.jit.load(str(model_path),map_location='cpu').eval()
+          with torch.inference_mode():
+              pred=model(image,m)
+          if isinstance(pred,(tuple,list)):
+              pred=pred[0]
+          pred=pred[0].permute(1,2,0).detach().cpu().numpy()
+          pred=np.clip(pred*255.0,0,255).round().astype(np.uint8)
+
+          final=src.copy()
+          final[mask]=pred[mask]
+          save_kw={'compress_level':6}
+          if icc:
+              save_kw['icc_profile']=icc
+          Image.fromarray(final,'RGB').save(out_path,**save_kw)
+
+          decoded=np.array(Image.open(out_path).convert('RGB'),dtype=np.uint8)
+          changed=np.any(decoded!=src,axis=2)
+          outside=~mask
+          diff=np.abs(decoded.astype(np.int16)-src.astype(np.int16))
+          qa={
+              'source_sha256':hashlib.sha256(src_path.read_bytes()).hexdigest(),
+              'mask_sha256':hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+              'model_sha256':hashlib.sha256(model_path.read_bytes()).hexdigest(),
+              'final_sha256':hashlib.sha256(out_path.read_bytes()).hexdigest(),
+              'width':w,'height':h,
+              'mask_pixels':int(mask.sum()),
+              'changed_pixels':int(changed.sum()),
+              'inside_changed_pixels':int((changed&mask).sum()),
+              'outside_changed_pixels':int((changed&outside).sum()),
+              'outside_max_channel_difference':int(diff[outside].max(initial=0)),
+              'icc_source_bytes':len(icc or b''),
+              'icc_final_bytes':len(Image.open(out_path).info.get('icc_profile') or b''),
+          }
+          qa['technical_preservation_pass']=(
+              qa['outside_changed_pixels']==0
+              and qa['outside_max_channel_difference']==0
+              and qa['width']==1152 and qa['height']==1536
+              and qa['icc_source_bytes']==qa['icc_final_bytes']
+              and qa['inside_changed_pixels']>0
+          )
+          qa_path.write_text(json.dumps(qa,indent=2),encoding='utf-8')
+          if not qa['technical_preservation_pass']:
+              raise SystemExit(json.dumps(qa))
+
+          overlay=src.astype(np.float32)
+          red=np.zeros_like(overlay); red[...,0]=255
+          overlay[mask]=(overlay[mask]*0.55+red[mask]*0.45)
+          Image.fromarray(np.clip(overlay,0,255).astype(np.uint8),'RGB').save(overlay_path,compress_level=6)
+          print(json.dumps(qa,indent=2))
+          PY
+          python /tmp/img7009/run.py
+
+      - name: Upload bounded result
+        uses: actions/upload-artifact@v4
+        with:
+          name: img7009-lama-bounded
+          path: |
+            /tmp/img7009/IMG7009_LaMa_masked_v1.png
+            /tmp/img7009/IMG7009_mask_overlay.png
+            /tmp/img7009/mask.png
+            /tmp/img7009/qa.json
+            /tmp/img7009/model.sha256
+          if-no-files-found: error
+          retention-days: 1
