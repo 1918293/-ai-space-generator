@@ -21,6 +21,26 @@ def _binary_mask(mask: Image.Image | np.ndarray) -> np.ndarray:
     return array > 8
 
 
+def validate_edit_protected_contract(
+    edit_mask: Image.Image | np.ndarray,
+    protected_mask: Image.Image | np.ndarray,
+) -> dict[str, Any]:
+    """Reject any authorization overlap between editable and protected pixels."""
+    edit = _binary_mask(edit_mask)
+    protected = _binary_mask(protected_mask)
+
+    if edit.shape != protected.shape:
+        raise ValueError("Edit and Protected masks must have identical dimensions.")
+
+    overlap_pixels = int(np.count_nonzero(edit & protected))
+    return {
+        "edit_mask_pixels": int(np.count_nonzero(edit)),
+        "protected_mask_pixels": int(np.count_nonzero(protected)),
+        "edit_protected_overlap_pixels": overlap_pixels,
+        "hard_gate_pass": overlap_pixels == 0,
+    }
+
+
 def validate_object_role_contract(
     edit_mask: Image.Image | np.ndarray,
     protected_mask: Image.Image | np.ndarray,
