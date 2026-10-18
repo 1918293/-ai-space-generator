@@ -39,7 +39,7 @@ def _strong_camera():
 
 
 def _strong_region():
-    return {"target_camera": _strong_camera(), "donors": [_strong_pair_metrics(), _strong_pair_metrics()], "consensus_ssim": 0.92, "consensus_mae": 7.0, "visible_ring_ssim": 0.91}
+    return {"target_camera": _strong_camera(), "donors": [_strong_pair_metrics(), _strong_pair_metrics()], "consensus_ssim": 0.92, "consensus_mae": 7.0, "visible_ring_ssim": 0.91, "visible_ring_structural_ssim": 0.95}
 
 
 def test_planar_estimator_passes_high_overlap_visible_only_control():
@@ -136,3 +136,24 @@ def test_multiple_independent_fresh_admissions_only_become_review_eligible():
 def test_nonfinite_camera_quality_fails_closed(bad):
     with pytest.raises(ValueError, match="finite"):
         mod.assess_target_camera({"incremental_pnp_inlier_ratio": bad})
+
+
+def test_gate_v3_rejects_weak_visible_ring_structure():
+    region = _strong_region()
+    region["visible_ring_structural_ssim"] = 0.88
+    qa = mod.assess_region(region)
+    assert qa["pass"] is False
+    assert "VISIBLE_RING_STRUCTURAL_SSIM_LOW" in qa["reasons"]
+
+
+def test_gate_v3_component2_false_positive_keeps_experiment_hold():
+    summary = {
+        "held_out_precision": 0.8,
+        "fresh_holdout_admissions": 5,
+        "fresh_holdout_targets_with_admissions": 3,
+        "fresh_holdout_false_positives": 1,
+    }
+    qa = mod.assess_experiment_summary(summary)
+    assert qa["decision"] == "HOLD_AUTONOMOUS_DONOR_FAIL_CLOSED"
+    assert "FRESH_HOLDOUT_FALSE_POSITIVE" in qa["reasons"]
+    assert qa["workflow_promotion_authorized"] is False
