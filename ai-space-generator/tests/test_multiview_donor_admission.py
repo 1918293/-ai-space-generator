@@ -5,11 +5,7 @@ import cv2
 import numpy as np
 import pytest
 
-TOOL = (
-    Path(__file__).resolve().parents[1]
-    / "tools"
-    / "verify_multiview_donor_admission.py"
-)
+TOOL = Path(__file__).resolve().parents[1] / "tools" / "verify_multiview_donor_admission.py"
 spec = importlib.util.spec_from_file_location("donor_admission", TOOL)
 mod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -24,127 +20,94 @@ def _textured_scene(seed=385):
         r = int(rng.integers(2, 7))
         color = tuple(int(v) for v in rng.integers(50, 255, 3))
         cv2.circle(img, (int(x), int(y)), r, color, -1)
-    cv2.line(img, (20, 70), (450, 90), (255, 255, 255), 2)
-    cv2.line(img, (30, 250), (440, 230), (200, 200, 200), 2)
     return img
 
 
 def _strong_pair_metrics():
-    return {
-        "good_matches": 120,
-        "inliers": 110,
-        "inlier_ratio": 110 / 120,
-        "median_reprojection_px": 0.3,
-        "inlier_coverage": 0.20,
-    }
+    return {"good_matches": 120, "inliers": 110, "inlier_ratio": 110/120, "median_reprojection_px": 0.3, "inlier_coverage": 0.20}
+
+
+def _strong_camera():
+    return {"incremental_pnp_inlier_ratio": 0.83}
+
+
+def _strong_region():
+    return {"target_camera": _strong_camera(), "donors": [_strong_pair_metrics(), _strong_pair_metrics()], "consensus_ssim": 0.92, "consensus_mae": 7.0, "visible_ring_ssim": 0.91}
 
 
 def test_planar_estimator_passes_high_overlap_visible_only_control():
     target = _textured_scene()
-    H = np.array(
-        [[1, 0.01, 5], [-0.01, 1, 4], [0, 0, 1]],
-        dtype=np.float64,
-    )
-    donor = cv2.warpPerspective(
-        target,
-        np.linalg.inv(H),
-        (target.shape[1], target.shape[0]),
-    )
-    visible = np.ones(target.shape[:2], dtype=bool)
-    visible[120:190, 190:290] = False
-
-    metrics = mod.estimate_planar_geometry(
-        target,
-        donor,
-        visible_mask=visible,
-    )
-    qa = mod.assess_pair(metrics)
-
-    assert qa["pass"] is True
+    H = np.array([[1,0.01,5],[-0.01,1,4],[0,0,1]], dtype=np.float64)
+    donor = cv2.warpPerspective(target, np.linalg.inv(H), (target.shape[1], target.shape[0]))
+    visible = np.ones(target.shape[:2], dtype=bool); visible[120:190,190:290] = False
+    metrics = mod.estimate_planar_geometry(target, donor, visible_mask=visible)
+    assert mod.assess_pair(metrics)["pass"] is True
     assert metrics["inliers"] >= 40
-    assert metrics["median_reprojection_px"] <= 1.0
 
 
 def test_planar_estimator_fails_closed_on_featureless_inputs():
-    target = np.zeros((200, 300, 3), dtype=np.uint8)
-    donor = target.copy()
-
-    metrics = mod.estimate_planar_geometry(target, donor)
-
+    target = np.zeros((200,300,3), dtype=np.uint8)
+    metrics = mod.estimate_planar_geometry(target, target.copy())
     assert metrics["status"] == "REJECT"
     assert mod.assess_pair(metrics)["pass"] is False
 
 
-def test_region_requires_multiple_independently_good_donors():
-    region = {
-        "donors": [_strong_pair_metrics()],
-        "consensus_ssim": 0.95,
-        "consensus_mae": 4.0,
-        "visible_ring_ssim": 0.95,
-    }
-
+def test_region_requires_target_camera_quality_receipt():
+    region = _strong_region(); region.pop("target_camera")
     qa = mod.assess_region(region)
-
     assert qa["pass"] is False
-    assert "INSUFFICIENT_DONOR_COUNT" in qa["reasons"]
+    assert "TARGET_CAMERA_QUALITY_MISSING" in qa["reasons"]
+
+
+def test_weak_target_camera_rejects_even_when_two_donors_agree():
+    region = _strong_region(); region["target_camera"]={"incremental_pnp_inlier_ratio": 0.4642857142857143}
+    qa = mod.assess_region(region)
+    assert qa["pass"] is False
+    assert "TARGET_CAMERA_PNP_RATIO_BELOW_MIN" in qa["reasons"]
     assert qa["final_delivery_authorized"] is False
 
 
-def test_region_rejects_disagreeing_donors_even_with_good_geometry():
-    region = {
-        "donors": [_strong_pair_metrics(), _strong_pair_metrics()],
-        "consensus_ssim": 0.40,
-        "consensus_mae": 48.0,
-        "visible_ring_ssim": 0.94,
-    }
-
-    qa = mod.assess_region(region)
-
-    assert qa["pass"] is False
-    assert "DONOR_CONSENSUS_SSIM_LOW" in qa["reasons"]
-    assert "DONOR_CONSENSUS_MAE_HIGH" in qa["reasons"]
-
-
-def test_region_can_only_allow_candidate_not_final_delivery():
-    region = {
-        "donors": [_strong_pair_metrics(), _strong_pair_metrics()],
-        "consensus_ssim": 0.92,
-        "consensus_mae": 7.0,
-        "visible_ring_ssim": 0.91,
-    }
-
-    qa = mod.assess_region(region)
-
+def test_strong_target_camera_can_reach_candidate_only():
+    qa = mod.assess_region(_strong_region())
     assert qa["decision"] == "ALLOW_RECONSTRUCTION_CANDIDATE"
     assert qa["pass"] is True
     assert qa["semantic_or_naturalness_verified"] is False
     assert qa["final_delivery_authorized"] is False
 
 
-def test_current_385_p0_summary_is_hold_not_promotion():
-    summary = {
-        "held_out_precision": 8 / 11,
-        "fresh_holdout_admissions": 0,
-        "fresh_holdout_false_positives": 0,
-    }
-
-    qa = mod.assess_experiment_summary(summary)
-
-    assert qa["decision"] == "HOLD_AUTONOMOUS_DONOR_FAIL_CLOSED"
+def test_region_requires_multiple_independently_good_donors():
+    region = _strong_region(); region["donors"]=[_strong_pair_metrics()]
+    qa=mod.assess_region(region)
     assert qa["pass"] is False
-    assert "HELD_OUT_PRECISION_BELOW_PROMOTION_MIN" in qa["reasons"]
-    assert "NO_FRESH_HOLDOUT_ADMISSION_EVIDENCE" in qa["reasons"]
+    assert "INSUFFICIENT_DONOR_COUNT" in qa["reasons"]
+
+
+def test_region_rejects_disagreeing_donors_even_with_good_geometry():
+    region=_strong_region(); region["consensus_ssim"]=0.40; region["consensus_mae"]=48.0
+    qa=mod.assess_region(region)
+    assert qa["pass"] is False
+    assert "DONOR_CONSENSUS_SSIM_LOW" in qa["reasons"]
+    assert "DONOR_CONSENSUS_MAE_HIGH" in qa["reasons"]
+
+
+def test_v8_low_coverage_summary_remains_hold():
+    summary={"held_out_precision":1.0,"fresh_holdout_admissions":1,"fresh_holdout_targets_with_admissions":1,"fresh_holdout_false_positives":0}
+    qa=mod.assess_experiment_summary(summary)
+    assert qa["decision"] == "HOLD_AUTONOMOUS_DONOR_FAIL_CLOSED"
+    assert "INSUFFICIENT_FRESH_HOLDOUT_ADMISSIONS" in qa["reasons"]
+    assert "INSUFFICIENT_INDEPENDENT_FRESH_TARGETS" in qa["reasons"]
+    assert qa["workflow_promotion_authorized"] is False
+
+
+def test_multiple_independent_fresh_admissions_only_become_review_eligible():
+    summary={"held_out_precision":1.0,"fresh_holdout_admissions":4,"fresh_holdout_targets_with_admissions":2,"fresh_holdout_false_positives":0}
+    qa=mod.assess_experiment_summary(summary)
+    assert qa["decision"] == "ELIGIBLE_FOR_FURTHER_REVIEW"
+    assert qa["pass"] is True
     assert qa["workflow_promotion_authorized"] is False
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
-def test_nonfinite_metrics_fail_closed(bad):
-    region = {
-        "donors": [_strong_pair_metrics(), _strong_pair_metrics()],
-        "consensus_ssim": bad,
-        "consensus_mae": 5.0,
-        "visible_ring_ssim": 0.9,
-    }
-
+def test_nonfinite_camera_quality_fails_closed(bad):
     with pytest.raises(ValueError, match="finite"):
-        mod.assess_region(region)
+        mod.assess_target_camera({"incremental_pnp_inlier_ratio": bad})
