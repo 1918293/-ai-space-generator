@@ -110,6 +110,7 @@ def test_mask_only_composite_is_bit_exact_outside_edit_mask():
     qa = verify_mask_lock(source, result, edit, protected)
 
     assert qa["dimensions_match"] is True
+    assert qa["edit_protected_overlap_pixels"] == 0
     assert qa["outside_changed_pixels"] == 0
     assert qa["outside_max_channel_diff"] == 0
     assert qa["protected_changed_pixels"] == 0
@@ -150,3 +151,21 @@ def test_mask_lock_shape_mismatch_fails_closed():
     with pytest.raises(ValueError, match="matching dimensions"):
         verify_mask_lock(source, candidate[:-1], edit, protected)
 
+
+def test_mask_lock_rejects_protected_edit_overlap_even_when_pixel_unchanged():
+    source, candidate, edit, protected = _pixel_lock_fixture()
+
+    # Authorize one protected pixel inside the edit mask, but keep the
+    # resulting pixel identical to the canonical source at that location.
+    protected = protected.copy()
+    protected[40, 40] = True
+    candidate = candidate.copy()
+    candidate[40, 40] = source[40, 40]
+    result = composite_mask_only(source, candidate, edit)
+
+    qa = verify_mask_lock(source, result, edit, protected)
+
+    assert qa["edit_protected_overlap_pixels"] == 1
+    assert qa["protected_changed_pixels"] == 0
+    assert qa["protected_max_channel_diff"] == 0
+    assert qa["hard_lock_pass"] is False
