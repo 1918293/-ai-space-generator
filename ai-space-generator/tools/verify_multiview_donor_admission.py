@@ -20,7 +20,7 @@ DEFAULT_THRESHOLDS = {
     "min_donor_count": 2,
     "min_consensus_ssim": 0.85,
     "max_consensus_mae": 18.0,
-    "min_visible_ring_ssim": 0.80,\n    "min_visible_ring_ssim_per_donor": 0.91,
+    "min_visible_ring_ssim": 0.80,\n    "min_visible_ring_ssim_per_donor": 0.91,\n    "min_visible_ring_ssim_per_donor": 0.91,
     "min_held_out_precision": 0.99,
     "min_fresh_holdout_admissions": 3,
     "min_fresh_holdout_targets_with_admissions": 2,
@@ -166,7 +166,7 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
         "pass": not reasons,
         "reasons": reasons,
         "target_camera_result": camera_result,
-        "pair_results": pair_results,\n        "donor_visible_ring_ssim": donor_ring_ssim,
+        "pair_results": pair_results,\n        "donor_visible_ring_ssim": donor_ring_ssim,\n        "donor_visible_ring_ssim": donor_ring_ssim,
         "semantic_or_naturalness_verified": False,
         "final_delivery_authorized": False,
     }
