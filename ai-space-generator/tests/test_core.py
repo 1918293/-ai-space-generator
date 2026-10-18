@@ -94,13 +94,18 @@ def test_generate_design_preserves_source_icc_profile_and_dimensions():
         assert saved.info.get("icc_profile") == source_icc
 
 
-def test_generate_design_rejects_protected_mask_overlap():
+def test_generate_design_rejects_protected_mask_overlap_before_generation(monkeypatch):
     background = Image.new("RGB", (32, 32), "white")
     layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
     ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
 
     protected = Image.new("L", background.size, 0)
     ImageDraw.Draw(protected).point((15, 15), fill=255)
+
+    def must_not_generate(*args, **kwargs):
+        raise AssertionError("generator must not run when edit/protected masks overlap")
+
+    monkeypatch.setattr("src.core.local_transform", must_not_generate)
 
     result, comparison, status, output_path = generate_design(
         {"background": background, "layers": [layer], "composite": background},
