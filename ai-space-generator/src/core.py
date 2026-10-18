@@ -23,7 +23,8 @@ class AnalysisResult:
 
 
 def ensure_rgb(image: Image.Image) -> Image.Image:
-    """Return an RGB copy with EXIF orientation applied."""
+    """Return an RGB copy with EXIF orientation applied and ICC profile preserved."""
+    source_icc = image.info.get("icc_profile")
     image = image.copy()
     try:
         from PIL import ImageOps
@@ -31,7 +32,10 @@ def ensure_rgb(image: Image.Image) -> Image.Image:
         image = ImageOps.exif_transpose(image)
     except Exception:
         pass
-    return image.convert("RGB")
+    rgb = image.convert("RGB")
+    if source_icc:
+        rgb.info["icc_profile"] = source_icc
+    return rgb
 
 
 def _rational_to_float(value: Any) -> float:
@@ -346,6 +350,8 @@ def generate_design(
     if not np.any(np.asarray(mask) > 8):
         return None, None, "尚未偵測到筆刷標記。請在照片上塗選要修改的區域。", None
 
+    source_icc = background.info.get("icc_profile")
+
     try:
         if use_remote_ai:
             full_prompt = (
@@ -369,6 +375,8 @@ def generate_design(
             mask,
         )
         result = Image.fromarray(locked.astype(np.uint8, copy=False), mode="RGB")
+        if source_icc:
+            result.info["icc_profile"] = source_icc
         lock_qa = verify_mask_lock(background, result, mask)
         if not lock_qa["hard_lock_pass"]:
             raise RuntimeError(
@@ -380,7 +388,8 @@ def generate_design(
 
         fd, output_path = tempfile.mkstemp(prefix="ai-space-generator-", suffix=".png")
         os.close(fd)
-        result.save(output_path, "PNG")
+        save_options = {"icc_profile": source_icc} if source_icc else {}
+        result.save(output_path, "PNG", **save_options)
         status = (
             f"完成：{mode}。未選取區域維持原圖；結果屬概念示意，不作為施工、測量或結構判斷依據。"
         )
