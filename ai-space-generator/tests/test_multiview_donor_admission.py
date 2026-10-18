@@ -106,6 +106,15 @@ def test_low_donor_ring_structure_rejects_even_when_consensus_is_good():
     assert qa["final_delivery_authorized"] is False
 
 
+def test_missing_donor_ring_structure_fails_closed():
+    region = _strong_region()
+    region["donors"][0].pop("visible_ring_ssim")
+    qa = mod.assess_region(region)
+    assert qa["pass"] is False
+    assert "DONOR_VISIBLE_RING_SSIM_BELOW_MIN" in qa["reasons"]
+
+
+
 def test_v8_low_coverage_summary_remains_hold():
     summary={"held_out_precision":1.0,"fresh_holdout_admissions":1,"fresh_holdout_targets_with_admissions":1,"fresh_holdout_false_positives":0}
     qa=mod.assess_experiment_summary(summary)
