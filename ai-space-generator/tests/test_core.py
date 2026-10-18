@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image, ImageDraw
 
-from src.core import dominant_colours, local_transform, mask_from_editor
+from src.core import dominant_colours, generate_design, local_transform, mask_from_editor
 
 
 def test_dominant_colours_returns_hex():
@@ -30,3 +30,27 @@ def test_local_material_transform_preserves_unmasked_area():
     array = np.asarray(result)
     assert tuple(array[5, 5]) == (255, 255, 255)
     assert tuple(array[40, 40]) != (255, 255, 255)
+
+def test_generate_design_restores_low_alpha_pixels_outside_binary_edit_mask(tmp_path):
+    background = Image.new("RGB", (32, 32), "white")
+    layer_array = np.zeros((32, 32, 4), dtype=np.uint8)
+    layer_array[10, 10] = (255, 0, 0, 4)
+    layer_array[11, 11] = (255, 0, 0, 255)
+    layer = Image.fromarray(layer_array, mode="RGBA")
+
+    result, _, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "替換／加入材質",
+        "木材",
+        "#ffffff",
+        "oak",
+        1.0,
+        False,
+    )
+
+    assert result is not None
+    assert output_path is not None
+    assert "完成" in status
+    assert result.getpixel((10, 10)) == (255, 255, 255)
+    assert result.getpixel((11, 11)) != (255, 255, 255)
+
