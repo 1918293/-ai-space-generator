@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
 
 from src.core import dominant_colours, generate_design, local_transform, mask_from_editor
@@ -162,3 +163,83 @@ def test_app_builds_with_protected_editor_surface():
     assert app.demo is not None
     assert app.editor is not None
     assert app.protected_editor is not None
+
+
+def test_generate_design_rejects_protected_mask_from_different_source(monkeypatch):
+    background = Image.new("RGB", (32, 32), "white")
+    foreign_background = background.copy()
+    foreign_background.putpixel((0, 0), (254, 255, 255))
+    edit_layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(edit_layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+    protected_layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(protected_layer).point((2, 2), fill=(0, 255, 0, 255))
+    called = []
+
+    def must_not_generate(*args, **kwargs):
+        called.append(True)
+        raise AssertionError("foreign-source protection must be rejected before generation")
+
+    monkeypatch.setattr("src.core.local_transform", must_not_generate)
+    result, _, status, path = generate_design(
+        {"background": background, "layers": [edit_layer]},
+        "替換／加入材質", "木材", "#ffffff", "oak", 1.0, False,
+        {"background": foreign_background, "layers": [protected_layer]},
+    )
+    assert called == []
+    assert result is None and path is None
+    assert "source" in status.lower()
+
+
+@pytest.mark.parametrize("component", ["layers", "composite"])
+def test_editor_rejects_misaligned_mask_data(component):
+    background = Image.new("RGB", (32, 32), "white")
+    value = {"background": background, "layers": []}
+    if component == "layers":
+        value["layers"] = [Image.new("RGBA", (16, 32), (255, 0, 0, 255))]
+    else:
+        value["composite"] = Image.new("RGB", (16, 32), "red")
+    with pytest.raises(ValueError, match="dimensions"):
+        mask_from_editor(value)
+
+
+def test_generate_design_withholds_corrupted_saved_png(monkeypatch, tmp_path):
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+    original_save = Image.Image.save
+
+    def corrupt_saved_pixel(image, filename, *args, **kwargs):
+        corrupted = image.copy()
+        corrupted.putpixel((0, 0), (0, 0, 0))
+        return original_save(corrupted, filename, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", corrupt_saved_pixel)
+    result, _, status, path = generate_design(
+        {"background": background, "layers": [layer]},
+        "替換／加入材質", "木材", "#ffffff", "oak", 1.0, False,
+    )
+    assert result is None and path is None
+    assert "readback" in status.lower()
+
+
+def test_generate_design_roundtrips_a_valid_srgb_profile():
+    from pathlib import Path
+    from PIL import ImageCms
+
+    background = Image.new("RGB", (47, 29), "white")
+    icc_profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    background.info["icc_profile"] = icc_profile
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((5, 5, 9, 11), fill=(255, 0, 0, 255))
+    result, _, status, path = generate_design(
+        {"background": background, "layers": [layer]},
+        "替換／加入材質", "木材", "#ffffff", "oak", 1.0, False,
+    )
+    assert result is not None and path is not None
+    try:
+        with Image.open(path) as saved:
+            assert saved.size == background.size
+            assert saved.info["icc_profile"] == icc_profile
+            assert np.array_equal(np.asarray(saved), np.asarray(result))
+    finally:
+        Path(path).unlink(missing_ok=True)

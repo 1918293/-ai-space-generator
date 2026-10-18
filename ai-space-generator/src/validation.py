@@ -9,16 +9,46 @@ VALID_OBJECT_ROLES = {"REMOVE", "PRESERVE_OCCLUDER", "FIXED_STRUCTURE"}
 
 
 def _binary_mask(mask: Image.Image | np.ndarray) -> np.ndarray:
-    """Return a boolean mask without changing the caller's image."""
+    """Return a nonempty, finite, single-channel mask without mutating input.
+
+    Boolean arrays retain their meaning. Numeric masks use the existing > 8
+    threshold; array callers must supply a two-dimensional channel explicitly.
+    """
     if isinstance(mask, Image.Image):
+        original = np.asarray(mask)
+        if original.dtype.kind not in "biuf" or not np.all(np.isfinite(original)):
+            raise ValueError("Mask must contain finite numeric or boolean values.")
         array = np.asarray(mask.convert("L"), dtype=np.uint8)
     else:
         array = np.asarray(mask)
-        if array.ndim == 3:
-            array = np.max(array, axis=2)
+    if array.ndim != 2 or not array.size:
+        raise ValueError("Mask must be a nonempty two-dimensional single-channel array.")
+    if array.dtype.kind not in "biuf" or not np.all(np.isfinite(array)):
+        raise ValueError("Mask must contain finite numeric or boolean values.")
     if array.dtype == np.bool_:
         return array.copy()
     return array > 8
+
+
+def _image_array(image: Image.Image | np.ndarray) -> np.ndarray:
+    """Reject malformed or non-finite image data before comparison/compositing."""
+    array = np.asarray(image)
+    if array.ndim not in (2, 3) or not array.size:
+        raise ValueError("Image must be a nonempty 2-D grayscale or 3-D image array.")
+    if array.dtype.kind not in "biuf" or not np.all(np.isfinite(array)):
+        raise ValueError("Image must contain finite numeric or boolean values.")
+    return array
+
+
+def _absolute_difference(source: np.ndarray, result: np.ndarray) -> np.ndarray:
+    """Subtract without unsigned overflow or truncating fractional differences."""
+    if source.dtype.kind in "iu" and result.dtype.kind in "iu":
+        # Python integers are needed only for 64-bit integer extremes. Ordinary
+        # image buffers use the inexpensive vectorized int64 path.
+        dtype = object if max(source.dtype.itemsize, result.dtype.itemsize) == 8 else np.int64
+    else:
+        dtype = np.result_type(source.dtype, result.dtype, np.float64)
+    return np.abs(source.astype(dtype) - result.astype(dtype))
 
 
 def validate_edit_protected_contract(
@@ -125,14 +155,16 @@ def target_modified_ratio(
     A high changed ratio does not prove that the object was semantically removed.
     The caller must still run target-aware Visual QA or a post-edit segmentation check.
     """
-    src = np.asarray(source.convert("RGB") if isinstance(source, Image.Image) else source)
-    out = np.asarray(result.convert("RGB") if isinstance(result, Image.Image) else result)
+    src = _image_array(source.convert("RGB") if isinstance(source, Image.Image) else source)
+    out = _image_array(result.convert("RGB") if isinstance(result, Image.Image) else result)
     target = _binary_mask(remove_target_mask)
 
     if src.shape != out.shape or src.shape[:2] != target.shape:
         raise ValueError("Source, result, and remove-target mask must have matching dimensions.")
 
-    diff = np.abs(src.astype(np.int16) - out.astype(np.int16))
+    if not np.isfinite(float(threshold)) or float(threshold) < 0:
+        raise ValueError("Target-change threshold must be finite and nonnegative.")
+    diff = _absolute_difference(src, out)
     if diff.ndim == 2:
         delta = diff
     elif diff.ndim == 3:
@@ -158,14 +190,16 @@ def composite_mask_only(
     edit_mask: Image.Image | np.ndarray,
 ) -> np.ndarray:
     """Paste candidate pixels only inside edit_mask; keep all other source pixels bit-exact."""
-    src = np.asarray(source)
-    out = np.asarray(candidate)
+    src = _image_array(source)
+    out = _image_array(candidate)
     edit = _binary_mask(edit_mask)
 
     if src.shape != out.shape or src.shape[:2] != edit.shape:
         raise ValueError("Source, candidate, and edit mask must have matching dimensions.")
     if src.ndim not in (2, 3):
         raise ValueError("Source and candidate must be 2-D grayscale or 3-D image arrays.")
+    if src.dtype != out.dtype:
+        raise ValueError("Source and candidate must have matching image data types.")
 
     composited = src.copy()
     composited[edit] = out[edit]
@@ -179,8 +213,8 @@ def verify_mask_lock(
     protected_mask: Image.Image | np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Verify bit-exact preservation outside edit_mask and inside an optional protected region."""
-    src = np.asarray(source)
-    out = np.asarray(result)
+    src = _image_array(source)
+    out = _image_array(result)
     edit = _binary_mask(edit_mask)
     protected = (
         np.zeros_like(edit, dtype=bool)
@@ -199,8 +233,9 @@ def verify_mask_lock(
     if src.ndim not in (2, 3):
         raise ValueError("Source and result must be 2-D grayscale or 3-D image arrays.")
 
-    diff = np.abs(src.astype(np.int64) - out.astype(np.int64))
-    changed = diff != 0 if diff.ndim == 2 else np.any(diff != 0, axis=2)
+    diff = _absolute_difference(src, out)
+    unequal = src != out
+    changed = unequal if unequal.ndim == 2 else np.any(unequal, axis=2)
 
     outside = ~edit
     edit_protected_overlap_pixels = int(np.count_nonzero(edit & protected))
@@ -208,9 +243,9 @@ def verify_mask_lock(
     protected_changed_pixels = int(np.count_nonzero(changed & protected))
     inside_changed_pixels = int(np.count_nonzero(changed & edit))
 
-    outside_max_channel_diff = int(diff[outside].max()) if np.any(outside) else 0
-    protected_max_channel_diff = int(diff[protected].max()) if np.any(protected) else 0
-    inside_max_channel_diff = int(diff[edit].max()) if np.any(edit) else 0
+    outside_max_channel_diff = np.asarray(diff[outside].max()).item() if np.any(outside) else 0
+    protected_max_channel_diff = np.asarray(diff[protected].max()).item() if np.any(protected) else 0
+    inside_max_channel_diff = np.asarray(diff[edit].max()).item() if np.any(edit) else 0
 
     return {
         "dimensions_match": True,
