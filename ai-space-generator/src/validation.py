@@ -183,6 +183,7 @@ def verify_mask_lock(
     changed = diff != 0 if diff.ndim == 2 else np.any(diff != 0, axis=2)
 
     outside = ~edit
+    edit_protected_overlap_pixels = int(np.count_nonzero(edit & protected))
     outside_changed_pixels = int(np.count_nonzero(changed & outside))
     protected_changed_pixels = int(np.count_nonzero(changed & protected))
     inside_changed_pixels = int(np.count_nonzero(changed & edit))
@@ -194,6 +195,7 @@ def verify_mask_lock(
     return {
         "dimensions_match": True,
         "edit_mask_pixels": int(np.count_nonzero(edit)),
+        "edit_protected_overlap_pixels": edit_protected_overlap_pixels,
         "outside_changed_pixels": outside_changed_pixels,
         "outside_max_channel_diff": outside_max_channel_diff,
         "protected_changed_pixels": protected_changed_pixels,
@@ -201,7 +203,8 @@ def verify_mask_lock(
         "inside_changed_pixels": inside_changed_pixels,
         "inside_max_channel_diff": inside_max_channel_diff,
         "hard_lock_pass": bool(
-            outside_changed_pixels == 0
+            edit_protected_overlap_pixels == 0
+            and outside_changed_pixels == 0
             and outside_max_channel_diff == 0
             and protected_changed_pixels == 0
             and protected_max_channel_diff == 0
