@@ -154,3 +154,11 @@ def test_generate_design_accepts_blank_protected_editor():
     assert result is not None
     assert output_path is not None
     assert "完成" in status
+
+
+def test_app_builds_with_protected_editor_surface():
+    import app
+
+    assert app.demo is not None
+    assert app.editor is not None
+    assert app.protected_editor is not None
