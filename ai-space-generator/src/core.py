@@ -343,6 +343,7 @@ def generate_design(
     prompt: str,
     strength: float,
     use_remote_ai: bool,
+    protected_mask: Image.Image | np.ndarray | None = None,
 ) -> tuple[Image.Image | None, tuple[Image.Image, Image.Image] | None, str, str | None]:
     background, mask = mask_from_editor(editor_value)
     if background is None or mask is None:
@@ -377,12 +378,14 @@ def generate_design(
         result = Image.fromarray(locked.astype(np.uint8, copy=False), mode="RGB")
         if source_icc:
             result.info["icc_profile"] = source_icc
-        lock_qa = verify_mask_lock(background, result, mask)
+        lock_qa = verify_mask_lock(background, result, mask, protected_mask)
         if not lock_qa["hard_lock_pass"]:
             raise RuntimeError(
                 "局部像素鎖定驗證失敗："
+                f"edit_protected_overlap_pixels={lock_qa['edit_protected_overlap_pixels']}, "
                 f"outside_changed_pixels={lock_qa['outside_changed_pixels']}, "
                 f"outside_max_channel_diff={lock_qa['outside_max_channel_diff']}, "
+                f"protected_changed_pixels={lock_qa['protected_changed_pixels']}, "
                 f"inside_changed_pixels={lock_qa['inside_changed_pixels']}"
             )
 
