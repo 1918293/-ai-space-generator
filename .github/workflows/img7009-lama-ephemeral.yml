@@ -1,4 +1,4 @@
-name: IMG7009 LaMa Ephemeral
+name: IMG7009 LaMa Multipass Ephemeral
 
 on:
   push:
@@ -54,86 +54,127 @@ jobs:
           import numpy as np
           import torch
           from PIL import Image, ImageDraw
-
+          
           root=Path('/tmp/img7009')
           src_path=root/'source.jpeg'
-          mask_path=root/'mask.png'
           model_path=root/'big-lama.pt'
-          out_path=root/'IMG7009_LaMa_masked_v1.png'
+          out_path=root/'IMG7009_LaMa_multipass_v2.png'
           overlay_path=root/'IMG7009_mask_overlay.png'
+          mask_path=root/'mask.png'
           qa_path=root/'qa.json'
-
+          
           src_pil=Image.open(src_path)
           icc=src_pil.info.get('icc_profile')
           src=np.array(src_pil.convert('RGB'),dtype=np.uint8)
-
-          # Vectorized from IMG7009_mask_precise_v7.png (4 contours, 58 points).
-          # The vector form avoids storing the source photo or a large binary mask in Git history.
-          polygons=[[[433,1008],[420,1069],[499,1069],[484,1008]],[[748,1023],[705,1138],[705,1175],[699,1176],[708,1303],[753,1457],[877,1493],[879,1496],[873,1535],[1151,1535],[1151,1038],[1020,1043],[1010,953],[923,948],[915,1046],[912,1047],[910,1042],[907,1003],[901,1003],[861,1012],[861,1190],[844,1191],[843,1017],[837,1013],[829,1013]],[[598,903],[582,1202],[678,1194],[652,903]],[[0,791],[0,1535],[367,1535],[372,1465],[373,1464],[388,1472],[392,1472],[407,1365],[407,1355],[391,1258],[390,1281],[340,1281],[339,1256],[317,1255],[317,1208],[311,1208],[294,1212],[291,1211],[281,878],[53,873],[43,1206],[40,1208],[34,1208],[32,1199],[29,791]]]
-          mask_pil=Image.new('L',src_pil.size,0)
-          draw=ImageDraw.Draw(mask_pil)
-          for p in polygons:
-              draw.polygon([tuple(x) for x in p],fill=255)
-          mask_pil.save(mask_path)
-          mask=np.array(mask_pil,dtype=np.uint8)>0
-          if src.shape[:2] != mask.shape:
-              raise SystemExit(f'size mismatch: {src.shape[:2]} vs {mask.shape}')
-          h,w=mask.shape
-          if h%8 or w%8:
-              raise SystemExit('LaMa input dimensions must be divisible by 8 for this bounded run')
-
-          image=torch.from_numpy(src.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0)
-          m=torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-
+          H,W=src.shape[:2]
+          if (W,H)!=(1152,1536):
+              raise SystemExit(f'unexpected source size {(W,H)}')
+          
+          # Five bounded target masks. Coordinates are from the canonical 1152x1536 source.
+          # They intentionally overlap slightly so object edges are not left behind.
+          pass_polygons=[
+            # A: leaning plywood + narrow left-side strips
+            [[0,785],[38,785],[45,855],[48,855],[55,860],[300,858],[308,1248],[332,1255],[330,1295],[0,1308]],
+            # B: loose bags/buckets/cables/baskets on bottom-left floor
+            [[0,1185],[335,1185],[392,1260],[415,1395],[395,1535],[0,1535]],
+            # C: portable aluminium ladder + loose red item beside it
+            [[568,880],[690,880],[700,1220],[560,1225]],
+            # D: stacked sacks / loose bags in right foreground
+            [[720,1015],[890,1005],[985,1100],[1075,1535],[690,1535],[685,1225]],
+            # E: dark portable ladder + temporary table + loose cleaning supplies far right
+            [[880,920],[1151,920],[1151,1385],[850,1385],[855,1045]]
+          ]
+          
+          def make_mask(poly):
+              m=Image.new('L',(W,H),0)
+              d=ImageDraw.Draw(m)
+              d.polygon([tuple(p) for p in poly],fill=255)
+              return np.array(m,dtype=np.uint8)>0
+          
+          masks=[make_mask(p) for p in pass_polygons]
+          union=np.zeros((H,W),dtype=bool)
+          for m in masks: union|=m
+          
+          # Load once; run crop-triggered inference so each pass sees nearby structure instead of one 26% hole.
           model=torch.jit.load(str(model_path),map_location='cpu').eval()
-          with torch.inference_mode():
-              pred=model(image,m)
-          if isinstance(pred,(tuple,list)):
-              pred=pred[0]
-          pred=pred[0].permute(1,2,0).detach().cpu().numpy()
-          pred=np.clip(pred*255.0,0,255).round().astype(np.uint8)
-
-          final=src.copy()
-          final[mask]=pred[mask]
-          save_kw={'compress_level':6}
-          if icc:
-              save_kw['icc_profile']=icc
-          Image.fromarray(final,'RGB').save(out_path,**save_kw)
-
+          
+          def round_crop(lo,hi,limit,pad=176,mod=8):
+              lo=max(0,lo-pad); hi=min(limit,hi+pad)
+              size=hi-lo
+              rem=size%mod
+              if rem:
+                  grow=mod-rem
+                  add_hi=min(limit-hi,grow)
+                  hi+=add_hi
+                  grow-=add_hi
+                  lo=max(0,lo-grow)
+              return lo,hi
+          
+          def infer_region(cur,mask,idx):
+              ys,xs=np.where(mask)
+              if not len(xs): return cur
+              x1,x2=round_crop(int(xs.min()),int(xs.max())+1,W)
+              y1,y2=round_crop(int(ys.min()),int(ys.max())+1,H)
+              crop=cur[y1:y2,x1:x2]
+              cm=mask[y1:y2,x1:x2]
+              image=torch.from_numpy(crop.astype(np.float32)/255.0).permute(2,0,1).unsqueeze(0)
+              mt=torch.from_numpy(cm.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+              with torch.inference_mode():
+                  pred=model(image,mt)
+              if isinstance(pred,(tuple,list)): pred=pred[0]
+              pred=pred[0].permute(1,2,0).detach().cpu().numpy()
+              pred=np.clip(pred*255.0,0,255).round().astype(np.uint8)
+              out=cur.copy()
+              region=out[y1:y2,x1:x2]
+              region[cm]=pred[cm]
+              out[y1:y2,x1:x2]=region
+              Image.fromarray(out,'RGB').save(root/f'pass_{idx}.png',compress_level=6,icc_profile=icc)
+              return out
+          
+          cur=src.copy()
+          for idx,m in enumerate(masks,1):
+              cur=infer_region(cur,m,idx)
+          
+          # Absolute hard lock: regardless of model behavior, bytes outside the union return to canonical source pixels.
+          final=cur.copy()
+          final[~union]=src[~union]
+          Image.fromarray(final,'RGB').save(out_path,compress_level=6,icc_profile=icc)
+          Image.fromarray((union*255).astype(np.uint8),'L').save(mask_path)
+          
           decoded=np.array(Image.open(out_path).convert('RGB'),dtype=np.uint8)
           changed=np.any(decoded!=src,axis=2)
-          outside=~mask
+          outside=~union
           diff=np.abs(decoded.astype(np.int16)-src.astype(np.int16))
           qa={
-              'source_sha256':hashlib.sha256(src_path.read_bytes()).hexdigest(),
-              'mask_sha256':hashlib.sha256(mask_path.read_bytes()).hexdigest(),
-              'model_sha256':hashlib.sha256(model_path.read_bytes()).hexdigest(),
-              'final_sha256':hashlib.sha256(out_path.read_bytes()).hexdigest(),
-              'width':w,'height':h,
-              'mask_pixels':int(mask.sum()),
-              'changed_pixels':int(changed.sum()),
-              'inside_changed_pixels':int((changed&mask).sum()),
-              'outside_changed_pixels':int((changed&outside).sum()),
-              'outside_max_channel_difference':int(diff[outside].max(initial=0)),
-              'icc_source_bytes':len(icc or b''),
-              'icc_final_bytes':len(Image.open(out_path).info.get('icc_profile') or b''),
+            'source_sha256':hashlib.sha256(src_path.read_bytes()).hexdigest(),
+            'mask_sha256':hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            'model_sha256':hashlib.sha256(model_path.read_bytes()).hexdigest(),
+            'final_sha256':hashlib.sha256(out_path.read_bytes()).hexdigest(),
+            'width':W,'height':H,'passes':len(masks),
+            'mask_pixels':int(union.sum()),
+            'changed_pixels':int(changed.sum()),
+            'inside_changed_pixels':int((changed&union).sum()),
+            'outside_changed_pixels':int((changed&outside).sum()),
+            'outside_max_channel_difference':int(diff[outside].max(initial=0)),
+            'icc_source_bytes':len(icc or b''),
+            'icc_final_bytes':len(Image.open(out_path).info.get('icc_profile') or b''),
           }
           qa['technical_preservation_pass']=(
-              qa['outside_changed_pixels']==0
-              and qa['outside_max_channel_difference']==0
-              and qa['width']==1152 and qa['height']==1536
-              and qa['icc_source_bytes']==qa['icc_final_bytes']
-              and qa['inside_changed_pixels']>0
+            qa['outside_changed_pixels']==0 and qa['outside_max_channel_difference']==0
+            and qa['width']==1152 and qa['height']==1536
+            and qa['icc_source_bytes']==qa['icc_final_bytes']
+            and qa['inside_changed_pixels']>0
           )
           qa_path.write_text(json.dumps(qa,indent=2),encoding='utf-8')
           if not qa['technical_preservation_pass']:
               raise SystemExit(json.dumps(qa))
-
+          
           overlay=src.astype(np.float32)
           red=np.zeros_like(overlay); red[...,0]=255
-          overlay[mask]=(overlay[mask]*0.55+red[mask]*0.45)
+          overlay[union]=overlay[union]*0.55+red[union]*0.45
           Image.fromarray(np.clip(overlay,0,255).astype(np.uint8),'RGB').save(overlay_path,compress_level=6)
           print(json.dumps(qa,indent=2))
+          
           PY
           python /tmp/img7009/run.py
 
@@ -142,7 +183,7 @@ jobs:
         with:
           name: img7009-lama-bounded
           path: |
-            /tmp/img7009/IMG7009_LaMa_masked_v1.png
+            /tmp/img7009/IMG7009_LaMa_multipass_v2.png
             /tmp/img7009/IMG7009_mask_overlay.png
             /tmp/img7009/mask.png
             /tmp/img7009/qa.json
