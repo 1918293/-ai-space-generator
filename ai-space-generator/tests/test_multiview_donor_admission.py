@@ -24,7 +24,14 @@ def _textured_scene(seed=385):
 
 
 def _strong_pair_metrics():
-    return {"good_matches": 120, "inliers": 110, "inlier_ratio": 110/120, "median_reprojection_px": 0.3, "inlier_coverage": 0.20, "visible_ring_ssim": 0.95}
+    return {
+        "good_matches": 120,
+        "inliers": 110,
+        "inlier_ratio": 110 / 120,
+        "median_reprojection_px": 0.3,
+        "inlier_coverage": 0.20,
+        "visible_ring_ssim": 0.95,
+    }
 
 
 def _strong_camera():
@@ -88,6 +95,15 @@ def test_region_rejects_disagreeing_donors_even_with_good_geometry():
     assert qa["pass"] is False
     assert "DONOR_CONSENSUS_SSIM_LOW" in qa["reasons"]
     assert "DONOR_CONSENSUS_MAE_HIGH" in qa["reasons"]
+
+
+def test_low_donor_ring_structure_rejects_even_when_consensus_is_good():
+    region = _strong_region()
+    region["donors"][1] = {**_strong_pair_metrics(), "visible_ring_ssim": 0.84}
+    qa = mod.assess_region(region)
+    assert qa["pass"] is False
+    assert "DONOR_VISIBLE_RING_SSIM_BELOW_MIN" in qa["reasons"]
+    assert qa["final_delivery_authorized"] is False
 
 
 def test_v8_low_coverage_summary_remains_hold():
