@@ -1,0 +1,32 @@
+name: TEMP Tiny RoMa Public Dependency Transport
+on:
+  push:
+    branches:
+      - tmp/tiny-roma-transport-20261019-1345
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transport:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download pinned public dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          curl -L --fail --retry 3 --retry-delay 2             -o bundle/tiny_roma_v1_outdoor.pth             https://github.com/Parskatt/storage/releases/download/roma/tiny_roma_v1_outdoor.pth
+          curl -L --fail --retry 3 --retry-delay 2             -o bundle/xfeat.pt             https://raw.githubusercontent.com/verlab/accelerated_features/e92685f57f8318b18725c5c8c0bd28c7fe188d9a/weights/xfeat.pt
+          curl -L --fail --retry 3 --retry-delay 2             -o bundle/RoMa-77f8d68803526dcddfd9b7a46bc76125bdc25f15.tar.gz             https://github.com/Parskatt/RoMa/archive/77f8d68803526dcddfd9b7a46bc76125bdc25f15.tar.gz
+          curl -L --fail --retry 3 --retry-delay 2             -o bundle/XFeat-e92685f57f8318b18725c5c8c0bd28c7fe188d9a.tar.gz             https://github.com/verlab/accelerated_features/archive/e92685f57f8318b18725c5c8c0bd28c7fe188d9a.tar.gz
+          sha256sum bundle/* | tee bundle/SHA256SUMS
+          stat -c '%n %s bytes' bundle/* | tee bundle/SIZES.txt
+      - name: Upload pinned dependency bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiny-roma-public-runtime-bundle
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 7
