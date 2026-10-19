@@ -15,6 +15,8 @@ from PIL import ExifTags, Image, ImageColor, ImageDraw, ImageEnhance, ImageFilte
 
 from src.validation import (
     composite_mask_only,
+    image_binding_sha256,
+    mask_binding_sha256,
     validate_edit_protected_contract,
     validate_target_authority_contract,
     verify_mask_lock,
@@ -366,7 +368,11 @@ def generate_design(
 
         action_key = str(action).lower()
         if "移除" in action_key or "remove" in action_key:
-            target_authority_qa = validate_target_authority_contract(target_authority_receipt)
+            target_authority_qa = validate_target_authority_contract(
+                target_authority_receipt,
+                source_binding_sha256=image_binding_sha256(background),
+                edit_mask_binding_sha256=mask_binding_sha256(mask),
+            )
             if not target_authority_qa["hard_gate_pass"]:
                 raise RuntimeError(
                     f"{target_authority_qa['hold_reason']}: "
