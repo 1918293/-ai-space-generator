@@ -184,9 +184,78 @@ def target_modified_ratio(
         "semantic_removal_verified": False,
     }
 
+def validate_target_authority_contract(
+    receipt: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Require an upstream Current-target authority receipt before removal work.
+
+    This gate deliberately does not infer semantic authority from masks, pixels,
+    or post-edit QA. It only validates that an external authority decision was
+    supplied and bound to a canonical source, unresolved target, and mask.
+    """
+    if receipt is None:
+        return {
+            "hard_gate_pass": False,
+            "hold_reason": "TARGET_AUTHORITY_MISSING",
+            "missing_fields": [
+                "authority_id",
+                "authority_status",
+                "canonical_source_id",
+                "target_id",
+                "target_state",
+                "mask_binding_id",
+            ],
+        }
+    if not isinstance(receipt, dict):
+        raise ValueError("target authority receipt must be a mapping or None.")
+
+    required_text = (
+        "authority_id",
+        "canonical_source_id",
+        "target_id",
+        "mask_binding_id",
+    )
+    missing_fields = [
+        name for name in required_text
+        if not isinstance(receipt.get(name), str) or not receipt.get(name, "").strip()
+    ]
+    authority_status = str(receipt.get("authority_status", "")).strip().upper()
+    target_state = str(receipt.get("target_state", "")).strip().upper()
+    if authority_status != "PASS":
+        missing_fields.append("authority_status")
+    if not target_state:
+        missing_fields.append("target_state")
+
+    hard_gate_pass = bool(
+        not missing_fields
+        and authority_status == "PASS"
+        and target_state == "UNRESOLVED"
+    )
+    hold_reason = None
+    if not hard_gate_pass:
+        hold_reason = (
+            "TARGET_NOT_UNRESOLVED"
+            if not missing_fields and target_state != "UNRESOLVED"
+            else "TARGET_AUTHORITY_MISSING"
+        )
+
+    return {
+        "hard_gate_pass": hard_gate_pass,
+        "hold_reason": hold_reason,
+        "missing_fields": sorted(set(missing_fields)),
+        "authority_status": authority_status or None,
+        "target_state": target_state or None,
+        "authority_id": receipt.get("authority_id"),
+        "canonical_source_id": receipt.get("canonical_source_id"),
+        "target_id": receipt.get("target_id"),
+        "mask_binding_id": receipt.get("mask_binding_id"),
+    }
+
+
 def validate_promotion_contract(
     *,
     technical_preservation_pass: bool,
+    target_authority_pass: bool,
     mask_minimality_pass: bool,
     target_absence_pass: bool,
     local_quality_pass: bool,
@@ -201,6 +270,7 @@ def validate_promotion_contract(
     """
     required = {
         "technical_preservation": technical_preservation_pass,
+        "target_authority": target_authority_pass,
         "mask_minimality": mask_minimality_pass,
         "target_absence": target_absence_pass,
         "local_quality": local_quality_pass,
