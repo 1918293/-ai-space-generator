@@ -16,6 +16,7 @@ from PIL import ExifTags, Image, ImageColor, ImageDraw, ImageEnhance, ImageFilte
 from src.validation import (
     composite_mask_only,
     validate_edit_protected_contract,
+    validate_target_authority_contract,
     verify_mask_lock,
 )
 
@@ -351,6 +352,7 @@ def generate_design(
     strength: float,
     use_remote_ai: bool,
     protected_mask: Image.Image | np.ndarray | dict[str, Any] | None = None,
+    target_authority_receipt: dict[str, Any] | None = None,
 ) -> tuple[Image.Image | None, tuple[Image.Image, Image.Image] | None, str, str | None]:
     output_path: str | None = None
     try:
@@ -361,6 +363,17 @@ def generate_design(
             return None, None, "尚未偵測到筆刷標記。請在照片上塗選要修改的區域。", None
 
         source_icc = background.info.get("icc_profile")
+
+        action_key = str(action).lower()
+        if "移除" in action_key or "remove" in action_key:
+            target_authority_qa = validate_target_authority_contract(target_authority_receipt)
+            if not target_authority_qa["hard_gate_pass"]:
+                raise RuntimeError(
+                    f"{target_authority_qa['hold_reason']}: "
+                    "removal is held before image generation until a Current target "
+                    "authority receipt is supplied."
+                )
+
         normalized_protected_mask: Image.Image | np.ndarray | None = protected_mask
         if isinstance(protected_mask, dict):
             protected_background, normalized_protected_mask = mask_from_editor(protected_mask)
