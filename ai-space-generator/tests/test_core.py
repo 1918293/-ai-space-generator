@@ -95,6 +95,36 @@ def test_generate_design_preserves_source_icc_profile_and_dimensions():
         assert saved.info.get("icc_profile") == source_icc
 
 
+def test_generate_design_holds_remove_without_target_authority_before_generation(monkeypatch):
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+    called = []
+
+    def must_not_generate(*args, **kwargs):
+        called.append(True)
+        raise AssertionError("generator must not run without target authority")
+
+    monkeypatch.setattr("src.core.local_transform", must_not_generate)
+    monkeypatch.setattr("src.core.remote_generate", must_not_generate)
+
+    result, comparison, status, output_path = generate_design(
+        {"background": background, "layers": [layer], "composite": background},
+        "移除物件",
+        "",
+        "#ffffff",
+        "remove selected object",
+        1.0,
+        False,
+    )
+
+    assert called == []
+    assert result is None
+    assert comparison is None
+    assert output_path is None
+    assert "TARGET_AUTHORITY_MISSING" in status
+
+
 def test_generate_design_rejects_protected_editor_overlap_before_generation(monkeypatch):
     background = Image.new("RGB", (32, 32), "white")
     layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
