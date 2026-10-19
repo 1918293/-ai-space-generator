@@ -5,6 +5,7 @@ on:
     branches:
       - fam/contracts-v0.1
       - codex/success-validation-20261018-0557
+      - codex/success-validation-20261018-0557
   pull_request:
     branches:
       - main
@@ -59,6 +60,57 @@ jobs:
       - name: Run legacy application regression surface
         run: python -m pytest tests/test_core.py tests/test_validation.py -q
 
+
+  arniqa-weight-fetch:
+    name: arniqa-weight-fetch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download official ARNIQA weights
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p arniqa-weights
+          curl --fail --location --retry 3 --retry-delay 2 \
+            https://github.com/miccunifi/ARNIQA/releases/download/weights/ARNIQA.pth \
+            -o arniqa-weights/ARNIQA.pth
+          curl --fail --location --retry 3 --retry-delay 2 \
+            https://github.com/miccunifi/ARNIQA/releases/download/weights/regressor_koniq10k.pth \
+            -o arniqa-weights/regressor_koniq10k.pth
+          sha256sum arniqa-weights/ARNIQA.pth arniqa-weights/regressor_koniq10k.pth | tee arniqa-weights/SHA256SUMS
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          files = {}
+          for name in ["ARNIQA.pth", "regressor_koniq10k.pth"]:
+              p = Path("arniqa-weights") / name
+              files[name] = {"size_bytes": p.stat().st_size}
+          manifest = {
+              "schema": "hao-arniqa-weight-bundle-v1",
+              "source_repo": "https://github.com/miccunifi/ARNIQA",
+              "release_tag": "weights",
+              "assets": {
+                  "ARNIQA.pth": {
+                      "url": "https://github.com/miccunifi/ARNIQA/releases/download/weights/ARNIQA.pth",
+                      **files["ARNIQA.pth"],
+                  },
+                  "regressor_koniq10k.pth": {
+                      "url": "https://github.com/miccunifi/ARNIQA/releases/download/weights/regressor_koniq10k.pth",
+                      **files["regressor_koniq10k.pth"],
+                  },
+              },
+          }
+          Path("arniqa-weights/manifest.json").write_text(
+              json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Upload ARNIQA weight bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: arniqa-weight-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arniqa-weights/
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: false
 
   durable-receipt:
     name: durable-receipt
