@@ -1,0 +1,31 @@
+name: TEMP MASt3R Public Preflight
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect official source pins and checkpoint headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/naver/mast3r.git src
+          cd src
+          git checkout f5209afc300cec36239a7ac992263f36847bbba0
+          git submodule update --init --recursive
+          echo "MAST3R_HEAD=$(git rev-parse HEAD)"
+          echo "DUST3R_STATUS=$(git submodule status dust3r)"
+          echo "DUST3R_HEAD=$(git -C dust3r rev-parse HEAD)"
+          cd ..
+          url='https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth'
+          curl -L -sS --fail -D headers.txt -o /dev/null --range 0-0 "$url" || true
+          echo '---HEADERS---'
+          cat headers.txt
+          echo '---SOURCE-SIZES---'
+          du -sh src
+          du -sh src/dust3r
