@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import numpy as np
@@ -184,8 +185,38 @@ def target_modified_ratio(
         "semantic_removal_verified": False,
     }
 
+def image_binding_sha256(image: Image.Image | np.ndarray) -> str:
+    """Return a deterministic digest for runtime source pixels plus ICC bytes."""
+    if isinstance(image, Image.Image):
+        normalized = image.convert("RGB")
+        array = _image_array(normalized)
+        icc = image.info.get("icc_profile") or b""
+    else:
+        array = _image_array(image)
+        icc = b""
+    h = hashlib.sha256()
+    h.update(str(array.shape).encode("ascii"))
+    h.update(array.dtype.str.encode("ascii"))
+    h.update(array.tobytes(order="C"))
+    h.update(len(icc).to_bytes(8, "big"))
+    h.update(icc)
+    return h.hexdigest()
+
+
+def mask_binding_sha256(mask: Image.Image | np.ndarray) -> str:
+    """Return a deterministic digest for the admitted binary edit mask."""
+    binary = _binary_mask(mask)
+    h = hashlib.sha256()
+    h.update(str(binary.shape).encode("ascii"))
+    h.update(np.packbits(binary.reshape(-1), bitorder="big").tobytes())
+    return h.hexdigest()
+
+
 def validate_target_authority_contract(
     receipt: dict[str, Any] | None,
+    *,
+    source_binding_sha256: str | None = None,
+    edit_mask_binding_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Require an upstream Current-target authority receipt before removal work.
 
@@ -204,6 +235,8 @@ def validate_target_authority_contract(
                 "target_id",
                 "target_state",
                 "mask_binding_id",
+                "canonical_source_binding_sha256",
+                "edit_mask_binding_sha256",
             ],
         }
     if not isinstance(receipt, dict):
@@ -214,6 +247,8 @@ def validate_target_authority_contract(
         "canonical_source_id",
         "target_id",
         "mask_binding_id",
+        "canonical_source_binding_sha256",
+        "edit_mask_binding_sha256",
     )
     missing_fields = [
         name for name in required_text
@@ -226,18 +261,28 @@ def validate_target_authority_contract(
     if not target_state:
         missing_fields.append("target_state")
 
+    binding_mismatch = bool(
+        (source_binding_sha256 is not None
+         and receipt.get("canonical_source_binding_sha256") != source_binding_sha256)
+        or (edit_mask_binding_sha256 is not None
+            and receipt.get("edit_mask_binding_sha256") != edit_mask_binding_sha256)
+    )
     hard_gate_pass = bool(
         not missing_fields
         and authority_status == "PASS"
         and target_state == "UNRESOLVED"
+        and not binding_mismatch
     )
     hold_reason = None
     if not hard_gate_pass:
-        hold_reason = (
-            "TARGET_NOT_UNRESOLVED"
-            if not missing_fields and target_state != "UNRESOLVED"
-            else "TARGET_AUTHORITY_MISSING"
-        )
+        if binding_mismatch:
+            hold_reason = "TARGET_AUTHORITY_BINDING_MISMATCH"
+        else:
+            hold_reason = (
+                "TARGET_NOT_UNRESOLVED"
+                if not missing_fields and target_state != "UNRESOLVED"
+                else "TARGET_AUTHORITY_MISSING"
+            )
 
     return {
         "hard_gate_pass": hard_gate_pass,
@@ -249,6 +294,9 @@ def validate_target_authority_contract(
         "canonical_source_id": receipt.get("canonical_source_id"),
         "target_id": receipt.get("target_id"),
         "mask_binding_id": receipt.get("mask_binding_id"),
+        "canonical_source_binding_sha256": receipt.get("canonical_source_binding_sha256"),
+        "edit_mask_binding_sha256": receipt.get("edit_mask_binding_sha256"),
+        "binding_mismatch": binding_mismatch,
     }
 
 
