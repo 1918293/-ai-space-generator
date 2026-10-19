@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - fam/contracts-v0.1
-      - codex/success-validation-20261018-0557
   pull_request:
     branches:
       - main
