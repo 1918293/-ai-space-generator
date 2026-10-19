@@ -6,6 +6,7 @@ from src.validation import (
     composite_mask_only,
     target_modified_ratio,
     validate_promotion_contract,
+    validate_target_authority_contract,
     validate_object_role_contract,
     validate_remove_target_contract,
     verify_mask_lock,
@@ -308,10 +309,48 @@ def test_pil_float_mask_is_validated_before_lossy_grayscale_conversion(value):
     with pytest.raises(ValueError, match="finite"):
         validate_object_role_contract(mask, mask, mask, "REMOVE")
 
+def test_target_authority_contract_holds_when_receipt_missing():
+    qa = validate_target_authority_contract(None)
+    assert qa["hard_gate_pass"] is False
+    assert qa["hold_reason"] == "TARGET_AUTHORITY_MISSING"
+    assert "target_id" in qa["missing_fields"]
+
+
+def test_target_authority_contract_accepts_explicit_unresolved_bound_receipt():
+    qa = validate_target_authority_contract(
+        {
+            "authority_id": "CURRENT-385-IMG6984",
+            "authority_status": "PASS",
+            "canonical_source_id": "IMG6984-SOURCE",
+            "target_id": "IMG6984-UNRESOLVED-OBJECT-01",
+            "target_state": "UNRESOLVED",
+            "mask_binding_id": "MASK-BINDING-01",
+        }
+    )
+    assert qa["hard_gate_pass"] is True
+    assert qa["hold_reason"] is None
+
+
+def test_promotion_contract_holds_when_target_authority_is_missing():
+    qa = validate_promotion_contract(
+        technical_preservation_pass=True,
+        target_authority_pass=False,
+        mask_minimality_pass=True,
+        target_absence_pass=True,
+        local_quality_pass=True,
+        color_profile_pass=True,
+        human_acceptance_pass=True,
+    )
+    assert qa["failed_gates"] == ["target_authority"]
+    assert qa["technical_candidate_pass"] is False
+    assert qa["promotion_allowed"] is False
+
+
 def test_promotion_contract_rejects_img6986_v5_false_pixel_lock_promotion():
     """Asset-derived regression: pixel lock alone must not promote IMG6986 v5."""
     qa = validate_promotion_contract(
         technical_preservation_pass=True,
+        target_authority_pass=True,
         mask_minimality_pass=False,
         target_absence_pass=False,
         local_quality_pass=False,
@@ -335,6 +374,7 @@ def test_promotion_contract_visual_acceptance_cannot_override_strict_failures():
     """Whole-frame visual acceptance stays non-strict when preservation fails."""
     qa = validate_promotion_contract(
         technical_preservation_pass=False,
+        target_authority_pass=True,
         mask_minimality_pass=False,
         target_absence_pass=True,
         local_quality_pass=True,
@@ -350,6 +390,7 @@ def test_promotion_contract_visual_acceptance_cannot_override_strict_failures():
 def test_promotion_contract_keeps_technical_pass_pending_until_human_acceptance():
     qa = validate_promotion_contract(
         technical_preservation_pass=True,
+        target_authority_pass=True,
         mask_minimality_pass=True,
         target_absence_pass=True,
         local_quality_pass=True,
@@ -366,6 +407,7 @@ def test_promotion_contract_keeps_technical_pass_pending_until_human_acceptance(
 def test_promotion_contract_allows_promotion_only_after_all_gates_and_human_acceptance():
     qa = validate_promotion_contract(
         technical_preservation_pass=True,
+        target_authority_pass=True,
         mask_minimality_pass=True,
         target_absence_pass=True,
         local_quality_pass=True,
@@ -383,6 +425,7 @@ def test_promotion_contract_allows_promotion_only_after_all_gates_and_human_acce
     "field,value",
     [
         ("technical_preservation_pass", 1),
+        ("target_authority_pass", "yes"),
         ("mask_minimality_pass", "yes"),
         ("target_absence_pass", None),
         ("local_quality_pass", np.bool_(True)),
@@ -393,6 +436,7 @@ def test_promotion_contract_allows_promotion_only_after_all_gates_and_human_acce
 def test_promotion_contract_rejects_ambiguous_gate_types(field, value):
     kwargs = {
         "technical_preservation_pass": True,
+        "target_authority_pass": True,
         "mask_minimality_pass": True,
         "target_absence_pass": True,
         "local_quality_pass": True,
