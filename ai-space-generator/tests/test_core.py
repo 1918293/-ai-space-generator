@@ -160,6 +160,7 @@ def test_generate_design_holds_forged_target_authority_binding_before_generation
 
 def test_generate_design_accepts_matching_target_authority_binding():
     background = Image.new("RGB", (32, 32), "white")
+    ImageDraw.Draw(background).rectangle((10, 10, 20, 20), fill=(255, 0, 0))
     layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
     ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
     _, admitted_mask = mask_from_editor({"background": background, "layers": [layer]})
