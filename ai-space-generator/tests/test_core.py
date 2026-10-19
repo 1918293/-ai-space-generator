@@ -3,6 +3,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from src.core import dominant_colours, generate_design, local_transform, mask_from_editor
+from src.validation import image_binding_sha256, mask_binding_sha256
 
 
 def test_dominant_colours_returns_hex():
@@ -123,6 +124,64 @@ def test_generate_design_holds_remove_without_target_authority_before_generation
     assert comparison is None
     assert output_path is None
     assert "TARGET_AUTHORITY_MISSING" in status
+
+
+def test_generate_design_holds_forged_target_authority_binding_before_generation(monkeypatch):
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+    _, admitted_mask = mask_from_editor({"background": background, "layers": [layer]})
+    receipt = {
+        "authority_id": "CURRENT-385-CASE",
+        "authority_status": "PASS",
+        "canonical_source_id": "SOURCE",
+        "target_id": "TARGET-01",
+        "target_state": "UNRESOLVED",
+        "mask_binding_id": "MASK-01",
+        "canonical_source_binding_sha256": "0" * 64,
+        "edit_mask_binding_sha256": mask_binding_sha256(admitted_mask),
+    }
+    called = []
+
+    def must_not_generate(*args, **kwargs):
+        called.append(True)
+        raise AssertionError("generator must not run on binding mismatch")
+
+    monkeypatch.setattr("src.core.local_transform", must_not_generate)
+    result, _, status, path = generate_design(
+        {"background": background, "layers": [layer]},
+        "移除物件", "", "#ffffff", "remove", 1.0, False,
+        target_authority_receipt=receipt,
+    )
+    assert called == []
+    assert result is None and path is None
+    assert "TARGET_AUTHORITY_BINDING_MISMATCH" in status
+
+
+def test_generate_design_accepts_matching_target_authority_binding():
+    background = Image.new("RGB", (32, 32), "white")
+    layer = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rectangle((10, 10, 20, 20), fill=(255, 0, 0, 255))
+    _, admitted_mask = mask_from_editor({"background": background, "layers": [layer]})
+    receipt = {
+        "authority_id": "CURRENT-385-CASE",
+        "authority_status": "PASS",
+        "canonical_source_id": "SOURCE",
+        "target_id": "TARGET-01",
+        "target_state": "UNRESOLVED",
+        "mask_binding_id": "MASK-01",
+        "canonical_source_binding_sha256": image_binding_sha256(background),
+        "edit_mask_binding_sha256": mask_binding_sha256(admitted_mask),
+    }
+    result, _, status, path = generate_design(
+        {"background": background, "layers": [layer]},
+        "移除物件", "", "#ffffff", "remove", 1.0, False,
+        target_authority_receipt=receipt,
+    )
+    assert result is not None and path is not None
+    assert "完成" in status
+    from pathlib import Path
+    Path(path).unlink(missing_ok=True)
 
 
 def test_generate_design_rejects_protected_editor_overlap_before_generation(monkeypatch):
