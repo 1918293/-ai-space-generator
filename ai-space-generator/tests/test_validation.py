@@ -4,6 +4,8 @@ from PIL import Image, ImageDraw
 
 from src.validation import (
     composite_mask_only,
+    image_binding_sha256,
+    mask_binding_sha256,
     target_modified_ratio,
     validate_promotion_contract,
     validate_target_authority_contract,
@@ -325,10 +327,44 @@ def test_target_authority_contract_accepts_explicit_unresolved_bound_receipt():
             "target_id": "IMG6984-UNRESOLVED-OBJECT-01",
             "target_state": "UNRESOLVED",
             "mask_binding_id": "MASK-BINDING-01",
+            "canonical_source_binding_sha256": "a" * 64,
+            "edit_mask_binding_sha256": "b" * 64,
         }
     )
     assert qa["hard_gate_pass"] is True
     assert qa["hold_reason"] is None
+
+
+def test_target_authority_contract_rejects_runtime_binding_mismatch():
+    receipt = {
+        "authority_id": "CURRENT-385-IMG6984",
+        "authority_status": "PASS",
+        "canonical_source_id": "IMG6984-SOURCE",
+        "target_id": "IMG6984-UNRESOLVED-OBJECT-01",
+        "target_state": "UNRESOLVED",
+        "mask_binding_id": "MASK-BINDING-01",
+        "canonical_source_binding_sha256": "a" * 64,
+        "edit_mask_binding_sha256": "b" * 64,
+    }
+    qa = validate_target_authority_contract(
+        receipt,
+        source_binding_sha256="c" * 64,
+        edit_mask_binding_sha256="b" * 64,
+    )
+    assert qa["hard_gate_pass"] is False
+    assert qa["hold_reason"] == "TARGET_AUTHORITY_BINDING_MISMATCH"
+    assert qa["binding_mismatch"] is True
+
+
+def test_runtime_binding_digests_change_with_source_icc_or_mask():
+    source = Image.new("RGB", (8, 8), "white")
+    same_pixels_new_icc = source.copy()
+    same_pixels_new_icc.info["icc_profile"] = b"different-profile"
+    mask_a = np.zeros((8, 8), dtype=bool)
+    mask_b = mask_a.copy()
+    mask_b[2, 3] = True
+    assert image_binding_sha256(source) != image_binding_sha256(same_pixels_new_icc)
+    assert mask_binding_sha256(mask_a) != mask_binding_sha256(mask_b)
 
 
 def test_promotion_contract_holds_when_target_authority_is_missing():
