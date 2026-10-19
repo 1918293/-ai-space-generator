@@ -1,0 +1,59 @@
+name: TEMP XFeat Public Dependency Bundle
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-public-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download pinned public XFeat dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          curl -L --fail --retry 2 \
+            -o bundle/accelerated_features-e92685f57f8318b18725c5c8c0bd28c7fe188d9a.zip \
+            https://github.com/verlab/accelerated_features/archive/e92685f57f8318b18725c5c8c0bd28c7fe188d9a.zip
+          curl -L --fail --retry 2 \
+            -o bundle/xfeat.pt \
+            https://raw.githubusercontent.com/verlab/accelerated_features/e92685f57f8318b18725c5c8c0bd28c7fe188d9a/weights/xfeat.pt
+          cat > bundle/DEPENDENCY_MANIFEST.json <<'JSON'
+          {
+            "schema": "hao.xfeat-public-dependency-bundle.v1",
+            "source_repository": "https://github.com/verlab/accelerated_features",
+            "source_commit": "e92685f57f8318b18725c5c8c0bd28c7fe188d9a",
+            "weight_path": "weights/xfeat.pt",
+            "scope": "public dependencies only; no Hao/385 private inputs"
+          }
+          JSON
+          (
+            cd bundle
+            sha256sum accelerated_features-e92685f57f8318b18725c5c8c0bd28c7fe188d9a.zip xfeat.pt DEPENDENCY_MANIFEST.json > SHA256SUMS.txt
+          )
+      - name: Verify bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd bundle
+          sha256sum -c SHA256SUMS.txt
+          python - <<'PY'
+          from pathlib import Path
+          assert Path("xfeat.pt").stat().st_size > 1_000_000
+          assert Path("accelerated_features-e92685f57f8318b18725c5c8c0bd28c7fe188d9a.zip").stat().st_size > 100_000
+          print("XFEAT_PUBLIC_DEPENDENCY_BUNDLE_PASS")
+          PY
+      - name: Upload public dependency bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: xfeat-public-dependency-bundle-e92685f
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
