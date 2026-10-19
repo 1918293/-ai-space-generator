@@ -184,6 +184,48 @@ def target_modified_ratio(
         "semantic_removal_verified": False,
     }
 
+def validate_promotion_contract(
+    *,
+    technical_preservation_pass: bool,
+    mask_minimality_pass: bool,
+    target_absence_pass: bool,
+    local_quality_pass: bool,
+    color_profile_pass: bool,
+    human_acceptance_pass: bool | None = None,
+) -> dict[str, Any]:
+    """Combine independent local-edit gates without letting pixel QA imply acceptance.
+
+    The required machine-verifiable gates must all pass before an artifact can
+    become a technical candidate. Human acceptance is deliberately separate:
+    None means technically admissible but not accepted for promotion.
+    """
+    required = {
+        "technical_preservation": technical_preservation_pass,
+        "mask_minimality": mask_minimality_pass,
+        "target_absence": target_absence_pass,
+        "local_quality": local_quality_pass,
+        "color_profile": color_profile_pass,
+    }
+    if any(type(value) is not bool for value in required.values()):
+        raise ValueError("Promotion gate inputs must be booleans.")
+    if human_acceptance_pass is not None and type(human_acceptance_pass) is not bool:
+        raise ValueError("human_acceptance_pass must be True, False, or None.")
+
+    failed_gates = [name for name, passed in required.items() if not passed]
+    technical_candidate_pass = not failed_gates
+    pending_human_acceptance = technical_candidate_pass and human_acceptance_pass is None
+    production_acceptance_pass = technical_candidate_pass and human_acceptance_pass is True
+
+    return {
+        "required_gates": required,
+        "failed_gates": failed_gates,
+        "technical_candidate_pass": technical_candidate_pass,
+        "human_acceptance_pass": human_acceptance_pass,
+        "pending_human_acceptance": pending_human_acceptance,
+        "production_acceptance_pass": production_acceptance_pass,
+        "promotion_allowed": production_acceptance_pass,
+    }
+
 def composite_mask_only(
     source: Image.Image | np.ndarray,
     candidate: Image.Image | np.ndarray,
