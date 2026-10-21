@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fam/contracts-v0.1
+      - codex/success-validation-20261018-0557
   pull_request:
     branches:
       - main
@@ -107,4 +108,49 @@ jobs:
           path: durable-receipt/receipt.json
           if-no-files-found: error
           retention-days: 30
+          overwrite: false
+
+
+  fetch-bargainnet-weight:
+    name: fetch-bargainnet-weight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify official BargainNet public weight
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bargainnet-weight
+          python - <<'PY'
+          import hashlib, json, urllib.request
+          from pathlib import Path
+
+          url = "https://huggingface.co/BCMIZB/Libcom_pretrained_models/resolve/main/BargainNet.pth"
+          expected = "efebebb3f170a1143ac59e3c2922dc57cafa1832ef3b2c7b54255ecfa4cb6066"
+          out = Path("bargainnet-weight/BargainNet.pth")
+          urllib.request.urlretrieve(url, out)
+          got = hashlib.sha256(out.read_bytes()).hexdigest()
+          if got != expected:
+              raise SystemExit(f"SHA256 mismatch: {got} != {expected}")
+          manifest = {
+              "source": "BCMIZB/Libcom_pretrained_models",
+              "model": "BargainNet.pth",
+              "url": url,
+              "sha256": got,
+              "bytes": out.stat().st_size,
+              "expected_sha256": expected,
+              "private_385_bytes_uploaded": False,
+          }
+          Path("bargainnet-weight/manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(manifest, sort_keys=True))
+          PY
+      - name: Upload verified BargainNet public weight
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bargainnet-public-weight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bargainnet-weight/
+          if-no-files-found: error
+          retention-days: 7
           overwrite: false
