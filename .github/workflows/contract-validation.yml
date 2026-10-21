@@ -156,11 +156,113 @@ jobs:
           )
           print(json.dumps(manifest, sort_keys=True))
           PY
-      - name: Upload DC-ShadowNet SRD public checkpoint
+      - name: Split checkpoint into materializable chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dcshadownet-chunks
+          split -b 64M -d -a 2 dcshadownet-weight/SRD_params_0500000.pt dcshadownet-chunks/part-
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root = Path('dcshadownet-chunks')
+          parts = []
+          for p in sorted(root.glob('part-*')):
+              parts.append({'name': p.name, 'bytes': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()})
+          if len(parts) != 9:
+              raise SystemExit(f'unexpected part count: {len(parts)}')
+          m = json.loads(Path('dcshadownet-weight/manifest.json').read_text(encoding='utf-8'))
+          m['parts'] = parts
+          root.joinpath('chunk_manifest.json').write_text(json.dumps(m, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print(json.dumps({'checkpoint_sha256': m['sha256'], 'checkpoint_bytes': m['bytes'], 'parts': parts}, sort_keys=True))
+          PY
+      - name: Upload DC-ShadowNet chunk manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dcshadownet-srd-public-weight-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dcshadownet-weight/
+          name: dcshadownet-srd-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/chunk_manifest.json
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 00
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-00-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-00
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 01
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-01-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-01
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-02-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-02
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 03
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-03-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-03
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 04
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-04-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-04
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 05
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-05-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-05
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 06
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-06-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-06
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 07
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-07-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-07
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload DC-ShadowNet chunk 08
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dcshadownet-srd-part-08-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dcshadownet-chunks/part-08
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
           overwrite: false
