@@ -5,9 +5,13 @@
   "frozen_donor_rule": "MAX shared_point_count -> MIN image_id; top 2",
   "frozen_target_rule": "MAX tracked_observation_count -> MAX median_track_length -> MIN median_point_error -> MIN image_id",
   "full_archive_download_avoided": true,
+  "head_accept_ranges": "bytes",
+  "head_content_length": "419421847",
+  "head_status": 200,
   "range_bytes_transferred_total": 0,
-  "schema": "south-building-prereg-selection-v2",
+  "resolved_asset_host": "release-assets.githubusercontent.com",
+  "schema": "south-building-prereg-selection-v3",
   "source_authority": "COLMAP 3.11.1 south-building.zip asset_id=213120796",
   "status": "FAIL_TRANSPORT_OR_SOURCE_IDENTITY",
-  "transport": "HTTP_RANGE_ONLY_NO_FULL_ARCHIVE_FALLBACK"
+  "transport": "HEAD_RESOLVE_FINAL_OBJECT_THEN_HTTP_RANGE_ONLY_NO_FULL_ARCHIVE_FALLBACK"
 }
