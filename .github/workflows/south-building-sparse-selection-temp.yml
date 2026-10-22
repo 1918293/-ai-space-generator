@@ -88,7 +88,9 @@ jobs:
                   transferred += len(data)
                   return data, cr
 
-              tail_len = min(131072, EXPECTED_ARCHIVE_BYTES)\n              tail_start = EXPECTED_ARCHIVE_BYTES - tail_len\n              tail, cr = fetch_range(f"{tail_start}-{EXPECTED_ARCHIVE_BYTES - 1}")
+              tail_len = min(131072, EXPECTED_ARCHIVE_BYTES)
+              tail_start = EXPECTED_ARCHIVE_BYTES - tail_len
+              tail, cr = fetch_range(f"{tail_start}-{EXPECTED_ARCHIVE_BYTES - 1}")
               if "/" not in cr:
                   raise RuntimeError("CONTENT_RANGE_TOTAL_MISSING")
               total = int(cr.rsplit("/", 1)[1])
