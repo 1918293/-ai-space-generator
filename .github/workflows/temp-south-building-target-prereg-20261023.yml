@@ -1,4 +1,4 @@
-name: TEMP South Building Shared-Track Reconciliation 2026-10-23
+name: TEMP South Building Exact Sparse Export 2026-10-23
 
 on:
   pull_request:
@@ -13,27 +13,24 @@ permissions:
   contents: read
 
 jobs:
-  reconcile-shared-tracks:
+  exact-sparse-export:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Cross-check shared-track counts from exact sparse bytes
+      - name: Read exact first-party sparse members by HTTP range
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p evidence
+          mkdir -p evidence/sparse
           python - <<'PY'
-          import hashlib, io, json, subprocess, zipfile
-
+          import hashlib, io, json, pathlib, subprocess, zipfile
           URL="https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip"
           TOTAL=419421847
           EXPECTED={
+            "south-building/sparse/cameras.txt":"2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660",
             "south-building/sparse/images.txt":"a9dca725dcbd197ccdaa5fe5c51a8567ade99b0bfbd477f1df080b11f4de8086",
             "south-building/sparse/points3D.txt":"5afb847913a9e141cd025dad70db1da9acbab8523f18890f4676b3c384907923",
           }
-          TARGET=102
-          DONORS=(33,3)
-
           class RF(io.RawIOBase):
             def __init__(self): self.pos=0
             def readable(self): return True
@@ -44,79 +41,33 @@ jobs:
             def read(self,n=-1):
               if self.pos>=TOTAL:return b""
               if n<0:n=TOTAL-self.pos
-              n=min(n,TOTAL-self.pos); start=self.pos; end=start+n-1
+              n=min(n,TOTAL-self.pos)
               if n==0:return b""
-              p=subprocess.run(["curl","-fsSL","--retry","3","--range",f"{start}-{end}",URL],capture_output=True,check=True)
-              if len(p.stdout)!=n: raise RuntimeError((start,end,len(p.stdout),n))
-              self.pos+=n; return p.stdout
-
+              a=self.pos;b=a+n-1
+              p=subprocess.run(["curl","-fsSL","--retry","3","--range",f"{a}-{b}",URL],capture_output=True,check=True)
+              if len(p.stdout)!=n: raise RuntimeError((a,b,len(p.stdout),n))
+              self.pos+=n;return p.stdout
+          receipts={}
           with zipfile.ZipFile(RF()) as z:
-            data={}
-            for name,sha in EXPECTED.items():
-              b=z.read(name); got=hashlib.sha256(b).hexdigest()
-              if got!=sha: raise SystemExit(f"SHA mismatch {name}: {got}")
-              data[name]=b.decode()
-
-          images={}
-          lines=data["south-building/sparse/images.txt"].splitlines()
-          i=0
-          while i<len(lines):
-            line=lines[i].strip()
-            if not line or line.startswith("#"): i+=1; continue
-            meta=line.split(maxsplit=9); iid=int(meta[0]); name=meta[9]
-            i+=1
-            vals=lines[i].split() if i<len(lines) else []
-            triples=[(float(vals[j]),float(vals[j+1]),int(vals[j+2])) for j in range(0,len(vals),3)]
-            images[iid]={"name":name,"triples":triples,"pids":[p for _,_,p in triples if p!=-1]}
-            i+=1
-
-          point_tracks={}
-          for line in data["south-building/sparse/points3D.txt"].splitlines():
-            line=line.strip()
-            if not line or line.startswith("#"): continue
-            t=line.split(); pid=int(t[0]); pairs=[(int(t[j]),int(t[j+1])) for j in range(8,len(t),2)]
-            point_tracks[pid]=pairs
-
-          mismatch=[]
-          checked=0
-          for pid,pairs in point_tracks.items():
-            for iid,p2idx in pairs:
-              checked+=1
-              rec=images.get(iid)
-              if rec is None or p2idx>=len(rec["triples"]) or rec["triples"][p2idx][2]!=pid:
-                mismatch.append([pid,iid,p2idx,None if rec is None or p2idx>=len(rec["triples"]) else rec["triples"][p2idx][2]])
-                if len(mismatch)>=20: break
-            if len(mismatch)>=20: break
-
-          target_set=set(images[TARGET]["pids"])
-          intersection={str(d):len(target_set & set(images[d]["pids"])) for d in DONORS}
-          graph={}
-          for d in DONORS:
-            count=0
-            for pid,pairs in point_tracks.items():
-              ids={iid for iid,_ in pairs}
-              if TARGET in ids and d in ids: count+=1
-            graph[str(d)]=count
-
-          result={
-            "schema":"hao.south-building-shared-track-reconcile.v1",
-            "target":TARGET,
-            "donors":list(DONORS),
-            "image_set_intersection":intersection,
-            "points3D_track_graph":graph,
-            "track_observation_identity_checked":checked,
-            "identity_mismatch_count":len(mismatch),
-            "identity_mismatch_examples":mismatch,
-            "methods_agree":intersection==graph,
-            "source_sha256":EXPECTED,
-          }
-          print(json.dumps(result,sort_keys=True,indent=2))
-          open("evidence/reconciliation.json","w").write(json.dumps(result,sort_keys=True,indent=2)+"\n")
-          if mismatch or intersection!=graph: raise SystemExit("shared-track reconciliation failed")
+            for member,expected in EXPECTED.items():
+              data=z.read(member); sha=hashlib.sha256(data).hexdigest()
+              if sha!=expected: raise SystemExit(f"SHA mismatch {member}: {sha}")
+              info=z.getinfo(member)
+              out=pathlib.Path("evidence/sparse")/pathlib.Path(member).name
+              out.write_bytes(data)
+              receipts[member]={"bytes":len(data),"crc32":f"{info.CRC:08x}","sha256":sha}
+          pathlib.Path("evidence/sparse-receipt.json").write_text(json.dumps({
+            "schema":"hao.south-building-exact-sparse-export.v1",
+            "asset_id":213120796,
+            "published_bytes":TOTAL,
+            "full_archive_downloaded":False,
+            "members":receipts
+          },sort_keys=True,indent=2)+"\n")
+          print(json.dumps(receipts,sort_keys=True))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: south-building-shared-track-reconciliation-20261023
-          path: evidence/reconciliation.json
-          retention-days: 30
+          name: south-building-exact-sparse-20261023
+          path: evidence
+          retention-days: 2
           if-no-files-found: error
