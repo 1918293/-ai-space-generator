@@ -8,6 +8,7 @@ from .execution_control import (
     CompletionClaim,
     ControlDecision,
     EvidenceKind,
+    EvidenceOrigin,
     EvidenceReceipt,
     ExecutionRecord,
     FailureStage,
@@ -50,6 +51,13 @@ class VerificationOutcome:
 
 
 @dataclass(frozen=True)
+class PreExecutionGateOutcome:
+    passed: bool
+    receipts: tuple[EvidenceReceipt, ...] = ()
+    error_code: str = ""
+
+
+@dataclass(frozen=True)
 class ControlledRunResult:
     record: ExecutionRecord
     admission: ControlDecision
@@ -58,6 +66,14 @@ class ControlledRunResult:
 
 class AuthorityPreflight(Protocol):
     def verify_current(self, proposal: ActionProposal) -> AuthorityPreflightOutcome: ...
+
+
+class PreExecutionGateVerifier(Protocol):
+    def verify(
+        self,
+        record: ExecutionRecord,
+        proposal: ActionProposal,
+    ) -> PreExecutionGateOutcome: ...
 
 
 class ToolExecutor(Protocol):
@@ -116,6 +132,117 @@ def apply_authority_preflight(
         ),
     )
     return checked, ControlDecision(True, "AUTHORITY_CURRENT_AT_EXECUTION")
+
+
+def apply_pre_execution_gate_outcome(
+    admitted: ExecutionRecord,
+    proposal: ActionProposal,
+    outcome: PreExecutionGateOutcome,
+) -> tuple[ExecutionRecord, ControlDecision]:
+    if admitted.phase != RunPhase.ADMITTED:
+        return admitted, ControlDecision(
+            False,
+            "PRE_EXECUTION_GATE_REQUIRES_ADMITTED",
+            FailureStage.PLAN,
+        )
+
+    raw_required = tuple(admitted.required_pre_execution_gate_ids)
+    if any(not gate.strip() or gate != gate.strip() for gate in raw_required):
+        blocked = block_run(
+            admitted,
+            stage=FailureStage.POLICY,
+            code="PRE_EXECUTION_GATE_ID_INVALID",
+        )
+        return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+
+    required = set(raw_required)
+    if not required:
+        return admitted, ControlDecision(True, "PRE_EXECUTION_GATE_NOT_REQUIRED")
+
+    if not outcome.passed:
+        blocked = block_run(
+            admitted,
+            stage=FailureStage.VERIFICATION,
+            code=outcome.error_code or "PRE_EXECUTION_GATE_FAILED",
+        )
+        return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+
+    checked = admitted
+    seen: set[str] = set()
+    for receipt in outcome.receipts:
+        if receipt.kind != EvidenceKind.PRE_EXECUTION_GATE_PASS:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_KIND_INVALID",
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+        if not receipt.passed:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_NOT_PASSING",
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+        if receipt.origin != EvidenceOrigin.VERIFIER:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_ORIGIN_INVALID",
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+        if receipt.claim_scope != proposal.action_id:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_SCOPE_MISMATCH",
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+
+        gate_id = receipt.gate_id.strip()
+        if not gate_id or gate_id != receipt.gate_id:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_GATE_ID_INVALID",
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+        if gate_id not in required:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_UNEXPECTED:" + gate_id,
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+        if gate_id in seen:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_DUPLICATE:" + gate_id,
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+
+        try:
+            checked = add_evidence(checked, receipt)
+        except ValueError:
+            blocked = block_run(
+                checked,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_RECEIPT_INVALID",
+            )
+            return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+        seen.add(gate_id)
+
+    missing = sorted(required - seen)
+    if missing:
+        blocked = block_run(
+            checked,
+            stage=FailureStage.VERIFICATION,
+            code="MISSING_PRE_EXECUTION_GATES:" + ",".join(missing),
+        )
+        return blocked, ControlDecision(False, blocked.failure_code, blocked.failure_stage)
+
+    return checked, ControlDecision(True, "PRE_EXECUTION_GATES_VERIFIED")
 
 
 def _post_effect_failure(
@@ -267,6 +394,7 @@ def run_controlled_action(
     executor: ToolExecutor,
     verifier: OutcomeVerifier,
     authority_preflight: AuthorityPreflight | None = None,
+    pre_execution_gate_verifier: PreExecutionGateVerifier | None = None,
     hao_authorized_scopes: Iterable[str] = (),
     close_when_complete: bool = True,
 ) -> ControlledRunResult:
@@ -310,6 +438,39 @@ def run_controlled_action(
         admitted, current_decision = apply_authority_preflight(admitted, proposal, preflight)
         if not current_decision.allowed:
             return ControlledRunResult(admitted, admission, current_decision)
+
+    if admitted.required_pre_execution_gate_ids:
+        if pre_execution_gate_verifier is None:
+            blocked = block_run(
+                admitted,
+                stage=FailureStage.VERIFICATION,
+                code="PRE_EXECUTION_GATE_VERIFIER_REQUIRED",
+            )
+            return ControlledRunResult(
+                blocked,
+                admission,
+                ControlDecision(False, blocked.failure_code, blocked.failure_stage),
+            )
+        try:
+            gate_outcome = pre_execution_gate_verifier.verify(admitted, proposal)
+        except Exception as exc:
+            blocked = block_run(
+                admitted,
+                stage=FailureStage.VERIFICATION,
+                code=f"PRE_EXECUTION_GATE_EXCEPTION:{type(exc).__name__}",
+            )
+            return ControlledRunResult(
+                blocked,
+                admission,
+                ControlDecision(False, blocked.failure_code, blocked.failure_stage),
+            )
+        admitted, gate_decision = apply_pre_execution_gate_outcome(
+            admitted,
+            proposal,
+            gate_outcome,
+        )
+        if not gate_decision.allowed:
+            return ControlledRunResult(admitted, admission, gate_decision)
 
     executing = transition(admitted, RunPhase.EXECUTING)
 
