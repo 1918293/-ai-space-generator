@@ -29,6 +29,7 @@ class TaskExecutionPolicy:
     required_action_authority_refs: tuple[str, ...] = ()
     required_action_tags: tuple[str, ...] = ()
     forbidden_action_tags: tuple[str, ...] = ()
+    required_pre_execution_gate_ids: tuple[str, ...] = ()
 
 
 def _task_policy_fingerprint(policy: TaskExecutionPolicy) -> str:
@@ -36,6 +37,7 @@ def _task_policy_fingerprint(policy: TaskExecutionPolicy) -> str:
         "goal_valid": policy.goal_valid,
         "acceptance_criteria": policy.acceptance_criteria,
         "required_acceptance_gate_ids": policy.required_acceptance_gate_ids,
+        "required_pre_execution_gate_ids": policy.required_pre_execution_gate_ids,
         "hao_acceptance_required": policy.hao_acceptance_required,
         "authority_refs": tuple(sorted(ref.strip() for ref in policy.authority_refs if ref.strip())),
         "authority_stamps": tuple(
@@ -134,6 +136,7 @@ class ControlPlaneGateway:
             acceptance_criteria=policy.acceptance_criteria,
             policy_fingerprint=policy_fingerprint,
             required_acceptance_gate_ids=policy.required_acceptance_gate_ids,
+            required_pre_execution_gate_ids=policy.required_pre_execution_gate_ids,
             hao_acceptance_required=policy.hao_acceptance_required,
             authority_refs=policy.authority_refs,
             authority_stamps=policy.authority_stamps,
