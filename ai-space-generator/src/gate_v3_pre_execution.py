@@ -58,7 +58,7 @@ _TOP_KEYS = frozenset(
 )
 _TARGET_KEYS = frozenset({"name", "sha256", "pnp_ratio"})
 _DONOR_KEYS = frozenset({"name", "sha256"})
-_PATCH_KEYS = frozenset(
+_PATCH_BASE_KEYS = frozenset(
     {
         "center",
         "bbox",
@@ -69,9 +69,10 @@ _PATCH_KEYS = frozenset(
         "plane_normalized_median_dist",
         "support_span",
         "candidate_donors",
-        "consensus",
-        "outside_changed_pixels",
     }
+)
+_PATCH_POST_CONSENSUS_KEYS = frozenset(
+    set(_PATCH_BASE_KEYS) | {"consensus", "outside_changed_pixels"}
 )
 _PATCH_DONOR_KEYS = frozenset(
     {
@@ -300,7 +301,15 @@ class GateV3SourceBoundPreExecutionVerifier:
             raise _mismatch("donors")
 
         patch = _object(root["patch"], "patch")
-        _exact_keys(patch, _PATCH_KEYS, "patch")
+        patch_keys = set(patch)
+        if (
+            patch_keys != set(_PATCH_BASE_KEYS)
+            and patch_keys != set(_PATCH_POST_CONSENSUS_KEYS)
+        ):
+            raise ValueError(
+                "PATCH_STAGE_SCHEMA_INVALID:keys="
+                + ",".join(sorted(patch_keys))
+            )
         _int_list(patch["center"], 2, "patch.center")
         bbox = _int_list(patch["bbox"], 4, "patch.bbox")
         if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
@@ -363,22 +372,33 @@ class GateV3SourceBoundPreExecutionVerifier:
             if ring_ssim < MIN_VISIBLE_RING_SSIM_PER_DONOR:
                 donor_reasons.append(name + ":RING_SSIM_BELOW_MIN")
 
-        consensus = _object(patch["consensus"], "patch.consensus")
-        _exact_keys(consensus, _CONSENSUS_KEYS, "patch.consensus")
-        consensus_donors = _string_list(
-            consensus["donors"],
-            "patch.consensus.donors",
-        )
-        if len(set(consensus_donors)) != len(consensus_donors):
-            raise ValueError("CONSENSUS_DONOR_DUPLICATE")
-        if tuple(consensus_donors) != tuple(candidate_names):
-            raise ValueError("CONSENSUS_DONOR_IDENTITY_MISMATCH")
-        consensus_ssim = _unit(consensus["ssim"], "patch.consensus.ssim")
-        consensus_mae = _nonnegative(consensus["mae"], "patch.consensus.mae")
-        outside_changed = _integer(
-            patch["outside_changed_pixels"],
-            "patch.outside_changed_pixels",
-        )
+        has_consensus = "consensus" in patch
+        has_outside = "outside_changed_pixels" in patch
+        if has_consensus != has_outside:
+            raise ValueError("PATCH_STAGE_FIELDS_INCOMPLETE")
+
+        consensus_ssim: float | None = None
+        consensus_mae: float | None = None
+        outside_changed: int | None = None
+        if has_consensus:
+            consensus = _object(patch["consensus"], "patch.consensus")
+            _exact_keys(consensus, _CONSENSUS_KEYS, "patch.consensus")
+            consensus_donors = _string_list(
+                consensus["donors"],
+                "patch.consensus.donors",
+            )
+            if len(set(consensus_donors)) != len(consensus_donors):
+                raise ValueError("CONSENSUS_DONOR_DUPLICATE")
+            if tuple(consensus_donors) != tuple(candidate_names):
+                raise ValueError("CONSENSUS_DONOR_IDENTITY_MISMATCH")
+            consensus_ssim = _unit(consensus["ssim"], "patch.consensus.ssim")
+            consensus_mae = _nonnegative(consensus["mae"], "patch.consensus.mae")
+            outside_changed = _integer(
+                patch["outside_changed_pixels"],
+                "patch.outside_changed_pixels",
+            )
+        elif len(candidate_names) >= MIN_INDEPENDENT_DONORS:
+            raise ValueError("CONSENSUS_REQUIRED_AFTER_DONOR_STAGE")
 
         reasons: list[str] = []
         if pnp_ratio < MIN_TARGET_PNP_RATIO:
@@ -388,12 +408,13 @@ class GateV3SourceBoundPreExecutionVerifier:
         if len(candidate_names) < MIN_INDEPENDENT_DONORS:
             reasons.append("INDEPENDENT_DONOR_COUNT_BELOW_MIN")
         reasons.extend(donor_reasons)
-        if consensus_ssim < MIN_DONOR_CONSENSUS_SSIM:
-            reasons.append("CONSENSUS_SSIM_BELOW_MIN")
-        if consensus_mae > MAX_DONOR_CONSENSUS_MAE:
-            reasons.append("CONSENSUS_MAE_ABOVE_MAX")
-        if outside_changed != 0:
-            reasons.append("OUTSIDE_MASK_CHANGED")
+        if consensus_ssim is not None:
+            if consensus_ssim < MIN_DONOR_CONSENSUS_SSIM:
+                reasons.append("CONSENSUS_SSIM_BELOW_MIN")
+            if consensus_mae is None or consensus_mae > MAX_DONOR_CONSENSUS_MAE:
+                reasons.append("CONSENSUS_MAE_ABOVE_MAX")
+            if outside_changed != 0:
+                reasons.append("OUTSIDE_MASK_CHANGED")
 
         computed_admitted = not reasons
         claimed_admitted = root["admitted"]
