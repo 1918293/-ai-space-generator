@@ -570,3 +570,31 @@ def test_authority_revision_change_changes_policy_and_decision_identity():
         original.resolution.proposal.authority_snapshot_fingerprint
         != revised.resolution.proposal.authority_snapshot_fingerprint
     )
+
+
+def test_gateway_propagates_pre_execution_gate_policy_and_binds_it_into_decision_identity():
+    class PreExecutionGatePolicyProvider(PolicyProvider):
+        def resolve(self, state):
+            return replace(
+                super().resolve(state),
+                required_pre_execution_gate_ids=("GATE_V3_SOURCE_BOUND",),
+            )
+
+    request = ModelIngressRequest(
+        "RUN-GW-PREEXEC-GATE",
+        1,
+        ModelActionIntent(
+            "INTENT-PREEXEC-GATE",
+            "image_edit",
+            "image.local_edit",
+            expected_state_delta="bounded edit",
+        ),
+    )
+    baseline = ControlPlaneGateway(catalog(), PolicyProvider()).prepare(state(), request)
+    gated = ControlPlaneGateway(catalog(), PreExecutionGatePolicyProvider()).prepare(state(), request)
+
+    assert baseline.record is not None and gated.record is not None
+    assert baseline.record.required_pre_execution_gate_ids == ()
+    assert gated.record.required_pre_execution_gate_ids == ("GATE_V3_SOURCE_BOUND",)
+    assert baseline.record.policy_fingerprint != gated.record.policy_fingerprint
+    assert baseline.record.decision_id != gated.record.decision_id
