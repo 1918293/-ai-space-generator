@@ -161,6 +161,35 @@ def test_gate_v3_rejects_weak_visible_ring_structure():
     assert "VISIBLE_RING_STRUCTURAL_SSIM_LOW" in qa["reasons"]
 
 
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("fresh_holdout_admissions", 3.5),
+        ("fresh_holdout_targets_with_admissions", 2.5),
+        ("fresh_holdout_false_positives", 0.9),
+        ("fresh_holdout_false_positives", -0.1),
+    ],
+)
+def test_experiment_summary_rejects_noninteger_or_negative_counts(field, bad):
+    summary = {
+        "held_out_precision": 1.0,
+        "fresh_holdout_admissions": 4,
+        "fresh_holdout_targets_with_admissions": 2,
+        "fresh_holdout_false_positives": 0,
+    }
+    summary[field] = bad
+    with pytest.raises(ValueError, match="non-negative integer"):
+        mod.assess_experiment_summary(summary)
+
+
+@pytest.mark.parametrize(("field", "bad"), [("good_matches", 40.5), ("inliers", -0.1)])
+def test_pair_rejects_noninteger_or_negative_counts(field, bad):
+    metrics = _strong_pair_metrics()
+    metrics[field] = bad
+    with pytest.raises(ValueError, match="non-negative integer"):
+        mod.assess_pair(metrics)
+
+
 def test_gate_v3_component2_false_positive_keeps_experiment_hold():
     summary = {
         "held_out_precision": 0.8,

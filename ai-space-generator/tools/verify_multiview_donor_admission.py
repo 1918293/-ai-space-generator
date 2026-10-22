@@ -38,6 +38,13 @@ def _finite_number(value: Any, name: str) -> float:
     return value
 
 
+def _nonnegative_integer(value: Any, name: str) -> int:
+    value = _finite_number(value, name)
+    if value < 0 or not value.is_integer():
+        raise ValueError(f"{name} must be a non-negative integer")
+    return int(value)
+
+
 def _binary_mask(mask: np.ndarray | None, shape: tuple[int, int]) -> np.ndarray | None:
     if mask is None:
         return None
@@ -114,8 +121,8 @@ def estimate_planar_geometry(
 def assess_pair(metrics: dict[str, Any], thresholds: dict[str, float] | None = None) -> dict[str, Any]:
     t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     reasons: list[str] = []
-    good = int(_finite_number(metrics.get("good_matches", 0), "good_matches"))
-    inliers = int(_finite_number(metrics.get("inliers", 0), "inliers"))
+    good = _nonnegative_integer(metrics.get("good_matches", 0), "good_matches")
+    inliers = _nonnegative_integer(metrics.get("inliers", 0), "inliers")
     ratio = _finite_number(metrics.get("inlier_ratio", 0), "inlier_ratio")
     coverage = _finite_number(metrics.get("inlier_coverage", 0), "inlier_coverage")
     reproj_raw = metrics.get("median_reprojection_px")
@@ -203,9 +210,9 @@ def assess_experiment_summary(summary: dict[str, Any], thresholds: dict[str, flo
     """Promotion-evidence gate; never authorizes workflow promotion by itself."""
     t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     precision = _finite_number(summary.get("held_out_precision", 0), "held_out_precision")
-    admissions = int(_finite_number(summary.get("fresh_holdout_admissions", 0), "fresh_holdout_admissions"))
-    targets = int(_finite_number(summary.get("fresh_holdout_targets_with_admissions", 0), "fresh_holdout_targets_with_admissions"))
-    false_positives = int(_finite_number(summary.get("fresh_holdout_false_positives", 0), "fresh_holdout_false_positives"))
+    admissions = _nonnegative_integer(summary.get("fresh_holdout_admissions", 0), "fresh_holdout_admissions")
+    targets = _nonnegative_integer(summary.get("fresh_holdout_targets_with_admissions", 0), "fresh_holdout_targets_with_admissions")
+    false_positives = _nonnegative_integer(summary.get("fresh_holdout_false_positives", 0), "fresh_holdout_false_positives")
     reasons: list[str] = []
     if precision < t["min_held_out_precision"]: reasons.append("HELD_OUT_PRECISION_BELOW_PROMOTION_MIN")
     if admissions < t["min_fresh_holdout_admissions"]: reasons.append("INSUFFICIENT_FRESH_HOLDOUT_ADMISSIONS")
