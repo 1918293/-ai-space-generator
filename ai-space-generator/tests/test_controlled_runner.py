@@ -1,9 +1,15 @@
-from src.controlled_runner import ToolOutcome, VerificationOutcome, run_controlled_action
+from src.controlled_runner import (
+    PreExecutionGateOutcome,
+    ToolOutcome,
+    VerificationOutcome,
+    run_controlled_action,
+)
 from src.execution_control import (
     ActionArchetype,
     ActionExternality,
     ActionProposal,
     EvidenceKind,
+    EvidenceOrigin,
     EvidenceReceipt,
     ExecutionRecord,
     FailureStage,
@@ -60,6 +66,34 @@ class CountingVerifier:
                     True,
                     "fake-verifier",
                     claim_scope=proposal.action_id,
+                ),
+            ),
+        )
+
+
+class CountingPreExecutionGateVerifier:
+    def __init__(self, outcome=None, exc=None):
+        self.calls = 0
+        self.outcome = outcome
+        self.exc = exc
+
+    def verify(self, record, proposal):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        if self.outcome is not None:
+            return self.outcome
+        return PreExecutionGateOutcome(
+            True,
+            receipts=(
+                EvidenceReceipt(
+                    "PRE-GATE-1",
+                    EvidenceKind.PRE_EXECUTION_GATE_PASS,
+                    True,
+                    "source-bound-gate-v3",
+                    claim_scope=proposal.action_id,
+                    origin=EvidenceOrigin.VERIFIER,
+                    gate_id="GATE_V3_SOURCE_BOUND",
                 ),
             ),
         )
@@ -282,3 +316,173 @@ def test_side_effect_verification_failure_is_unsynced_to_prevent_duplicate_retry
     assert result.record.phase == RunPhase.UNSYNCED
     assert result.record.failure_code == "READBACK_MISMATCH"
     assert result.record.last_failure_mechanism == "readback_mismatch"
+
+
+def pre_gate_receipt(
+    proposal,
+    *,
+    gate_id="GATE_V3_SOURCE_BOUND",
+    scope=None,
+    origin=EvidenceOrigin.VERIFIER,
+    kind=EvidenceKind.PRE_EXECUTION_GATE_PASS,
+    passed=True,
+    evidence_id="PRE-GATE-TEST",
+):
+    return EvidenceReceipt(
+        evidence_id,
+        kind,
+        passed,
+        "source-bound-gate-v3",
+        claim_scope=proposal.action_id if scope is None else scope,
+        origin=origin,
+        gate_id=gate_id,
+    )
+
+
+def test_required_pre_execution_gate_without_verifier_blocks_before_executor():
+    executor = CountingExecutor()
+    verifier = CountingVerifier()
+    result = run_controlled_action(
+        record(required_pre_execution_gate_ids=("GATE_V3_SOURCE_BOUND",)),
+        read_action(),
+        executor=executor,
+        verifier=verifier,
+    )
+    assert executor.calls == 0
+    assert verifier.calls == 0
+    assert result.record.phase == RunPhase.BLOCKED
+    assert result.record.failure_code == "PRE_EXECUTION_GATE_VERIFIER_REQUIRED"
+
+
+def test_failed_pre_execution_gate_blocks_before_executor():
+    executor = CountingExecutor()
+    verifier = CountingVerifier()
+    gate = CountingPreExecutionGateVerifier(
+        PreExecutionGateOutcome(False, error_code="GATE_V3_REJECTED")
+    )
+    result = run_controlled_action(
+        record(required_pre_execution_gate_ids=("GATE_V3_SOURCE_BOUND",)),
+        read_action(),
+        executor=executor,
+        verifier=verifier,
+        pre_execution_gate_verifier=gate,
+    )
+    assert gate.calls == 1
+    assert executor.calls == 0
+    assert verifier.calls == 0
+    assert result.record.phase == RunPhase.BLOCKED
+    assert result.record.failure_code == "GATE_V3_REJECTED"
+
+
+def test_malformed_pre_execution_gate_receipts_fail_closed_before_executor():
+    proposal = read_action()
+    cases = (
+        (
+            pre_gate_receipt(proposal, scope="OTHER-ACTION"),
+            "PRE_EXECUTION_GATE_RECEIPT_SCOPE_MISMATCH",
+        ),
+        (
+            pre_gate_receipt(proposal, gate_id="OTHER-GATE"),
+            "PRE_EXECUTION_GATE_RECEIPT_UNEXPECTED:OTHER-GATE",
+        ),
+        (
+            pre_gate_receipt(proposal, origin=EvidenceOrigin.RUNTIME),
+            "PRE_EXECUTION_GATE_RECEIPT_ORIGIN_INVALID",
+        ),
+        (
+            pre_gate_receipt(proposal, kind=EvidenceKind.ACCEPTANCE_GATE_PASS),
+            "PRE_EXECUTION_GATE_RECEIPT_KIND_INVALID",
+        ),
+    )
+    for receipt, expected_code in cases:
+        executor = CountingExecutor()
+        verifier = CountingVerifier()
+        gate = CountingPreExecutionGateVerifier(
+            PreExecutionGateOutcome(True, receipts=(receipt,))
+        )
+        result = run_controlled_action(
+            record(required_pre_execution_gate_ids=("GATE_V3_SOURCE_BOUND",)),
+            proposal,
+            executor=executor,
+            verifier=verifier,
+            pre_execution_gate_verifier=gate,
+        )
+        assert executor.calls == 0
+        assert verifier.calls == 0
+        assert result.record.phase == RunPhase.BLOCKED
+        assert result.record.failure_code == expected_code
+
+
+def test_pre_execution_gate_exception_blocks_before_executor():
+    executor = CountingExecutor()
+    verifier = CountingVerifier()
+    gate = CountingPreExecutionGateVerifier(exc=RuntimeError("gate boom"))
+    result = run_controlled_action(
+        record(required_pre_execution_gate_ids=("GATE_V3_SOURCE_BOUND",)),
+        read_action(),
+        executor=executor,
+        verifier=verifier,
+        pre_execution_gate_verifier=gate,
+    )
+    assert executor.calls == 0
+    assert verifier.calls == 0
+    assert result.record.phase == RunPhase.BLOCKED
+    assert result.record.failure_code == "PRE_EXECUTION_GATE_EXCEPTION:RuntimeError"
+
+
+def test_passing_pre_execution_gate_allows_execution_but_does_not_substitute_for_post_effect_acceptance():
+    proposal = read_action()
+    executor = CountingExecutor()
+    gate = CountingPreExecutionGateVerifier()
+    verifier = CountingVerifier(
+        VerificationOutcome(
+            True,
+            receipts=(
+                EvidenceReceipt(
+                    "VERIFY-ONLY",
+                    EvidenceKind.VERIFICATION_PASS,
+                    True,
+                    "post-effect-verifier",
+                    claim_scope=proposal.action_id,
+                    origin=EvidenceOrigin.VERIFIER,
+                ),
+            ),
+        )
+    )
+    result = run_controlled_action(
+        record(required_pre_execution_gate_ids=("GATE_V3_SOURCE_BOUND",)),
+        proposal,
+        executor=executor,
+        verifier=verifier,
+        pre_execution_gate_verifier=gate,
+    )
+    assert gate.calls == 1
+    assert executor.calls == 1
+    assert verifier.calls == 1
+    assert result.record.phase == RunPhase.VERIFIED
+    assert result.completion.allowed is False
+    assert "ACCEPTANCE_GATE_PASS" in result.completion.code
+    assert any(
+        item.kind == EvidenceKind.PRE_EXECUTION_GATE_PASS
+        and item.gate_id == "GATE_V3_SOURCE_BOUND"
+        and item.claim_scope == proposal.action_id
+        for item in result.record.evidence
+    )
+
+
+def test_passing_pre_execution_gate_preserves_existing_success_path_when_post_effect_acceptance_passes():
+    executor = CountingExecutor()
+    verifier = CountingVerifier()
+    gate = CountingPreExecutionGateVerifier()
+    result = run_controlled_action(
+        record(required_pre_execution_gate_ids=("GATE_V3_SOURCE_BOUND",)),
+        read_action(),
+        executor=executor,
+        verifier=verifier,
+        pre_execution_gate_verifier=gate,
+    )
+    assert gate.calls == 1
+    assert executor.calls == 1
+    assert verifier.calls == 1
+    assert result.record.phase == RunPhase.CLOSED
+    assert result.completion.allowed is True
