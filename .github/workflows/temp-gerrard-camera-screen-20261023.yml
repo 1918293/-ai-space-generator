@@ -1,4 +1,4 @@
-name: TEMP Gerrard Hall Camera Contract Screen 2026-10-23
+name: TEMP Person Hall Camera Contract Screen 2026-10-23
 
 on:
   push:
@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Inspect first-party Gerrard Hall camera contract only
+      - name: Inspect first-party Person Hall camera contract only
         shell: bash
         run: |
           set -euo pipefail
@@ -26,7 +26,7 @@ jobs:
           python - <<'PY'
           import hashlib, io, json, re, subprocess, zipfile
 
-          URL="https://github.com/colmap/colmap/releases/download/3.11.1/gerrard-hall.zip"
+          URL="https://github.com/colmap/colmap/releases/download/3.11.1/person-hall.zip"
 
           # Discover final asset size without downloading the archive.
           p=subprocess.run(
@@ -64,7 +64,7 @@ jobs:
                   if len(q.stdout)!=n: raise RuntimeError((a,b,len(q.stdout),n))
                   self.pos+=n; return q.stdout
 
-          result={"schema":"hao.gerrard-camera-contract-screen.v1","url":URL,"asset_bytes":total}
+          result={"schema":"hao.person-camera-contract-screen.v1","url":URL,"asset_bytes":total}
           with zipfile.ZipFile(RF()) as z:
               infos=z.infolist()
               result["entry_count"]=len(infos)
@@ -108,12 +108,12 @@ jobs:
               else:
                   result["all_parsed_cameras_single_fpx_compatible"]=None
                   result["camera_count"]=None
-          open("evidence/gerrard-camera-contract.json","w").write(json.dumps(result,sort_keys=True,indent=2)+"\n")
+          open("evidence/person-camera-contract.json","w").write(json.dumps(result,sort_keys=True,indent=2)+"\n")
           print(json.dumps(result,sort_keys=True,indent=2))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: gerrard-camera-contract-20261023
-          path: evidence/gerrard-camera-contract.json
+          name: person-camera-contract-20261023
+          path: evidence/person-camera-contract.json
           retention-days: 2
           if-no-files-found: error
