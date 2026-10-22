@@ -190,6 +190,100 @@ def test_pair_rejects_noninteger_or_negative_counts(field, bad):
         mod.assess_pair(metrics)
 
 
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("inlier_ratio", -0.1),
+        ("inlier_ratio", 1.1),
+        ("inlier_coverage", 1.1),
+        ("median_reprojection_px", -0.1),
+    ],
+)
+def test_pair_rejects_out_of_domain_metrics(field, bad):
+    metrics = _strong_pair_metrics()
+    metrics[field] = bad
+    with pytest.raises(ValueError):
+        mod.assess_pair(metrics)
+
+
+def test_pair_rejects_inliers_exceeding_good_matches():
+    metrics = _strong_pair_metrics()
+    metrics["good_matches"] = 40
+    metrics["inliers"] = 41
+    with pytest.raises(ValueError, match="cannot exceed"):
+        mod.assess_pair(metrics)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.1])
+def test_target_camera_rejects_out_of_domain_ratio(bad):
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        mod.assess_target_camera({"incremental_pnp_inlier_ratio": bad})
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("consensus_ssim", 1.1),
+        ("consensus_mae", -0.1),
+        ("visible_ring_ssim", 1.1),
+        ("visible_ring_structural_ssim", 1.1),
+    ],
+)
+def test_region_rejects_out_of_domain_metrics(field, bad):
+    region = _strong_region()
+    region[field] = bad
+    with pytest.raises(ValueError):
+        mod.assess_region(region)
+
+
+def test_region_rejects_out_of_domain_donor_ring_ssim():
+    region = _strong_region()
+    region["donors"][0]["visible_ring_ssim"] = 1.1
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        mod.assess_region(region)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.1])
+def test_experiment_summary_rejects_out_of_domain_precision(bad):
+    summary = {
+        "held_out_precision": bad,
+        "fresh_holdout_admissions": 4,
+        "fresh_holdout_targets_with_admissions": 2,
+        "fresh_holdout_false_positives": 0,
+    }
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        mod.assess_experiment_summary(summary)
+
+
+def test_frozen_threshold_receipt_accepts_exact_defaults_only():
+    exact = dict(mod.DEFAULT_THRESHOLDS)
+    qa = mod.assess_region(_strong_region(), exact)
+    assert qa["pass"] is True
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("min_consensus_ssim", 0.0),
+        ("max_consensus_mae", 999.0),
+        ("min_target_pnp_inlier_ratio", 0.0),
+        ("min_fresh_holdout_admissions", 0),
+    ],
+)
+def test_frozen_threshold_override_is_rejected(key, value):
+    thresholds = dict(mod.DEFAULT_THRESHOLDS)
+    thresholds[key] = value
+    with pytest.raises(ValueError, match="threshold override forbidden"):
+        mod.assess_region(_strong_region(), thresholds)
+
+
+def test_unknown_frozen_threshold_key_is_rejected():
+    thresholds = dict(mod.DEFAULT_THRESHOLDS)
+    thresholds["unknown_gate"] = 1
+    with pytest.raises(ValueError, match="unknown frozen threshold"):
+        mod.assess_region(_strong_region(), thresholds)
+
+
 def test_gate_v3_component2_false_positive_keeps_experiment_hold():
     summary = {
         "held_out_precision": 0.8,

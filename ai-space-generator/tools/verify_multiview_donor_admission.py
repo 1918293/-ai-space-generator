@@ -45,6 +45,37 @@ def _nonnegative_integer(value: Any, name: str) -> int:
     return int(value)
 
 
+def _unit_interval(value: Any, name: str) -> float:
+    value = _finite_number(value, name)
+    if value < 0.0 or value > 1.0:
+        raise ValueError(f"{name} must be between 0 and 1")
+    return value
+
+
+def _nonnegative_number(value: Any, name: str) -> float:
+    value = _finite_number(value, name)
+    if value < 0.0:
+        raise ValueError(f"{name} must be non-negative")
+    return value
+
+
+def _resolved_thresholds(thresholds: dict[str, float] | None) -> dict[str, float]:
+    if thresholds is None:
+        return dict(DEFAULT_THRESHOLDS)
+    if not isinstance(thresholds, dict):
+        raise ValueError("thresholds must be a mapping or null")
+    unknown = sorted(set(thresholds) - set(DEFAULT_THRESHOLDS))
+    if unknown:
+        raise ValueError(f"unknown frozen threshold keys: {', '.join(unknown)}")
+    for name, expected in DEFAULT_THRESHOLDS.items():
+        if name not in thresholds:
+            continue
+        actual = _finite_number(thresholds[name], f"thresholds.{name}")
+        if actual != float(expected):
+            raise ValueError(f"threshold override forbidden for frozen Gate-v3: {name}")
+    return dict(DEFAULT_THRESHOLDS)
+
+
 def _binary_mask(mask: np.ndarray | None, shape: tuple[int, int]) -> np.ndarray | None:
     if mask is None:
         return None
@@ -119,14 +150,16 @@ def estimate_planar_geometry(
 
 
 def assess_pair(metrics: dict[str, Any], thresholds: dict[str, float] | None = None) -> dict[str, Any]:
-    t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    t = _resolved_thresholds(thresholds)
     reasons: list[str] = []
     good = _nonnegative_integer(metrics.get("good_matches", 0), "good_matches")
     inliers = _nonnegative_integer(metrics.get("inliers", 0), "inliers")
-    ratio = _finite_number(metrics.get("inlier_ratio", 0), "inlier_ratio")
-    coverage = _finite_number(metrics.get("inlier_coverage", 0), "inlier_coverage")
+    ratio = _unit_interval(metrics.get("inlier_ratio", 0), "inlier_ratio")
+    coverage = _unit_interval(metrics.get("inlier_coverage", 0), "inlier_coverage")
     reproj_raw = metrics.get("median_reprojection_px")
-    reproj = float("inf") if reproj_raw is None else _finite_number(reproj_raw, "median_reprojection_px")
+    reproj = float("inf") if reproj_raw is None else _nonnegative_number(reproj_raw, "median_reprojection_px")
+    if inliers > good:
+        raise ValueError("inliers cannot exceed good_matches")
     if good < t["min_good_matches"]: reasons.append("GOOD_MATCHES_BELOW_MIN")
     if inliers < t["min_inliers"]: reasons.append("INLIERS_BELOW_MIN")
     if ratio < t["min_inlier_ratio"]: reasons.append("INLIER_RATIO_BELOW_MIN")
@@ -146,7 +179,7 @@ def assess_target_camera(metrics: dict[str, Any] | None, thresholds: dict[str, f
     reasons: list[str] = []
     if not isinstance(metrics, dict):
         return {"pass": False, "reasons": ["TARGET_CAMERA_QUALITY_MISSING"]}
-    ratio = _finite_number(metrics.get("incremental_pnp_inlier_ratio", 0), "incremental_pnp_inlier_ratio")
+    ratio = _unit_interval(metrics.get("incremental_pnp_inlier_ratio", 0), "incremental_pnp_inlier_ratio")
     if ratio < t["min_target_pnp_inlier_ratio"]:
         reasons.append("TARGET_CAMERA_PNP_RATIO_BELOW_MIN")
     return {"pass": not reasons, "reasons": reasons, "incremental_pnp_inlier_ratio": ratio}
@@ -178,9 +211,9 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
     if any(not r["pass"] for r in pair_results):
         reasons.append("DONOR_GEOMETRY_REJECTED")
 
-    consensus_ssim = _finite_number(region.get("consensus_ssim", 0), "consensus_ssim")
-    consensus_mae = _finite_number(region.get("consensus_mae", float("inf")), "consensus_mae")
-    ring_ssim = _finite_number(region.get("visible_ring_ssim", 0), "visible_ring_ssim")
+    consensus_ssim = _unit_interval(region.get("consensus_ssim", 0), "consensus_ssim")
+    consensus_mae = _nonnegative_number(region.get("consensus_mae", float("inf")), "consensus_mae")
+    ring_ssim = _unit_interval(region.get("visible_ring_ssim", 0), "visible_ring_ssim")
     ring_structural_ssim = _finite_number(
         region.get("visible_ring_structural_ssim", 0),
         "visible_ring_structural_ssim",
@@ -209,7 +242,7 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
 def assess_experiment_summary(summary: dict[str, Any], thresholds: dict[str, float] | None = None) -> dict[str, Any]:
     """Promotion-evidence gate; never authorizes workflow promotion by itself."""
     t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
-    precision = _finite_number(summary.get("held_out_precision", 0), "held_out_precision")
+    precision = _unit_interval(summary.get("held_out_precision", 0), "held_out_precision")
     admissions = _nonnegative_integer(summary.get("fresh_holdout_admissions", 0), "fresh_holdout_admissions")
     targets = _nonnegative_integer(summary.get("fresh_holdout_targets_with_admissions", 0), "fresh_holdout_targets_with_admissions")
     false_positives = _nonnegative_integer(summary.get("fresh_holdout_false_positives", 0), "fresh_holdout_false_positives")
