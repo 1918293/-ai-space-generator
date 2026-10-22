@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import numpy as np
@@ -9,16 +10,46 @@ VALID_OBJECT_ROLES = {"REMOVE", "PRESERVE_OCCLUDER", "FIXED_STRUCTURE"}
 
 
 def _binary_mask(mask: Image.Image | np.ndarray) -> np.ndarray:
-    """Return a boolean mask without changing the caller's image."""
+    """Return a nonempty, finite, single-channel mask without mutating input.
+
+    Boolean arrays retain their meaning. Numeric masks use the existing > 8
+    threshold; array callers must supply a two-dimensional channel explicitly.
+    """
     if isinstance(mask, Image.Image):
+        original = np.asarray(mask)
+        if original.dtype.kind not in "biuf" or not np.all(np.isfinite(original)):
+            raise ValueError("Mask must contain finite numeric or boolean values.")
         array = np.asarray(mask.convert("L"), dtype=np.uint8)
     else:
         array = np.asarray(mask)
-        if array.ndim == 3:
-            array = np.max(array, axis=2)
+    if array.ndim != 2 or not array.size:
+        raise ValueError("Mask must be a nonempty two-dimensional single-channel array.")
+    if array.dtype.kind not in "biuf" or not np.all(np.isfinite(array)):
+        raise ValueError("Mask must contain finite numeric or boolean values.")
     if array.dtype == np.bool_:
         return array.copy()
     return array > 8
+
+
+def _image_array(image: Image.Image | np.ndarray) -> np.ndarray:
+    """Reject malformed or non-finite image data before comparison/compositing."""
+    array = np.asarray(image)
+    if array.ndim not in (2, 3) or not array.size:
+        raise ValueError("Image must be a nonempty 2-D grayscale or 3-D image array.")
+    if array.dtype.kind not in "biuf" or not np.all(np.isfinite(array)):
+        raise ValueError("Image must contain finite numeric or boolean values.")
+    return array
+
+
+def _absolute_difference(source: np.ndarray, result: np.ndarray) -> np.ndarray:
+    """Subtract without unsigned overflow or truncating fractional differences."""
+    if source.dtype.kind in "iu" and result.dtype.kind in "iu":
+        # Python integers are needed only for 64-bit integer extremes. Ordinary
+        # image buffers use the inexpensive vectorized int64 path.
+        dtype = object if max(source.dtype.itemsize, result.dtype.itemsize) == 8 else np.int64
+    else:
+        dtype = np.result_type(source.dtype, result.dtype, np.float64)
+    return np.abs(source.astype(dtype) - result.astype(dtype))
 
 
 def validate_edit_protected_contract(
@@ -125,14 +156,16 @@ def target_modified_ratio(
     A high changed ratio does not prove that the object was semantically removed.
     The caller must still run target-aware Visual QA or a post-edit segmentation check.
     """
-    src = np.asarray(source.convert("RGB") if isinstance(source, Image.Image) else source)
-    out = np.asarray(result.convert("RGB") if isinstance(result, Image.Image) else result)
+    src = _image_array(source.convert("RGB") if isinstance(source, Image.Image) else source)
+    out = _image_array(result.convert("RGB") if isinstance(result, Image.Image) else result)
     target = _binary_mask(remove_target_mask)
 
     if src.shape != out.shape or src.shape[:2] != target.shape:
         raise ValueError("Source, result, and remove-target mask must have matching dimensions.")
 
-    diff = np.abs(src.astype(np.int16) - out.astype(np.int16))
+    if not np.isfinite(float(threshold)) or float(threshold) < 0:
+        raise ValueError("Target-change threshold must be finite and nonnegative.")
+    diff = _absolute_difference(src, out)
     if diff.ndim == 2:
         delta = diff
     elif diff.ndim == 3:
@@ -152,20 +185,181 @@ def target_modified_ratio(
         "semantic_removal_verified": False,
     }
 
+def image_binding_sha256(image: Image.Image | np.ndarray) -> str:
+    """Return a deterministic digest for runtime source pixels plus ICC bytes."""
+    if isinstance(image, Image.Image):
+        normalized = image.convert("RGB")
+        array = _image_array(normalized)
+        icc = image.info.get("icc_profile") or b""
+    else:
+        array = _image_array(image)
+        icc = b""
+    h = hashlib.sha256()
+    h.update(str(array.shape).encode("ascii"))
+    h.update(array.dtype.str.encode("ascii"))
+    h.update(array.tobytes(order="C"))
+    h.update(len(icc).to_bytes(8, "big"))
+    h.update(icc)
+    return h.hexdigest()
+
+
+def mask_binding_sha256(mask: Image.Image | np.ndarray) -> str:
+    """Return a deterministic digest for the admitted binary edit mask."""
+    binary = _binary_mask(mask)
+    h = hashlib.sha256()
+    h.update(str(binary.shape).encode("ascii"))
+    h.update(np.packbits(binary.reshape(-1), bitorder="big").tobytes())
+    return h.hexdigest()
+
+
+def validate_target_authority_contract(
+    receipt: dict[str, Any] | None,
+    *,
+    source_binding_sha256: str | None = None,
+    edit_mask_binding_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Require an upstream Current-target authority receipt before removal work.
+
+    This gate deliberately does not infer semantic authority from masks, pixels,
+    or post-edit QA. It only validates that an external authority decision was
+    supplied and bound to a canonical source, unresolved target, and mask.
+    """
+    if receipt is None:
+        return {
+            "hard_gate_pass": False,
+            "hold_reason": "TARGET_AUTHORITY_MISSING",
+            "missing_fields": [
+                "authority_id",
+                "authority_status",
+                "canonical_source_id",
+                "target_id",
+                "target_state",
+                "mask_binding_id",
+                "canonical_source_binding_sha256",
+                "edit_mask_binding_sha256",
+            ],
+        }
+    if not isinstance(receipt, dict):
+        raise ValueError("target authority receipt must be a mapping or None.")
+
+    required_text = (
+        "authority_id",
+        "canonical_source_id",
+        "target_id",
+        "mask_binding_id",
+        "canonical_source_binding_sha256",
+        "edit_mask_binding_sha256",
+    )
+    missing_fields = [
+        name for name in required_text
+        if not isinstance(receipt.get(name), str) or not receipt.get(name, "").strip()
+    ]
+    authority_status = str(receipt.get("authority_status", "")).strip().upper()
+    target_state = str(receipt.get("target_state", "")).strip().upper()
+    if authority_status != "PASS":
+        missing_fields.append("authority_status")
+    if not target_state:
+        missing_fields.append("target_state")
+
+    binding_mismatch = bool(
+        (source_binding_sha256 is not None
+         and receipt.get("canonical_source_binding_sha256") != source_binding_sha256)
+        or (edit_mask_binding_sha256 is not None
+            and receipt.get("edit_mask_binding_sha256") != edit_mask_binding_sha256)
+    )
+    hard_gate_pass = bool(
+        not missing_fields
+        and authority_status == "PASS"
+        and target_state == "UNRESOLVED"
+        and not binding_mismatch
+    )
+    hold_reason = None
+    if not hard_gate_pass:
+        if binding_mismatch:
+            hold_reason = "TARGET_AUTHORITY_BINDING_MISMATCH"
+        else:
+            hold_reason = (
+                "TARGET_NOT_UNRESOLVED"
+                if not missing_fields and target_state != "UNRESOLVED"
+                else "TARGET_AUTHORITY_MISSING"
+            )
+
+    return {
+        "hard_gate_pass": hard_gate_pass,
+        "hold_reason": hold_reason,
+        "missing_fields": sorted(set(missing_fields)),
+        "authority_status": authority_status or None,
+        "target_state": target_state or None,
+        "authority_id": receipt.get("authority_id"),
+        "canonical_source_id": receipt.get("canonical_source_id"),
+        "target_id": receipt.get("target_id"),
+        "mask_binding_id": receipt.get("mask_binding_id"),
+        "canonical_source_binding_sha256": receipt.get("canonical_source_binding_sha256"),
+        "edit_mask_binding_sha256": receipt.get("edit_mask_binding_sha256"),
+        "binding_mismatch": binding_mismatch,
+    }
+
+
+def validate_promotion_contract(
+    *,
+    technical_preservation_pass: bool,
+    target_authority_pass: bool,
+    mask_minimality_pass: bool,
+    target_absence_pass: bool,
+    local_quality_pass: bool,
+    color_profile_pass: bool,
+    human_acceptance_pass: bool | None = None,
+) -> dict[str, Any]:
+    """Combine independent local-edit gates without letting pixel QA imply acceptance.
+
+    The required machine-verifiable gates must all pass before an artifact can
+    become a technical candidate. Human acceptance is deliberately separate:
+    None means technically admissible but not accepted for promotion.
+    """
+    required = {
+        "technical_preservation": technical_preservation_pass,
+        "target_authority": target_authority_pass,
+        "mask_minimality": mask_minimality_pass,
+        "target_absence": target_absence_pass,
+        "local_quality": local_quality_pass,
+        "color_profile": color_profile_pass,
+    }
+    if any(type(value) is not bool for value in required.values()):
+        raise ValueError("Promotion gate inputs must be booleans.")
+    if human_acceptance_pass is not None and type(human_acceptance_pass) is not bool:
+        raise ValueError("human_acceptance_pass must be True, False, or None.")
+
+    failed_gates = [name for name, passed in required.items() if not passed]
+    technical_candidate_pass = not failed_gates
+    pending_human_acceptance = technical_candidate_pass and human_acceptance_pass is None
+    production_acceptance_pass = technical_candidate_pass and human_acceptance_pass is True
+
+    return {
+        "required_gates": required,
+        "failed_gates": failed_gates,
+        "technical_candidate_pass": technical_candidate_pass,
+        "human_acceptance_pass": human_acceptance_pass,
+        "pending_human_acceptance": pending_human_acceptance,
+        "production_acceptance_pass": production_acceptance_pass,
+        "promotion_allowed": production_acceptance_pass,
+    }
+
 def composite_mask_only(
     source: Image.Image | np.ndarray,
     candidate: Image.Image | np.ndarray,
     edit_mask: Image.Image | np.ndarray,
 ) -> np.ndarray:
     """Paste candidate pixels only inside edit_mask; keep all other source pixels bit-exact."""
-    src = np.asarray(source)
-    out = np.asarray(candidate)
+    src = _image_array(source)
+    out = _image_array(candidate)
     edit = _binary_mask(edit_mask)
 
     if src.shape != out.shape or src.shape[:2] != edit.shape:
         raise ValueError("Source, candidate, and edit mask must have matching dimensions.")
     if src.ndim not in (2, 3):
         raise ValueError("Source and candidate must be 2-D grayscale or 3-D image arrays.")
+    if src.dtype != out.dtype:
+        raise ValueError("Source and candidate must have matching image data types.")
 
     composited = src.copy()
     composited[edit] = out[edit]
@@ -179,8 +373,8 @@ def verify_mask_lock(
     protected_mask: Image.Image | np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Verify bit-exact preservation outside edit_mask and inside an optional protected region."""
-    src = np.asarray(source)
-    out = np.asarray(result)
+    src = _image_array(source)
+    out = _image_array(result)
     edit = _binary_mask(edit_mask)
     protected = (
         np.zeros_like(edit, dtype=bool)
@@ -199,8 +393,9 @@ def verify_mask_lock(
     if src.ndim not in (2, 3):
         raise ValueError("Source and result must be 2-D grayscale or 3-D image arrays.")
 
-    diff = np.abs(src.astype(np.int64) - out.astype(np.int64))
-    changed = diff != 0 if diff.ndim == 2 else np.any(diff != 0, axis=2)
+    diff = _absolute_difference(src, out)
+    unequal = src != out
+    changed = unequal if unequal.ndim == 2 else np.any(unequal, axis=2)
 
     outside = ~edit
     edit_protected_overlap_pixels = int(np.count_nonzero(edit & protected))
@@ -208,9 +403,9 @@ def verify_mask_lock(
     protected_changed_pixels = int(np.count_nonzero(changed & protected))
     inside_changed_pixels = int(np.count_nonzero(changed & edit))
 
-    outside_max_channel_diff = int(diff[outside].max()) if np.any(outside) else 0
-    protected_max_channel_diff = int(diff[protected].max()) if np.any(protected) else 0
-    inside_max_channel_diff = int(diff[edit].max()) if np.any(edit) else 0
+    outside_max_channel_diff = np.asarray(diff[outside].max()).item() if np.any(outside) else 0
+    protected_max_channel_diff = np.asarray(diff[protected].max()).item() if np.any(protected) else 0
+    inside_max_channel_diff = np.asarray(diff[edit].max()).item() if np.any(edit) else 0
 
     return {
         "dimensions_match": True,

@@ -15,7 +15,10 @@ from PIL import ExifTags, Image, ImageColor, ImageDraw, ImageEnhance, ImageFilte
 
 from src.validation import (
     composite_mask_only,
+    image_binding_sha256,
+    mask_binding_sha256,
     validate_edit_protected_contract,
+    validate_target_authority_contract,
     verify_mask_lock,
 )
 
@@ -221,7 +224,8 @@ def mask_from_editor(editor_value: dict[str, Any] | None) -> tuple[Image.Image |
         if layer is None:
             continue
         layer_img = layer if isinstance(layer, Image.Image) else Image.fromarray(np.asarray(layer))
-        layer_img = layer_img.resize(background.size)
+        if layer_img.size != background.size:
+            raise ValueError("Editor layer and source must have identical dimensions.")
         if "A" in layer_img.getbands():
             alpha = np.asarray(layer_img.getchannel("A"), dtype=np.uint8)
             mask = np.maximum(mask, alpha)
@@ -232,7 +236,9 @@ def mask_from_editor(editor_value: dict[str, Any] | None) -> tuple[Image.Image |
 
     # If no explicit layer is available, infer edited pixels from the composite.
     if not np.any(mask) and editor_value.get("composite") is not None:
-        composite = ensure_rgb(editor_value["composite"]).resize(background.size)
+        composite = ensure_rgb(editor_value["composite"])
+        if composite.size != background.size:
+            raise ValueError("Editor composite and source must have identical dimensions.")
         delta = np.max(
             np.abs(np.asarray(composite, dtype=np.int16) - np.asarray(background, dtype=np.int16)),
             axis=2,
@@ -348,19 +354,41 @@ def generate_design(
     strength: float,
     use_remote_ai: bool,
     protected_mask: Image.Image | np.ndarray | dict[str, Any] | None = None,
+    target_authority_receipt: dict[str, Any] | None = None,
 ) -> tuple[Image.Image | None, tuple[Image.Image, Image.Image] | None, str, str | None]:
-    background, mask = mask_from_editor(editor_value)
-    if background is None or mask is None:
-        return None, None, "請先上傳照片並標記修改區域。", None
-    if not np.any(np.asarray(mask) > 8):
-        return None, None, "尚未偵測到筆刷標記。請在照片上塗選要修改的區域。", None
-
-    source_icc = background.info.get("icc_profile")
-
+    output_path: str | None = None
     try:
+        background, mask = mask_from_editor(editor_value)
+        if background is None or mask is None:
+            return None, None, "請先上傳照片並標記修改區域。", None
+        if not np.any(np.asarray(mask) > 8):
+            return None, None, "尚未偵測到筆刷標記。請在照片上塗選要修改的區域。", None
+
+        source_icc = background.info.get("icc_profile")
+
+        action_key = str(action).lower()
+        if "移除" in action_key or "remove" in action_key:
+            target_authority_qa = validate_target_authority_contract(
+                target_authority_receipt,
+                source_binding_sha256=image_binding_sha256(background),
+                edit_mask_binding_sha256=mask_binding_sha256(mask),
+            )
+            if not target_authority_qa["hard_gate_pass"]:
+                raise RuntimeError(
+                    f"{target_authority_qa['hold_reason']}: "
+                    "removal is held before image generation until a Current target "
+                    "authority receipt is supplied."
+                )
+
         normalized_protected_mask: Image.Image | np.ndarray | None = protected_mask
         if isinstance(protected_mask, dict):
-            _, normalized_protected_mask = mask_from_editor(protected_mask)
+            protected_background, normalized_protected_mask = mask_from_editor(protected_mask)
+            if protected_background is not None and (
+                protected_background.size != background.size
+                or not np.array_equal(np.asarray(protected_background), np.asarray(background))
+                or protected_background.info.get("icc_profile") != source_icc
+            ):
+                raise ValueError("Protected editor source must match the edit source pixel-for-pixel.")
             if (
                 normalized_protected_mask is not None
                 and not np.any(np.asarray(normalized_protected_mask) > 8)
@@ -414,9 +442,25 @@ def generate_design(
         os.close(fd)
         save_options = {"icc_profile": source_icc} if source_icc else {}
         result.save(output_path, "PNG", **save_options)
+        # Verify the actual deliverable, including export corruption and profile
+        # loss. A successful in-memory check cannot authorize different bytes.
+        with Image.open(output_path) as saved:
+            saved.load()
+            if saved.format != "PNG" or saved.size != background.size or saved.mode != result.mode:
+                raise RuntimeError("PNG readback dimensions/format verification failed.")
+            if saved.info.get("icc_profile") != source_icc:
+                raise RuntimeError("PNG readback ICC profile verification failed.")
+            saved_rgb = saved.convert("RGB")
+            if not np.array_equal(np.asarray(saved_rgb), np.asarray(result)):
+                raise RuntimeError("PNG readback pixel verification failed.")
+            exported_qa = verify_mask_lock(background, saved_rgb, mask, normalized_protected_mask)
+            if not exported_qa["hard_lock_pass"]:
+                raise RuntimeError("PNG readback mask-lock verification failed.")
         status = (
             f"完成：{mode}。未選取區域維持原圖；結果屬概念示意，不作為施工、測量或結構判斷依據。"
         )
         return result, (background, result), status, output_path
     except Exception as exc:
+        if output_path is not None:
+            Path(output_path).unlink(missing_ok=True)
         return None, None, f"生成失敗：{type(exc).__name__}: {exc}", None
