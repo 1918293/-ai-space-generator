@@ -73,6 +73,7 @@ class EvidenceKind(StrEnum):
     TOOL_RECEIPT = "TOOL_RECEIPT"
     STATE_READBACK = "STATE_READBACK"
     VERIFICATION_PASS = "VERIFICATION_PASS"
+    PRE_EXECUTION_GATE_PASS = "PRE_EXECUTION_GATE_PASS"
     ACCEPTANCE_GATE_PASS = "ACCEPTANCE_GATE_PASS"
     HAO_ACCEPTANCE = "HAO_ACCEPTANCE"
 
@@ -150,6 +151,7 @@ class ExecutionRecord:
     failure_code: str = ""
     last_failure_mechanism: str = ""
     last_retry_basis: str = ""
+    required_pre_execution_gate_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
