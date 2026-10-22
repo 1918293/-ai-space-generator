@@ -1,0 +1,222 @@
+name: Gate v3 P1 Shadow No Effect Temp
+
+on:
+  push:
+    branches:
+      - temp/gate-v3-preexec-interface-p0-merged-20261023
+    paths:
+      - .github/workflows/gate-v3-p1-shadow-temp.yml
+
+permissions:
+  contents: read
+
+jobs:
+  p1-shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ai-space-generator
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Real-format source-bound shadow parity
+        run: |
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          from src.execution_control import (
+              ActionArchetype,
+              ActionExternality,
+              ActionProposal,
+              ExecutionRecord,
+              Mode,
+          )
+          from src.gate_v3_pre_execution import (
+              GATE_ID,
+              GateV3ExpectedProvenance,
+              GateV3SourceBoundPreExecutionVerifier,
+          )
+
+          GATE_SHA="0cdc9a7ba4b5c8a214f4aeabf0620d78e2fd2825449748b7aa35c2edf0c26545"
+          SCORER_SHA="4e61e3f87eb2a99dffb08417d027ac31a903c02858cce1b1d4ba1e06eec5269b"
+          RESULT_SHA="7e87edbe0410a1958a130112b9555cc3e35d23cbf32882a67b354097b97a8ef2"
+          CORE_SHA="c87700e2ef633c56320e3f852cc958b0ea1f8a06b7c32f3d2e7a01562bada25a"
+          TARGET_SHA="a595a7009821ef31a15797ad3f41843e41b6bea85d4a7f1e89242daadf634647"
+          D1_SHA="e7ae00bab362064a248ce6a88c1f286774c6d3ef04f3c0780a885475b0cd06a2"
+          D2_SHA="a09f237adb5b0c3119adfcb83b65747cbd18910aa56d275f879ababdfa7504ee"
+          AUTHORITY_ZIP_SHA="81a253ec8bc79ed4daa640711cc65bfc055ecc7a69f7bb220a721c598d8b4432"
+          SOURCE="library:HAO_385_Bonsai_GateV3_Heldout_20261023.zip"
+
+          action=ActionProposal(
+              action_id="P1-SHADOW:BONSAI:donor.reconstruct",
+              archetype=ActionArchetype.ANALYZE,
+              externality=ActionExternality.READ_ONLY,
+              capability="donor_reconstruction_candidate",
+              provider="shadow-only-no-effect",
+              action_name="would_reconstruct",
+          )
+          record=ExecutionRecord(
+              run_id="P1-SHADOW-BONSAI",
+              task="Gate-v3 P1 shadow no effect",
+              mode=Mode.EXP,
+              goal_valid=True,
+              acceptance_criteria=("decision parity only; no effect",),
+              required_pre_execution_gate_ids=(GATE_ID,),
+          )
+
+          def envelope(patch, admitted):
+              return {
+                  "schema":"hao.385.gate-v3-pre-execution.v1",
+                  "frozen_gate_sha256":GATE_SHA,
+                  "canonical_scorer_sha256":SCORER_SHA,
+                  "source_result_sha256":RESULT_SHA,
+                  "core_model_sha256":CORE_SHA,
+                  "target":{
+                      "name":"DSCF5600.JPG",
+                      "sha256":TARGET_SHA,
+                      "pnp_ratio":0.9434618137204784,
+                  },
+                  "donors":[
+                      {"name":"DSCF5601.JPG","sha256":D1_SHA},
+                      {"name":"DSCF5599.JPG","sha256":D2_SHA},
+                  ],
+                  "patch":patch,
+                  "admitted":admitted,
+              }
+
+          admit_patch={
+              "center":[340,420],
+              "bbox":[304,384,376,456],
+              "plane_support":82,
+              "plane_median_dist":0.004526377142830995,
+              "plane_threshold":0.009531054562342087,
+              "plane_scale":0.5295030312412271,
+              "plane_normalized_median_dist":0.008548349821946348,
+              "support_span":[429.8949189840954,361.8205424185286],
+              "candidate_donors":[
+                  {"donor":"DSCF5601.JPG","ring_mae":1.7822265625,"ring_ssim":0.9707149575583017,"shared_plane":75,"valid_fraction":1.0},
+                  {"donor":"DSCF5599.JPG","ring_mae":8.32591869212963,"ring_ssim":0.9462611586479178,"shared_plane":47,"valid_fraction":1.0},
+              ],
+              "consensus":{
+                  "donors":["DSCF5601.JPG","DSCF5599.JPG"],
+                  "ssim":0.9607476344378965,
+                  "mae":7.560313786008231,
+              },
+              "outside_changed_pixels":0,
+          }
+
+          pre_reject_patch={
+              "center":[340,300],
+              "bbox":[304,264,376,336],
+              "plane_support":10,
+              "plane_median_dist":0.0012807952773936648,
+              "plane_threshold":0.004214351549444002,
+              "plane_scale":0.2341306416357779,
+              "plane_normalized_median_dist":0.005470429963567589,
+              "support_span":[203.7740398187002,240.11831504417785],
+              "candidate_donors":[],
+          }
+
+          post_reject_patch={
+              "center":[340,660],
+              "bbox":[304,624,376,696],
+              "plane_support":405,
+              "plane_median_dist":0.007311169305401322,
+              "plane_threshold":0.01771435859807177,
+              "plane_scale":0.9841310332262095,
+              "plane_normalized_median_dist":0.007429060824790388,
+              "support_span":[482.44543350018466,412.41749930249716],
+              "candidate_donors":[
+                  {"donor":"DSCF5601.JPG","ring_mae":3.117404513888889,"ring_ssim":0.9694948742137663,"shared_plane":363,"valid_fraction":1.0},
+                  {"donor":"DSCF5599.JPG","ring_mae":3.922092013888889,"ring_ssim":0.9579689122029749,"shared_plane":242,"valid_fraction":1.0},
+              ],
+              "consensus":{
+                  "donors":["DSCF5601.JPG","DSCF5599.JPG"],
+                  "ssim":0.8997190107970093,
+                  "mae":4.806327160493828,
+              },
+              "outside_changed_pixels":0,
+          }
+
+          cases=[
+              ("ADMIT_CENTER_340_420", envelope(admit_patch,True), True),
+              ("PRE_CONSENSUS_REJECT_CENTER_340_300", envelope(pre_reject_patch,False), False),
+              ("POST_CONSENSUS_REJECT_CENTER_340_660", envelope(post_reject_patch,False), False),
+          ]
+
+          results=[]
+          for name,obj,authoritative in cases:
+              raw=json.dumps(obj,sort_keys=True,separators=(",",":")).encode()
+              expected=GateV3ExpectedProvenance(
+                  receipt_sha256=hashlib.sha256(raw).hexdigest(),
+                  frozen_gate_sha256=GATE_SHA,
+                  canonical_scorer_sha256=SCORER_SHA,
+                  source_result_sha256=RESULT_SHA,
+                  core_model_sha256=CORE_SHA,
+                  target_name="DSCF5600.JPG",
+                  target_sha256=TARGET_SHA,
+                  donor_sha256s=(
+                      ("DSCF5601.JPG",D1_SHA),
+                      ("DSCF5599.JPG",D2_SHA),
+                  ),
+              )
+              outcome=GateV3SourceBoundPreExecutionVerifier(
+                  raw,expected=expected,source=SOURCE
+              ).verify(record,action)
+              would_admit=outcome.passed
+              if authoritative:
+                  classification="WOULD_ADMIT" if would_admit else "INVALID_OR_REJECT"
+              else:
+                  classification=(
+                      "WOULD_REJECT"
+                      if (
+                          not would_admit
+                          and outcome.error_code.startswith("GATE_V3_SOURCE_BOUND_REJECTED:")
+                      )
+                      else "INVALID_OR_UNEXPECTED"
+                  )
+              match=(would_admit==authoritative and classification in {"WOULD_ADMIT","WOULD_REJECT"})
+              results.append({
+                  "case":name,
+                  "receipt_sha256":hashlib.sha256(raw).hexdigest(),
+                  "authoritative_field_admitted":authoritative,
+                  "shadow_would_admit":would_admit,
+                  "shadow_classification":classification,
+                  "shadow_code":outcome.error_code,
+                  "shadow_receipt_ids":[r.evidence_id for r in outcome.receipts],
+                  "decision_match":match,
+              })
+
+          receipt={
+              "schema":"hao.385.gate-v3-p1-shadow-no-effect.v1",
+              "authority_package_sha256":AUTHORITY_ZIP_SHA,
+              "source_result_sha256":RESULT_SHA,
+              "candidate_git_sha":"temp/gate-v3-preexec-interface-p0-merged-20261023",
+              "cases":results,
+              "all_decisions_match":all(x["decision_match"] for x in results),
+              "executor_invocations":0,
+              "provider_mutation_performed":False,
+              "final_delivery_authorized":False,
+              "routing_changed":False,
+              "runtime_enabled":False,
+          }
+          assert receipt["all_decisions_match"]
+          assert [x["shadow_classification"] for x in results] == [
+              "WOULD_ADMIT","WOULD_REJECT","WOULD_REJECT"
+          ]
+          assert "INDEPENDENT_DONOR_COUNT_BELOW_MIN" in results[1]["shadow_code"]
+          assert "CONSENSUS_SSIM_BELOW_MIN" in results[2]["shadow_code"]
+          Path("gate-v3-p1-shadow.json").write_text(
+              json.dumps(receipt,indent=2,sort_keys=True)
+          )
+          print(json.dumps(receipt,indent=2,sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-v3-p1-shadow-no-effect
+          path: ai-space-generator/gate-v3-p1-shadow.json
+          retention-days: 1
