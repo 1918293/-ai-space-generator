@@ -47,17 +47,69 @@ def validate_payload_manifest(root: Path, manifest_path: Path) -> dict:
     if not isinstance(records, list):
         raise ValueError('payload manifest must contain a files list')
     checked = 0
+    checked_sha256 = {}
     for record in records:
+        if not isinstance(record, dict):
+            raise ValueError('payload manifest records must be mappings')
         rel = record.get('path')
         expected = record.get('sha256')
-        if not rel or not expected:
+        if not isinstance(rel, str) or not rel.strip() or not isinstance(expected, str) or not expected.strip():
             raise ValueError('payload manifest record missing path/sha256')
-        assert_hash(resolve_inside(root, rel), expected, f'payload:{rel}')
+        path = resolve_inside(root, rel)
+        actual = assert_hash(path, expected, f'payload:{rel}')
+        normalized_rel = path.relative_to(root).as_posix()
+        if normalized_rel in checked_sha256:
+            raise ValueError(f'duplicate payload path after normalization: {normalized_rel}')
+        checked_sha256[normalized_rel] = actual
         checked += 1
     expected_count = payload.get('payload_file_count')
     if expected_count is not None and expected_count != checked:
         raise ValueError(f'payload count mismatch: expected {expected_count}, checked {checked}')
-    return {'path': str(manifest_path), 'checked_files': checked, 'pass': True}
+    return {
+        'path': str(manifest_path),
+        'checked_files': checked,
+        'checked_sha256': checked_sha256,
+        'pass': True,
+    }
+
+
+def resolve_bound_executable(root: Path, spec, label: str, payload_fixity: dict | None) -> Path:
+    """Resolve executable bundle code only when its bytes are fixity-bound."""
+    explicit_sha = None
+    if isinstance(spec, str):
+        rel = spec
+    elif isinstance(spec, dict):
+        rel = spec.get('path')
+        explicit_sha = spec.get('sha256')
+    else:
+        raise ValueError(f'{label} must be a path string or mapping')
+
+    if not isinstance(rel, str) or not rel.strip():
+        raise ValueError(f'{label} missing path')
+    path = resolve_inside(root, rel)
+
+    if explicit_sha is not None:
+        if not isinstance(explicit_sha, str) or not explicit_sha.strip():
+            raise ValueError(f'{label} sha256 must be a nonempty string')
+        assert_hash(path, explicit_sha, label)
+        return path
+
+    if not payload_fixity or not payload_fixity.get('pass'):
+        raise ValueError(
+            f'{label} executable bytes are not fixity-bound: '
+            'provide an explicit sha256 or a verified payload_manifest entry'
+        )
+    checked = payload_fixity.get('checked_sha256')
+    if not isinstance(checked, dict):
+        raise ValueError(f'{label} payload fixity index missing')
+    normalized_rel = path.relative_to(root).as_posix()
+    if normalized_rel not in checked:
+        raise ValueError(
+            f'{label} executable bytes are not listed in the verified payload_manifest: {normalized_rel}'
+        )
+    if sha256(path) != checked[normalized_rel]:
+        raise ValueError(f'{label} changed after payload manifest verification')
+    return path
 
 
 def find_sha_match(root: Path, expected_sha: str) -> list[Path]:
@@ -97,7 +149,7 @@ def main() -> int:
         mask=resolve_inside(root,m['editable_mask']['path'])
         protected=resolve_inside(root,m['protected_mask']['path'])
         final=resolve_inside(root,m['final']['path'])
-        verifier=resolve_inside(root,m['pixel_verifier'])
+        verifier=resolve_bound_executable(root,m['pixel_verifier'],'pixel_verifier',payload_fixity)
         regions={k:resolve_inside(root,v) for k,v in m.get('regions',{}).items()}
         hashes={
           'source':assert_hash(source,m['source']['sha256'],'source'),
@@ -139,7 +191,7 @@ def main() -> int:
 
         replay_ok=True
         if args.replay:
-            replay_script=resolve_inside(root,m['replay']['script'])
+            replay_script=resolve_bound_executable(root,m['replay']['script'],'replay.script',payload_fixity)
             output_dir=Path(tempfile.mkdtemp(prefix='hao-case-replay-', dir=str(args.manifest.resolve().parent))).resolve()
             output_dir.rmdir()
             cp=subprocess.run([sys.executable,str(replay_script),'--bundle-root',str(root),'--output-dir',str(output_dir)],

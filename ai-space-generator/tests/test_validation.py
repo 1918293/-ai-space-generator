@@ -1,3 +1,8 @@
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+
 import pytest
 import numpy as np
 from PIL import Image, ImageDraw
@@ -19,6 +24,104 @@ def _mask(box):
     image = Image.new("L", (40, 40), 0)
     ImageDraw.Draw(image).rectangle(box, fill=255)
     return image
+
+
+def _load_case_manifest_tool():
+    tool_path = Path(__file__).resolve().parents[1] / "tools" / "verify_case_manifest.py"
+    spec = importlib.util.spec_from_file_location("hao_verify_case_manifest_test", tool_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_case_manifest_rejects_unbound_pixel_verifier(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("def verify(*args, **kwargs): return {}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not fixity-bound"):
+        mod.resolve_bound_executable(tmp_path, "pixel_verify.py", "pixel_verifier", None)
+
+
+def test_case_manifest_accepts_explicitly_hashed_executable(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    content = b"def verify(*args, **kwargs): return {}\n"
+    verifier.write_bytes(content)
+    bound = mod.resolve_bound_executable(
+        tmp_path,
+        {"path": "pixel_verify.py", "sha256": _sha256_bytes(content)},
+        "pixel_verifier",
+        None,
+    )
+    assert bound == verifier.resolve()
+
+
+def test_case_manifest_rejects_explicit_executable_hash_mismatch(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("print('actual')\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        mod.resolve_bound_executable(
+            tmp_path,
+            {"path": "pixel_verify.py", "sha256": "0" * 64},
+            "pixel_verifier",
+            None,
+        )
+
+
+def test_case_manifest_requires_executable_to_be_in_verified_payload_manifest(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("print('verified')\n", encoding="utf-8")
+    other = tmp_path / "other.txt"
+    other.write_text("fixed", encoding="utf-8")
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "payload_file_count": 1,
+                "files": [{"path": "other.txt", "sha256": mod.sha256(other)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixity = mod.validate_payload_manifest(tmp_path, payload)
+    with pytest.raises(ValueError, match="not listed"):
+        mod.resolve_bound_executable(
+            tmp_path,
+            "pixel_verify.py",
+            "pixel_verifier",
+            fixity,
+        )
+
+
+def test_case_manifest_accepts_executable_listed_in_verified_payload_manifest(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("print('verified')\n", encoding="utf-8")
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "payload_file_count": 1,
+                "files": [{"path": "pixel_verify.py", "sha256": mod.sha256(verifier)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixity = mod.validate_payload_manifest(tmp_path, payload)
+    bound = mod.resolve_bound_executable(
+        tmp_path,
+        "pixel_verify.py",
+        "pixel_verifier",
+        fixity,
+    )
+    assert bound == verifier.resolve()
 
 
 def test_remove_target_cannot_be_protected():
