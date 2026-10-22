@@ -1,0 +1,114 @@
+name: TEMP Gerrard Hall Camera Contract Screen 2026-10-23
+
+on:
+  push:
+    branches:
+      - temp/south-building-target-prereg-20261023
+
+permissions:
+  contents: read
+
+jobs:
+  camera-contract-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Inspect first-party Gerrard Hall camera contract only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python - <<'PY'
+          import hashlib, io, json, re, subprocess, zipfile
+
+          URL="https://github.com/colmap/colmap/releases/download/3.11.1/gerrard-hall.zip"
+
+          # Discover final asset size without downloading the archive.
+          p=subprocess.run(
+              ["curl","-fsSL","--range","0-0","-D","-","-o","/dev/null",URL],
+              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True
+          )
+          headers=p.stdout
+          m=re.search(r"(?im)^content-range:\s*bytes\s+\d+-\d+/(\d+)\s*$",headers)
+          if not m:
+              m=re.search(r"(?im)^content-length:\s*(\d+)\s*$",headers)
+          if not m:
+              raise SystemExit("asset size unavailable")
+          total=int(m.group(1))
+
+          class RF(io.RawIOBase):
+              def __init__(self): self.pos=0
+              def readable(self): return True
+              def seekable(self): return True
+              def tell(self): return self.pos
+              def seek(self,o,w=io.SEEK_SET):
+                  if w==io.SEEK_SET: pos=o
+                  elif w==io.SEEK_CUR: pos=self.pos+o
+                  elif w==io.SEEK_END: pos=total+o
+                  else: raise ValueError
+                  if pos<0 or pos>total: raise ValueError
+                  self.pos=pos; return pos
+              def read(self,n=-1):
+                  if self.pos>=total:return b""
+                  if n<0:n=total-self.pos
+                  n=min(n,total-self.pos)
+                  if n==0:return b""
+                  a=self.pos;b=a+n-1
+                  q=subprocess.run(["curl","-fsSL","--retry","3","--range",f"{a}-{b}",URL],
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
+                  if len(q.stdout)!=n: raise RuntimeError((a,b,len(q.stdout),n))
+                  self.pos+=n; return q.stdout
+
+          result={"schema":"hao.gerrard-camera-contract-screen.v1","url":URL,"asset_bytes":total}
+          with zipfile.ZipFile(RF()) as z:
+              infos=z.infolist()
+              result["entry_count"]=len(infos)
+              camera_members=[i for i in infos if i.filename.lower().endswith(("cameras.txt","cameras.bin"))]
+              result["camera_members"]=[
+                  {"name":i.filename,"bytes":i.file_size,"compressed_bytes":i.compress_size,"crc32":f"{i.CRC:08x}"}
+                  for i in camera_members
+              ]
+              if not camera_members:
+                  raise SystemExit("no sparse camera member")
+              parsed=[]
+              for info in camera_members:
+                  data=z.read(info.filename)
+                  rec={"name":info.filename,"sha256":hashlib.sha256(data).hexdigest(),"bytes":len(data)}
+                  if info.filename.lower().endswith("cameras.txt"):
+                      text=data.decode("utf-8")
+                      rows=[ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+                      rec["text_records"]=rows
+                      for row in rows:
+                          t=row.split()
+                          cid=int(t[0]); model=t[1]; width=int(t[2]); height=int(t[3]); params=list(map(float,t[4:]))
+                          compatible=False; reason=""
+                          if model=="SIMPLE_PINHOLE" and len(params)==3:
+                              compatible=True; reason="exact_single_fpx"
+                          elif model=="SIMPLE_RADIAL" and len(params)==4:
+                              compatible=True; reason="exact_single_fpx_plus_k1"
+                          elif model=="PINHOLE" and len(params)==4:
+                              compatible=(params[0]==params[1])
+                              reason="exact_equal_fx_fy" if compatible else "fx_fy_mismatch"
+                          else:
+                              reason="unsupported_camera_model_or_params"
+                          parsed.append({"camera_id":cid,"model":model,"width":width,"height":height,"params":params,
+                                         "single_fpx_compatible":compatible,"reason":reason})
+                  else:
+                      rec["binary_only"]=True
+                  result.setdefault("camera_receipts",[]).append(rec)
+              result["parsed_camera_records"]=parsed
+              if parsed:
+                  result["all_parsed_cameras_single_fpx_compatible"]=all(x["single_fpx_compatible"] for x in parsed)
+                  result["camera_count"]=len(parsed)
+              else:
+                  result["all_parsed_cameras_single_fpx_compatible"]=None
+                  result["camera_count"]=None
+          open("evidence/gerrard-camera-contract.json","w").write(json.dumps(result,sort_keys=True,indent=2)+"\n")
+          print(json.dumps(result,sort_keys=True,indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gerrard-camera-contract-20261023
+          path: evidence/gerrard-camera-contract.json
+          retention-days: 2
+          if-no-files-found: error
