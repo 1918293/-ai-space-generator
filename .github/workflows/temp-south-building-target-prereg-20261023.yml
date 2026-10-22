@@ -1,0 +1,249 @@
+name: TEMP South Building Target Preregistration 2026-10-23
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/temp-south-building-target-prereg-20261023.yml
+  push:
+    branches:
+      - temp/south-building-target-prereg-20261023
+
+permissions:
+  contents: read
+
+jobs:
+  preregister-and-bind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Select target and donors from source-bound sparse evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python - <<'PY'
+          import collections
+          import hashlib
+          import io
+          import json
+          import statistics
+          import subprocess
+          import zipfile
+
+          URL = "https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip"
+          TOTAL_SIZE = 419421847
+          EXPECTED = {
+              "south-building/sparse/cameras.txt": "2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660",
+              "south-building/sparse/images.txt": "a9dca725dcbd197ccdaa5fe5c51a8567ade99b0bfbd477f1df080b11f4de8086",
+              "south-building/sparse/points3D.txt": "5afb847913a9e141cd025dad70db1da9acbab8523f18890f4676b3c384907923",
+          }
+
+          class RemoteRangeFile(io.RawIOBase):
+              def __init__(self, url, size):
+                  self.url = url
+                  self.size = size
+                  self.pos = 0
+              def readable(self): return True
+              def seekable(self): return True
+              def tell(self): return self.pos
+              def seek(self, offset, whence=io.SEEK_SET):
+                  if whence == io.SEEK_SET:
+                      pos = offset
+                  elif whence == io.SEEK_CUR:
+                      pos = self.pos + offset
+                  elif whence == io.SEEK_END:
+                      pos = self.size + offset
+                  else:
+                      raise ValueError("bad whence")
+                  if pos < 0 or pos > self.size:
+                      raise ValueError("seek out of range")
+                  self.pos = pos
+                  return self.pos
+              def read(self, n=-1):
+                  if self.pos >= self.size:
+                      return b""
+                  if n is None or n < 0:
+                      n = self.size - self.pos
+                  n = min(n, self.size - self.pos)
+                  if n == 0:
+                      return b""
+                  start = self.pos
+                  end = self.pos + n - 1
+                  p = subprocess.run(
+                      ["curl", "-fsSL", "--retry", "3", "--retry-delay", "1",
+                       "--range", f"{start}-{end}", self.url],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      check=True,
+                  )
+                  data = p.stdout
+                  if len(data) != n:
+                      raise RuntimeError(f"range length mismatch {start}-{end}: got {len(data)}, expected {n}")
+                  self.pos += len(data)
+                  return data
+
+          remote = RemoteRangeFile(URL, TOTAL_SIZE)
+          with zipfile.ZipFile(remote) as zf:
+              infos = {i.filename: i for i in zf.infolist()}
+              sparse = {}
+              sparse_receipts = {}
+              for name, expected_sha in EXPECTED.items():
+                  if name not in infos:
+                      raise SystemExit(f"missing expected sparse member: {name}")
+                  data = zf.read(name)
+                  sha = hashlib.sha256(data).hexdigest()
+                  if sha != expected_sha:
+                      raise SystemExit(f"sparse SHA mismatch {name}: {sha}")
+                  info = infos[name]
+                  sparse[name] = data.decode("utf-8")
+                  sparse_receipts[name] = {
+                      "bytes": len(data),
+                      "crc32": f"{info.CRC:08x}",
+                      "sha256": sha,
+                  }
+
+              points = {}
+              for line in sparse["south-building/sparse/points3D.txt"].splitlines():
+                  line = line.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  t = line.split()
+                  pid = int(t[0])
+                  err = float(t[7])
+                  track = [int(t[i]) for i in range(8, len(t), 2)]
+                  points[pid] = {"error": err, "track": track, "track_len": len(track)}
+
+              images = {}
+              lines = sparse["south-building/sparse/images.txt"].splitlines()
+              i = 0
+              while i < len(lines):
+                  line = lines[i].strip()
+                  if not line or line.startswith("#"):
+                      i += 1
+                      continue
+                  meta = line.split(maxsplit=9)
+                  if len(meta) < 10:
+                      raise SystemExit(f"bad image metadata line: {line[:120]}")
+                  image_id = int(meta[0])
+                  name = meta[9]
+                  i += 1
+                  if i >= len(lines):
+                      raise SystemExit("missing POINTS2D line")
+                  pts_line = lines[i].strip()
+                  vals = pts_line.split() if pts_line else []
+                  if len(vals) % 3:
+                      raise SystemExit(f"bad POINTS2D triple count for image {image_id}")
+                  pids = [int(vals[j+2]) for j in range(0, len(vals), 3) if int(vals[j+2]) != -1]
+                  images[image_id] = {"name": name, "pids": pids}
+                  i += 1
+
+              metrics = []
+              for image_id, rec in images.items():
+                  valid = [pid for pid in rec["pids"] if pid in points]
+                  if not valid:
+                      continue
+                  track_lens = [points[pid]["track_len"] for pid in valid]
+                  errors = [points[pid]["error"] for pid in valid]
+                  metrics.append({
+                      "image_id": image_id,
+                      "name": rec["name"],
+                      "tracked_observation_count": len(valid),
+                      "median_track_length": statistics.median(track_lens),
+                      "median_point_error": statistics.median(errors),
+                  })
+
+              if not metrics:
+                  raise SystemExit("no eligible registered images")
+              metrics.sort(key=lambda x: (
+                  -x["tracked_observation_count"],
+                  -x["median_track_length"],
+                  x["median_point_error"],
+                  x["image_id"],
+              ))
+              target = metrics[0]
+
+              shared = collections.Counter()
+              target_pids = set(images[target["image_id"]]["pids"])
+              for pid in target_pids:
+                  p = points.get(pid)
+                  if not p:
+                      continue
+                  for other in p["track"]:
+                      if other != target["image_id"]:
+                          shared[other] += 1
+              donor_ids = [
+                  image_id for image_id, count in
+                  sorted(shared.items(), key=lambda kv: (-kv[1], kv[0]))
+                  if image_id in images
+              ][:2]
+              if len(donor_ids) != 2:
+                  raise SystemExit("fewer than two source-bound donors")
+              donors = [
+                  {"image_id": did, "name": images[did]["name"], "shared_point_count": shared[did]}
+                  for did in donor_ids
+              ]
+
+              selected = [{"role": "target", "image_id": target["image_id"], "name": target["name"]}]
+              selected += [{"role": f"donor_{idx+1}", **d} for idx, d in enumerate(donors)]
+
+              member_receipts = []
+              for item in selected:
+                  member = f"south-building/images/{item['name']}"
+                  if member not in infos:
+                      raise SystemExit(f"selected image missing from official archive: {member}")
+                  info = infos[member]
+                  data = zf.read(member)
+                  sha = hashlib.sha256(data).hexdigest()
+                  member_receipts.append({
+                      **item,
+                      "archive_member": member,
+                      "bytes": len(data),
+                      "crc32": f"{info.CRC:08x}",
+                      "sha256": sha,
+                  })
+
+          result = {
+              "schema": "hao.south-building-target-prereg.v1",
+              "source": {
+                  "asset_id": 213120796,
+                  "published_bytes": TOTAL_SIZE,
+                  "known_full_archive_sha256": "d210016bd2de20936a5f02b87fd38a76bf0440c42d045231218372cf9db9a7a1",
+                  "sparse_receipts": sparse_receipts,
+              },
+              "rule": {
+                  "target_lexicographic": [
+                      "MAX tracked_observation_count",
+                      "MAX median_track_length",
+                      "MIN median_point_error",
+                      "MIN image_id",
+                  ],
+                  "donor_lexicographic": [
+                      "MAX shared_point_count_with_target",
+                      "MIN image_id",
+                  ],
+                  "donor_count": 2,
+                  "uses_pixels": False,
+                  "uses_gate_outcomes": False,
+              },
+              "registered_image_count": len(images),
+              "point3d_count": len(points),
+              "target": target,
+              "donors": donors,
+              "selected_member_receipts": member_receipts,
+              "gate_v3_scoring_run": False,
+              "threshold_change": False,
+          }
+          encoded = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+          open("evidence/selection.json", "w", encoding="utf-8").write(encoded)
+          print(encoded)
+          PY
+
+      - name: Upload bounded evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: south-building-target-prereg-20261023
+          path: evidence/selection.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
