@@ -209,3 +209,35 @@ def test_consensus_identity_must_match_source_bound_candidate_donors():
     result = verify(value)
     assert result.passed is False
     assert result.error_code.endswith("CONSENSUS_DONOR_IDENTITY_MISMATCH")
+
+
+def test_native_pre_consensus_reject_does_not_require_synthetic_consensus_metrics():
+    value = receipt_dict()
+    value["patch"] = {
+        "center": [340, 300],
+        "bbox": [304, 264, 376, 336],
+        "plane_support": 10,
+        "plane_median_dist": 0.0012807952773936648,
+        "plane_threshold": 0.004214351549444002,
+        "plane_scale": 0.2341306416357779,
+        "plane_normalized_median_dist": 0.005470429963567589,
+        "support_span": [203.7740398187002, 240.11831504417785],
+        "candidate_donors": [],
+    }
+    value["admitted"] = False
+    result = verify(value)
+    assert result.passed is False
+    assert result.receipts == ()
+    assert result.error_code.startswith("GATE_V3_SOURCE_BOUND_REJECTED:")
+    assert "INDEPENDENT_DONOR_COUNT_BELOW_MIN" in result.error_code
+    assert "SOURCE_BOUND_INVALID" not in result.error_code
+
+
+def test_consensus_cannot_be_omitted_after_two_source_bound_donors_exist():
+    value = receipt_dict()
+    del value["patch"]["consensus"]
+    del value["patch"]["outside_changed_pixels"]
+    value["admitted"] = False
+    result = verify(value)
+    assert result.passed is False
+    assert result.error_code.endswith("CONSENSUS_REQUIRED_AFTER_DONOR_STAGE")
