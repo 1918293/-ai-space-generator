@@ -1,17 +1,136 @@
 {
-  "error": "HTTPError:HTTP Error 501: Unsupported client range",
+  "archive_total_bytes_from_content_range": 419421847,
+  "central_directory_bytes": 13986,
+  "donors": [
+    {
+      "filename": "P1180212.JPG",
+      "image_id": 33,
+      "shared_point_count": 3169
+    },
+    {
+      "filename": "P1180210.JPG",
+      "image_id": 3,
+      "shared_point_count": 3086
+    }
+  ],
   "expected_archive_bytes": 419421847,
-  "files": {},
+  "files": {
+    "south-building/sparse/cameras.txt": {
+      "bytes": 172,
+      "compressed_bytes_transferred": 151,
+      "computed_crc32": "503bfe5b",
+      "expected_bytes": 172,
+      "expected_sha256": "2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660",
+      "identity_pass": true,
+      "sha256": "2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660",
+      "zip_crc32": "503bfe5b"
+    },
+    "south-building/sparse/images.txt": {
+      "bytes": 27577452,
+      "compressed_bytes_transferred": 10173129,
+      "computed_crc32": "d15488a0",
+      "expected_bytes": 27577452,
+      "expected_sha256": "a9dca725dcbd197ccdaa5fe5c51a8567ade99b0bfbd477f1df080b11f4de8086",
+      "identity_pass": true,
+      "sha256": "a9dca725dcbd197ccdaa5fe5c51a8567ade99b0bfbd477f1df080b11f4de8086",
+      "zip_crc32": "d15488a0"
+    },
+    "south-building/sparse/points3D.txt": {
+      "bytes": 5872182,
+      "compressed_bytes_transferred": 2341227,
+      "computed_crc32": "f5a6dff7",
+      "expected_bytes": 5872182,
+      "expected_sha256": "5afb847913a9e141cd025dad70db1da9acbab8523f18890f4676b3c384907923",
+      "identity_pass": true,
+      "sha256": "5afb847913a9e141cd025dad70db1da9acbab8523f18890f4676b3c384907923",
+      "zip_crc32": "f5a6dff7"
+    }
+  },
   "frozen_donor_rule": "MAX shared_point_count -> MIN image_id; top 2",
   "frozen_target_rule": "MAX tracked_observation_count -> MAX median_track_length -> MIN median_point_error -> MIN image_id",
   "full_archive_download_avoided": true,
   "head_accept_ranges": "bytes",
   "head_content_length": "419421847",
   "head_status": 200,
-  "range_bytes_transferred_total": 0,
+  "no_pixel_or_gate_outcome_read": true,
+  "points3D_count": 61514,
+  "range_bytes_transferred_total": 12659655,
+  "registered_image_count": 128,
   "resolved_asset_host": "release-assets.githubusercontent.com",
   "schema": "south-building-prereg-selection-v3",
   "source_authority": "COLMAP 3.11.1 south-building.zip asset_id=213120796",
-  "status": "FAIL_TRANSPORT_OR_SOURCE_IDENTITY",
-  "transport": "HEAD_RESOLVE_FINAL_OBJECT_THEN_HTTP_RANGE_ONLY_NO_FULL_ARCHIVE_FALLBACK"
+  "status": "PASS",
+  "target": {
+    "filename": "P1180211.JPG",
+    "image_id": 102,
+    "median_point_error": 0.442066,
+    "median_track_length": 7,
+    "tracked_observation_count": 4721
+  },
+  "top5_donor_ranking": [
+    {
+      "filename": "P1180212.JPG",
+      "image_id": 33,
+      "shared_point_count": 3169
+    },
+    {
+      "filename": "P1180210.JPG",
+      "image_id": 3,
+      "shared_point_count": 3086
+    },
+    {
+      "filename": "P1180319.JPG",
+      "image_id": 118,
+      "shared_point_count": 2600
+    },
+    {
+      "filename": "P1180209.JPG",
+      "image_id": 6,
+      "shared_point_count": 2481
+    },
+    {
+      "filename": "P1180213.JPG",
+      "image_id": 69,
+      "shared_point_count": 2317
+    }
+  ],
+  "top5_target_ranking": [
+    {
+      "filename": "P1180211.JPG",
+      "image_id": 102,
+      "median_point_error": 0.442066,
+      "median_track_length": 7,
+      "tracked_observation_count": 4721
+    },
+    {
+      "filename": "P1180212.JPG",
+      "image_id": 33,
+      "median_point_error": 0.43852,
+      "median_track_length": 7,
+      "tracked_observation_count": 4675
+    },
+    {
+      "filename": "P1180210.JPG",
+      "image_id": 3,
+      "median_point_error": 0.447918,
+      "median_track_length": 7,
+      "tracked_observation_count": 4571
+    },
+    {
+      "filename": "P1180209.JPG",
+      "image_id": 6,
+      "median_point_error": 0.455547,
+      "median_track_length": 7,
+      "tracked_observation_count": 4535
+    },
+    {
+      "filename": "P1180318.JPG",
+      "image_id": 17,
+      "median_point_error": 0.46400549999999996,
+      "median_track_length": 7.0,
+      "tracked_observation_count": 4380
+    }
+  ],
+  "transport": "HEAD_RESOLVE_FINAL_OBJECT_THEN_HTTP_RANGE_ONLY_NO_FULL_ARCHIVE_FALLBACK",
+  "zip_entry_count": 135
 }
