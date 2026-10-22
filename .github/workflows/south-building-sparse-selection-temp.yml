@@ -1,5 +1,5 @@
-name: South Building sparse prereg selection temp
-run-name: south-building-sparse-selection-temp
+name: South Building selected image fixity temp
+run-name: south-building-selected-image-fixity-temp
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  select:
+  fixity:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -20,249 +20,189 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Resolve final release object, range-extract exact sparse, apply frozen preregistration
+      - name: Range-extract frozen target and donors from official archive
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import binascii, hashlib, json, statistics, struct, urllib.request, zlib
+          import binascii, hashlib, json, struct, urllib.request, zlib
           from pathlib import Path
           from urllib.parse import urlparse
 
           RELEASE_URL = "https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip"
           EXPECTED_ARCHIVE_BYTES = 419421847
-          EXPECTED = {
-              "south-building/sparse/cameras.txt": ("2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660", 172),
-              "south-building/sparse/images.txt": ("a9dca725dcbd197ccdaa5fe5c51a8567ade99b0bfbd477f1df080b11f4de8086", 27577452),
-              "south-building/sparse/points3D.txt": ("5afb847913a9e141cd025dad70db1da9acbab8523f18890f4676b3c384907923", 5872182),
-          }
+          SELECTION_RECEIPT_BLOB_SHA = "91e27fae16515a295d050147899c3e0b4415b5f7"
+          SELECTED = [
+              {"role":"TARGET","image_id":102,"filename":"P1180211.JPG","tracked_observation_count":4721,"median_track_length":7,"median_point_error":0.442066},
+              {"role":"DONOR_1","image_id":33,"filename":"P1180212.JPG","shared_point_count":3169},
+              {"role":"DONOR_2","image_id":3,"filename":"P1180210.JPG","shared_point_count":3086},
+          ]
           receipt = {
-              "schema": "south-building-prereg-selection-v3",
-              "source_authority": "COLMAP 3.11.1 south-building.zip asset_id=213120796",
-              "transport": "HEAD_RESOLVE_FINAL_OBJECT_THEN_HTTP_RANGE_ONLY_NO_FULL_ARCHIVE_FALLBACK",
-              "frozen_target_rule": "MAX tracked_observation_count -> MAX median_track_length -> MIN median_point_error -> MIN image_id",
-              "frozen_donor_rule": "MAX shared_point_count -> MIN image_id; top 2",
-              "expected_archive_bytes": EXPECTED_ARCHIVE_BYTES,
-              "files": {},
+              "schema":"south-building-selected-image-fixity-v1",
+              "source_authority":"COLMAP 3.11.1 south-building.zip asset_id=213120796",
+              "selection_receipt_blob_sha":SELECTION_RECEIPT_BLOB_SHA,
+              "transport":"HEAD_RESOLVE_FINAL_OBJECT_THEN_EXPLICIT_HTTP_RANGE_ONLY",
+              "selected":SELECTED,
+              "members":{},
           }
-          transferred = 0
+          transferred=0
+
+          def head_final():
+              req=urllib.request.Request(
+                  RELEASE_URL, method="HEAD",
+                  headers={"User-Agent":"hao-south-building-image-fixity/1","Accept-Encoding":"identity"}
+              )
+              resp=urllib.request.urlopen(req,timeout=90)
+              final=resp.geturl()
+              status=getattr(resp,"status",resp.getcode())
+              length=resp.headers.get("Content-Length","")
+              ar=resp.headers.get("Accept-Ranges","")
+              resp.close()
+              return final,status,length,ar
 
           try:
-              head_req = urllib.request.Request(
-                  RELEASE_URL,
-                  method="HEAD",
-                  headers={"User-Agent": "hao-south-building-range-proof/2", "Accept-Encoding": "identity"},
-              )
-              head_resp = urllib.request.urlopen(head_req, timeout=90)
-              final_url = head_resp.geturl()
-              final_host = urlparse(final_url).hostname or ""
-              head_status = getattr(head_resp, "status", head_resp.getcode())
-              head_len = head_resp.headers.get("Content-Length", "")
-              accept_ranges = head_resp.headers.get("Accept-Ranges", "")
-              head_resp.close()
-              receipt["head_status"] = head_status
-              receipt["resolved_asset_host"] = final_host
-              receipt["head_content_length"] = head_len
-              receipt["head_accept_ranges"] = accept_ranges
-              if not final_url or final_url == RELEASE_URL:
-                  raise RuntimeError("SIGNED_FINAL_OBJECT_NOT_RESOLVED")
+              selection=json.load(open("south-building-selection-result.json","r",encoding="utf-8"))
+              if selection.get("status")!="PASS":
+                  raise RuntimeError("SELECTION_RECEIPT_NOT_PASS")
+              actual=[
+                  (selection["target"]["image_id"],selection["target"]["filename"]),
+                  *[(x["image_id"],x["filename"]) for x in selection["donors"]],
+              ]
+              expected=[(102,"P1180211.JPG"),(33,"P1180212.JPG"),(3,"P1180210.JPG")]
+              if actual!=expected:
+                  raise RuntimeError(f"SELECTION_BINDING_MISMATCH:{actual}")
 
-              def fetch_range(spec):
+              final_url,head_status,head_len,accept_ranges=head_final()
+              receipt.update({
+                  "resolved_asset_host":urlparse(final_url).hostname or "",
+                  "head_status":head_status,
+                  "head_content_length":head_len,
+                  "head_accept_ranges":accept_ranges,
+              })
+              if int(head_len)!=EXPECTED_ARCHIVE_BYTES:
+                  raise RuntimeError("ARCHIVE_SIZE_MISMATCH")
+
+              def fetch_range(start,end):
                   global transferred
-                  req = urllib.request.Request(
+                  req=urllib.request.Request(
                       final_url,
                       headers={
-                          "Range": "bytes=" + spec,
-                          "User-Agent": "hao-south-building-range-proof/2",
-                          "Accept-Encoding": "identity",
+                          "Range":f"bytes={start}-{end}",
+                          "User-Agent":"hao-south-building-image-fixity/1",
+                          "Accept-Encoding":"identity",
                       },
                   )
-                  resp = urllib.request.urlopen(req, timeout=90)
-                  status = getattr(resp, "status", resp.getcode())
-                  cr = resp.headers.get("Content-Range", "")
-                  if status != 206:
+                  resp=urllib.request.urlopen(req,timeout=90)
+                  status=getattr(resp,"status",resp.getcode())
+                  cr=resp.headers.get("Content-Range","")
+                  if status!=206:
                       resp.close()
-                      raise RuntimeError(f"FINAL_OBJECT_RANGE_REQUIRED_STATUS_{status}")
-                  data = resp.read()
+                      raise RuntimeError(f"RANGE_REQUIRED_STATUS_{status}")
+                  data=resp.read()
                   resp.close()
-                  transferred += len(data)
-                  return data, cr
+                  transferred+=len(data)
+                  return data,cr
 
-              tail_len = min(131072, EXPECTED_ARCHIVE_BYTES)
-              tail_start = EXPECTED_ARCHIVE_BYTES - tail_len
-              tail, cr = fetch_range(f"{tail_start}-{EXPECTED_ARCHIVE_BYTES - 1}")
-              if "/" not in cr:
-                  raise RuntimeError("CONTENT_RANGE_TOTAL_MISSING")
-              total = int(cr.rsplit("/", 1)[1])
-              receipt["archive_total_bytes_from_content_range"] = total
-              if total != EXPECTED_ARCHIVE_BYTES:
-                  raise RuntimeError(f"ARCHIVE_SIZE_MISMATCH:{total}")
-
-              pos = tail.rfind(b"PK\x05\x06")
-              if pos < 0:
+              tail_len=min(131072,EXPECTED_ARCHIVE_BYTES)
+              tail_start=EXPECTED_ARCHIVE_BYTES-tail_len
+              tail,cr=fetch_range(tail_start,EXPECTED_ARCHIVE_BYTES-1)
+              if "/" not in cr or int(cr.rsplit("/",1)[1])!=EXPECTED_ARCHIVE_BYTES:
+                  raise RuntimeError("CONTENT_RANGE_TOTAL_MISMATCH")
+              pos=tail.rfind(b"PK\x05\x06")
+              if pos<0:
                   raise RuntimeError("EOCD_NOT_FOUND")
-              _, disk_no, cd_disk, n_disk, n_total, cd_size, cd_offset, eocd_comment_len = struct.unpack_from("<4s4H2IH", tail, pos)
-              if disk_no != 0 or cd_disk != 0 or n_disk != n_total:
+              _,disk_no,cd_disk,n_disk,n_total,cd_size,cd_offset,_=struct.unpack_from("<4s4H2IH",tail,pos)
+              if disk_no!=0 or cd_disk!=0 or n_disk!=n_total:
                   raise RuntimeError("MULTIDISK_ZIP_NOT_SUPPORTED")
-              receipt["zip_entry_count"] = n_total
-              receipt["central_directory_bytes"] = cd_size
-              cd, _ = fetch_range(f"{cd_offset}-{cd_offset + cd_size - 1}")
+              cd,_=fetch_range(cd_offset,cd_offset+cd_size-1)
 
-              entries = {}
-              off = 0
-              while off < len(cd):
-                  if cd[off:off+4] != b"PK\x01\x02":
+              entries={}
+              off=0
+              while off<len(cd):
+                  if cd[off:off+4]!=b"PK\x01\x02":
                       raise RuntimeError(f"BAD_CENTRAL_SIGNATURE_AT_{off}")
-                  vals = struct.unpack_from("<4s6H3I5H2I", cd, off)
-                  (
-                      sig, ver_made, ver_need, flags, method, mtime, mdate,
-                      crc32, comp_size, uncomp_size,
-                      name_len, extra_len, comment_len, disk_start, int_attr,
-                      ext_attr, local_offset
-                  ) = vals
-                  name_b = cd[off+46:off+46+name_len]
-                  enc = "utf-8" if (flags & 0x800) else "cp437"
-                  name = name_b.decode(enc)
-                  entries[name] = {
-                      "flags": flags, "method": method, "crc32": crc32,
-                      "compressed_bytes": comp_size, "uncompressed_bytes": uncomp_size,
-                      "local_offset": local_offset,
+                  vals=struct.unpack_from("<4s6H3I5H2I",cd,off)
+                  (sig,ver_made,ver_need,flags,method,mtime,mdate,crc32,comp_size,uncomp_size,
+                   name_len,extra_len,comment_len,disk_start,int_attr,ext_attr,local_offset)=vals
+                  nb=cd[off+46:off+46+name_len]
+                  name=nb.decode("utf-8" if flags&0x800 else "cp437")
+                  entries[name]={
+                      "method":method,"crc32":crc32,"compressed_bytes":comp_size,
+                      "uncompressed_bytes":uncomp_size,"local_offset":local_offset,
                   }
-                  off += 46 + name_len + extra_len + comment_len
+                  off+=46+name_len+extra_len+comment_len
 
-              extracted = {}
-              for name, (want_sha, want_size) in EXPECTED.items():
-                  if name not in entries:
-                      raise RuntimeError("ZIP_MEMBER_MISSING:" + name)
-                  e = entries[name]
-                  lh, _ = fetch_range(f"{e['local_offset']}-{e['local_offset'] + 29}")
-                  vals = struct.unpack("<4s5H3I2H", lh)
-                  sig, ver_need, flags, method, mtime, mdate, lcrc, lcsize, lusize, name_len, extra_len = vals
-                  if sig != b"PK\x03\x04":
-                      raise RuntimeError("BAD_LOCAL_HEADER:" + name)
-                  data_start = e["local_offset"] + 30 + name_len + extra_len
-                  comp, _ = fetch_range(f"{data_start}-{data_start + e['compressed_bytes'] - 1}")
-                  if e["method"] == 0:
-                      raw = comp
-                  elif e["method"] == 8:
-                      raw = zlib.decompress(comp, -15)
+              for sel in SELECTED:
+                  suffix="/images/"+sel["filename"]
+                  matches=[name for name in entries if name.endswith(suffix)]
+                  if len(matches)!=1:
+                      raise RuntimeError(f"IMAGE_MEMBER_UNIQUE_MATCH_REQUIRED:{sel['filename']}:{matches}")
+                  name=matches[0]
+                  e=entries[name]
+                  lh,_=fetch_range(e["local_offset"],e["local_offset"]+29)
+                  sig,ver_need,flags,method,mtime,mdate,lcrc,lcsize,lusize,name_len,extra_len=struct.unpack("<4s5H3I2H",lh)
+                  if sig!=b"PK\x03\x04":
+                      raise RuntimeError("BAD_LOCAL_HEADER:"+name)
+                  start=e["local_offset"]+30+name_len+extra_len
+                  comp,_=fetch_range(start,start+e["compressed_bytes"]-1)
+                  if method==0:
+                      raw=comp
+                  elif method==8:
+                      raw=zlib.decompress(comp,-15)
                   else:
-                      raise RuntimeError(f"UNSUPPORTED_COMPRESSION_{e['method']}:{name}")
-                  got_crc = binascii.crc32(raw) & 0xffffffff
-                  got_sha = hashlib.sha256(raw).hexdigest()
-                  ok = (
-                      len(raw) == want_size and e["uncompressed_bytes"] == want_size
-                      and got_crc == e["crc32"] and got_sha == want_sha
-                  )
-                  receipt["files"][name] = {
-                      "sha256": got_sha, "bytes": len(raw),
-                      "expected_sha256": want_sha, "expected_bytes": want_size,
-                      "zip_crc32": f"{e['crc32']:08x}",
-                      "computed_crc32": f"{got_crc:08x}",
-                      "compressed_bytes_transferred": len(comp),
-                      "identity_pass": ok,
+                      raise RuntimeError(f"UNSUPPORTED_COMPRESSION_{method}:{name}")
+                  crc=binascii.crc32(raw)&0xffffffff
+                  if crc!=e["crc32"] or len(raw)!=e["uncompressed_bytes"]:
+                      raise RuntimeError("ZIP_FIXITY_FAIL:"+name)
+                  receipt["members"][sel["role"]]={
+                      "archive_path":name,
+                      "filename":sel["filename"],
+                      "image_id":sel["image_id"],
+                      "bytes":len(raw),
+                      "sha256":hashlib.sha256(raw).hexdigest(),
+                      "zip_crc32":f"{e['crc32']:08x}",
+                      "computed_crc32":f"{crc:08x}",
+                      "compressed_bytes_transferred":len(comp),
+                      "fixity_pass":True,
                   }
-                  if not ok:
-                      raise RuntimeError("SOURCE_IDENTITY_FAIL:" + name)
-                  extracted[name] = raw
 
-              points = {}
-              for raw_line in extracted["south-building/sparse/points3D.txt"].decode("utf-8").splitlines():
-                  s = raw_line.strip()
-                  if not s or s.startswith("#"):
-                      continue
-                  p = s.split()
-                  pid = int(p[0])
-                  points[pid] = ((len(p) - 8) // 2, float(p[7]))
-
-              lines = extracted["south-building/sparse/images.txt"].decode("utf-8").splitlines()
-              images = {}
-              i = 0
-              while i < len(lines):
-                  s = lines[i].strip()
-                  if not s or s.startswith("#"):
-                      i += 1
-                      continue
-                  p = s.split()
-                  if len(p) < 10:
-                      raise RuntimeError(f"BAD_IMAGE_RECORD_LINE_{i+1}")
-                  image_id, filename = int(p[0]), p[9]
-                  obs = lines[i+1].strip().split()
-                  if len(obs) % 3:
-                      raise RuntimeError(f"BAD_POINTS2D_RECORD_IMAGE_{image_id}")
-                  pids = [int(obs[j+2]) for j in range(0, len(obs), 3) if int(obs[j+2]) != -1]
-                  tl = [points[pid][0] for pid in pids]
-                  pe = [points[pid][1] for pid in pids]
-                  images[image_id] = {
-                      "image_id": image_id, "filename": filename,
-                      "tracked_observation_count": len(pids),
-                      "median_track_length": statistics.median(tl) if tl else 0.0,
-                      "median_point_error": statistics.median(pe) if pe else float("inf"),
-                      "point_ids": set(pids),
-                  }
-                  i += 2
-
-              def target_key(x):
-                  return (x["tracked_observation_count"], x["median_track_length"], -x["median_point_error"], -x["image_id"])
-
-              target = max(images.values(), key=target_key)
-              donor_rows = []
-              for x in images.values():
-                  if x["image_id"] == target["image_id"]:
-                      continue
-                  donor_rows.append({
-                      "image_id": x["image_id"], "filename": x["filename"],
-                      "shared_point_count": len(target["point_ids"] & x["point_ids"]),
-                  })
-              donor_rows.sort(key=lambda x: (-x["shared_point_count"], x["image_id"]))
-              donors = donor_rows[:2]
-
-              def pub(x):
-                  return {k:v for k,v in x.items() if k != "point_ids"}
-
-              ranked = sorted(images.values(), key=target_key, reverse=True)
               receipt.update({
-                  "status": "PASS",
-                  "range_bytes_transferred_total": transferred,
-                  "full_archive_download_avoided": transferred < EXPECTED_ARCHIVE_BYTES // 2,
-                  "registered_image_count": len(images),
-                  "points3D_count": len(points),
-                  "target": pub(target),
-                  "donors": donors,
-                  "top5_target_ranking": [pub(x) for x in ranked[:5]],
-                  "top5_donor_ranking": donor_rows[:5],
-                  "no_pixel_or_gate_outcome_read": True,
+                  "status":"PASS",
+                  "range_bytes_transferred_total":transferred,
+                  "full_archive_download_avoided":transferred<EXPECTED_ARCHIVE_BYTES//2,
+                  "no_unselected_image_member_read":True,
+                  "no_gate_outcome_read":True,
               })
           except Exception as exc:
               receipt.update({
-                  "status": "FAIL_TRANSPORT_OR_SOURCE_IDENTITY",
-                  "error": f"{type(exc).__name__}:{exc}",
-                  "range_bytes_transferred_total": transferred,
-                  "full_archive_download_avoided": transferred < EXPECTED_ARCHIVE_BYTES // 2,
+                  "status":"FAIL",
+                  "error":f"{type(exc).__name__}:{exc}",
+                  "range_bytes_transferred_total":transferred,
+                  "full_archive_download_avoided":transferred<EXPECTED_ARCHIVE_BYTES//2,
               })
 
-          Path("south-building-selection-result.json").write_text(
-              json.dumps(receipt, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8"
+          Path("south-building-selected-image-fixity-result.json").write_text(
+              json.dumps(receipt,indent=2,sort_keys=True)+"\n",encoding="utf-8"
           )
-          print(json.dumps(receipt, sort_keys=True, allow_nan=False))
+          print(json.dumps(receipt,sort_keys=True))
           PY
 
-      - name: Commit bounded receipt to temp branch
+      - name: Commit selected-member fixity receipt
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add south-building-selection-result.json
-          git commit -m "temp: South Building final-object range prereg receipt"
+          git add south-building-selected-image-fixity-result.json
+          git commit -m "temp: South Building selected image fixity receipt"
           git push origin "HEAD:$GITHUB_REF_NAME"
 
-      - name: Fail workflow if exact source-bound selection did not pass
+      - name: Fail if selected-member fixity did not pass
         shell: bash
         run: |
           python - <<'PY'
           import json
-          data=json.load(open("south-building-selection-result.json","r",encoding="utf-8"))
-          if data.get("status") != "PASS":
-              raise SystemExit(data.get("error","selection did not pass"))
+          data=json.load(open("south-building-selected-image-fixity-result.json","r",encoding="utf-8"))
+          if data.get("status")!="PASS":
+              raise SystemExit(data.get("error","selected-member fixity did not pass"))
           PY
