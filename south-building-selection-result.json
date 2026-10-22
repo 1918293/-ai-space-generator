@@ -1,0 +1,31 @@
+{
+  "files": {
+    "cameras.txt": {
+      "bytes": 172,
+      "expected_bytes": 172,
+      "expected_sha256": "2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660",
+      "identity_pass": true,
+      "sha256": "2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660"
+    },
+    "images.txt": {
+      "bytes": 6926635,
+      "expected_bytes": 27577452,
+      "expected_sha256": "a9dca725dcbd197ccdaa5fe5c51a8567ade99b0bfbd477f1df080b11f4de8086",
+      "identity_pass": false,
+      "sha256": "3a542f1fc384d79656baf06efac2e03f14849df1dba410ecd16f38653a9c910d"
+    },
+    "points3D.txt": {
+      "bytes": 4929865,
+      "expected_bytes": 5872182,
+      "expected_sha256": "5afb847913a9e141cd025dad70db1da9acbab8523f18890f4676b3c384907923",
+      "identity_pass": false,
+      "sha256": "0cb6658f149a7e882f3769e6106d80aee8b938d7834fe8b567b92f532cc8cd60"
+    }
+  },
+  "frozen_donor_rule": "MAX shared_point_count -> MIN image_id; top 2",
+  "frozen_target_rule": "MAX tracked_observation_count -> MAX median_track_length -> MIN median_point_error -> MIN image_id",
+  "schema": "south-building-prereg-selection-v1",
+  "source_authority": "COLMAP 3.11.1 south-building.zip asset_id=213120796",
+  "status": "FAIL_SOURCE_IDENTITY",
+  "transport_only_mirror": "Shresthbhati/reality-engine@02cf8b7e0eac9740a67ba2e53a315ab64b7fe65b"
+}
