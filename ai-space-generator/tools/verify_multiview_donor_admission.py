@@ -175,7 +175,7 @@ def assess_target_camera(metrics: dict[str, Any] | None, thresholds: dict[str, f
     projected through the same weak target pose. Camera quality is therefore a
     prerequisite to region-level donor consensus, not a substitute for it.
     """
-    t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    t = _resolved_thresholds(thresholds)
     reasons: list[str] = []
     if not isinstance(metrics, dict):
         return {"pass": False, "reasons": ["TARGET_CAMERA_QUALITY_MISSING"]}
@@ -187,7 +187,7 @@ def assess_target_camera(metrics: dict[str, Any] | None, thresholds: dict[str, f
 
 def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = None) -> dict[str, Any]:
     """Fail-closed visible-only admission for one hidden target region."""
-    t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    t = _resolved_thresholds(thresholds)
     camera_result = assess_target_camera(region.get("target_camera"), t)
     donors = region.get("donors")
     if not isinstance(donors, list):
@@ -198,7 +198,7 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
 
     donor_ring_ssim: list[float] = []
     for i, donor in enumerate(donors):
-        score = _finite_number(
+        score = _unit_interval(
             donor.get("visible_ring_ssim", 0),
             f"donors[{i}].visible_ring_ssim",
         )
@@ -214,7 +214,7 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
     consensus_ssim = _unit_interval(region.get("consensus_ssim", 0), "consensus_ssim")
     consensus_mae = _nonnegative_number(region.get("consensus_mae", float("inf")), "consensus_mae")
     ring_ssim = _unit_interval(region.get("visible_ring_ssim", 0), "visible_ring_ssim")
-    ring_structural_ssim = _finite_number(
+    ring_structural_ssim = _unit_interval(
         region.get("visible_ring_structural_ssim", 0),
         "visible_ring_structural_ssim",
     )
@@ -241,7 +241,7 @@ def assess_region(region: dict[str, Any], thresholds: dict[str, float] | None = 
 
 def assess_experiment_summary(summary: dict[str, Any], thresholds: dict[str, float] | None = None) -> dict[str, Any]:
     """Promotion-evidence gate; never authorizes workflow promotion by itself."""
-    t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    t = _resolved_thresholds(thresholds)
     precision = _unit_interval(summary.get("held_out_precision", 0), "held_out_precision")
     admissions = _nonnegative_integer(summary.get("fresh_holdout_admissions", 0), "fresh_holdout_admissions")
     targets = _nonnegative_integer(summary.get("fresh_holdout_targets_with_admissions", 0), "fresh_holdout_targets_with_admissions")
