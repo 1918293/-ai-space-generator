@@ -89,6 +89,21 @@ def test_region_requires_multiple_independently_good_donors():
     assert "INSUFFICIENT_DONOR_COUNT" in qa["reasons"]
 
 
+def test_frozen_gate_v3_consensus_defaults_match_field_contract():
+    assert mod.DEFAULT_THRESHOLDS["min_consensus_ssim"] == 0.90
+    assert mod.DEFAULT_THRESHOLDS["max_consensus_mae"] == 8.0
+
+
+def test_frozen_gate_v3_rejects_consensus_boundary_previously_allowed_by_generic_defaults():
+    region = _strong_region()
+    region["consensus_ssim"] = 0.87
+    region["consensus_mae"] = 10.0
+    qa = mod.assess_region(region)
+    assert qa["pass"] is False
+    assert "DONOR_CONSENSUS_SSIM_LOW" in qa["reasons"]
+    assert "DONOR_CONSENSUS_MAE_HIGH" in qa["reasons"]
+
+
 def test_region_rejects_disagreeing_donors_even_with_good_geometry():
     region=_strong_region(); region["consensus_ssim"]=0.40; region["consensus_mae"]=48.0
     qa=mod.assess_region(region)
