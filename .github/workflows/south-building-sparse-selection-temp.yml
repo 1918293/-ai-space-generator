@@ -1,0 +1,178 @@
+name: South Building sparse prereg selection temp
+run-name: south-building-sparse-selection-temp
+
+on:
+  push:
+    branches:
+      - temp/south-building-selection-20261023
+    paths:
+      - .github/workflows/south-building-sparse-selection-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch sparse-only mirror payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/Shresthbhati/reality-engine/02cf8b7e0eac9740a67ba2e53a315ab64b7fe65b/datasets/south_building/sparse"
+          mkdir -p /tmp/south_sparse
+          for f in cameras.txt images.txt points3D.txt; do
+            curl -L --fail --retry 2 --retry-delay 2 "$base/$f" -o "/tmp/south_sparse/$f"
+          done
+          wc -c /tmp/south_sparse/*
+
+      - name: Verify first-party hashes and apply frozen preregistration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, statistics
+          from pathlib import Path
+
+          root = Path("/tmp/south_sparse")
+          expected = {
+              "cameras.txt": ("2193006c1390caa227b6713951cebdfe4e7fc9805c980d91d4125d43f8ede660", 172),
+              "images.txt": ("a9dca725dcbd197ccdaa5fe5c51a8567ade99b0bfbd477f1df080b11f4de8086", 27577452),
+              "points3D.txt": ("5afb847913a9e141cd025dad70db1da9acbab8523f18890f4676b3c384907923", 5872182),
+          }
+          receipt = {
+              "schema": "south-building-prereg-selection-v1",
+              "source_authority": "COLMAP 3.11.1 south-building.zip asset_id=213120796",
+              "transport_only_mirror": "Shresthbhati/reality-engine@02cf8b7e0eac9740a67ba2e53a315ab64b7fe65b",
+              "frozen_target_rule": "MAX tracked_observation_count -> MAX median_track_length -> MIN median_point_error -> MIN image_id",
+              "frozen_donor_rule": "MAX shared_point_count -> MIN image_id; top 2",
+              "files": {},
+          }
+          all_ok = True
+          for name, (want_sha, want_size) in expected.items():
+              data = (root / name).read_bytes()
+              got_sha = hashlib.sha256(data).hexdigest()
+              got_size = len(data)
+              ok = (got_sha == want_sha and got_size == want_size)
+              receipt["files"][name] = {
+                  "sha256": got_sha,
+                  "bytes": got_size,
+                  "expected_sha256": want_sha,
+                  "expected_bytes": want_size,
+                  "identity_pass": ok,
+              }
+              all_ok &= ok
+
+          if not all_ok:
+              receipt["status"] = "FAIL_SOURCE_IDENTITY"
+              Path("south-building-selection-result.json").write_text(
+                  json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+              )
+              raise SystemExit(0)
+
+          points = {}
+          for raw in (root / "points3D.txt").read_text(encoding="utf-8").splitlines():
+              s = raw.strip()
+              if not s or s.startswith("#"):
+                  continue
+              p = s.split()
+              pid = int(p[0])
+              err = float(p[7])
+              track_len = (len(p) - 8) // 2
+              points[pid] = (track_len, err)
+
+          lines = (root / "images.txt").read_text(encoding="utf-8").splitlines()
+          images = {}
+          i = 0
+          while i < len(lines):
+              s = lines[i].strip()
+              if not s or s.startswith("#"):
+                  i += 1
+                  continue
+              p = s.split()
+              if len(p) < 10:
+                  raise RuntimeError(f"bad image record at line {i+1}")
+              image_id = int(p[0])
+              name = p[9]
+              if i + 1 >= len(lines):
+                  raise RuntimeError("missing points2D line")
+              obs = lines[i+1].strip().split()
+              if len(obs) % 3:
+                  raise RuntimeError(f"bad points2D record for image {image_id}")
+              pids = [int(obs[j+2]) for j in range(0, len(obs), 3) if int(obs[j+2]) != -1]
+              track_lengths = [points[pid][0] for pid in pids]
+              errors = [points[pid][1] for pid in pids]
+              images[image_id] = {
+                  "image_id": image_id,
+                  "filename": name,
+                  "tracked_observation_count": len(pids),
+                  "median_track_length": statistics.median(track_lengths) if track_lengths else 0.0,
+                  "median_point_error": statistics.median(errors) if errors else float("inf"),
+                  "point_ids": set(pids),
+              }
+              i += 2
+
+          def target_key(x):
+              return (
+                  x["tracked_observation_count"],
+                  x["median_track_length"],
+                  -x["median_point_error"],
+                  -x["image_id"],
+              )
+          target = max(images.values(), key=target_key)
+          donor_rows = []
+          for x in images.values():
+              if x["image_id"] == target["image_id"]:
+                  continue
+              donor_rows.append({
+                  "image_id": x["image_id"],
+                  "filename": x["filename"],
+                  "shared_point_count": len(target["point_ids"] & x["point_ids"]),
+              })
+          donor_rows.sort(key=lambda x: (-x["shared_point_count"], x["image_id"]))
+          donors = donor_rows[:2]
+
+          def public_image_row(x):
+              return {k:v for k,v in x.items() if k != "point_ids"}
+
+          ranked = sorted(images.values(), key=target_key, reverse=True)
+          receipt.update({
+              "status": "PASS",
+              "registered_image_count": len(images),
+              "points3D_count": len(points),
+              "target": public_image_row(target),
+              "donors": donors,
+              "top5_target_ranking": [public_image_row(x) for x in ranked[:5]],
+              "top5_donor_ranking": donor_rows[:5],
+              "no_pixel_or_gate_outcome_read": True,
+          })
+          Path("south-building-selection-result.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+
+      - name: Commit bounded receipt to temp branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add south-building-selection-result.json
+          git commit -m "temp: South Building sparse prereg selection receipt"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
+      - name: Fail workflow if source identity did not pass
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          data=json.load(open("south-building-selection-result.json","r",encoding="utf-8"))
+          if data.get("status") != "PASS":
+              raise SystemExit("source identity did not pass")
+          PY
