@@ -1,11 +1,19 @@
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+
 import pytest
 import numpy as np
 from PIL import Image, ImageDraw
 
 from src.validation import (
     composite_mask_only,
+    image_binding_sha256,
+    mask_binding_sha256,
     target_modified_ratio,
     validate_promotion_contract,
+    validate_target_authority_contract,
     validate_object_role_contract,
     validate_remove_target_contract,
     verify_mask_lock,
@@ -16,6 +24,104 @@ def _mask(box):
     image = Image.new("L", (40, 40), 0)
     ImageDraw.Draw(image).rectangle(box, fill=255)
     return image
+
+
+def _load_case_manifest_tool():
+    tool_path = Path(__file__).resolve().parents[1] / "tools" / "verify_case_manifest.py"
+    spec = importlib.util.spec_from_file_location("hao_verify_case_manifest_test", tool_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_case_manifest_rejects_unbound_pixel_verifier(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("def verify(*args, **kwargs): return {}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not fixity-bound"):
+        mod.resolve_bound_executable(tmp_path, "pixel_verify.py", "pixel_verifier", None)
+
+
+def test_case_manifest_accepts_explicitly_hashed_executable(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    content = b"def verify(*args, **kwargs): return {}\n"
+    verifier.write_bytes(content)
+    bound = mod.resolve_bound_executable(
+        tmp_path,
+        {"path": "pixel_verify.py", "sha256": _sha256_bytes(content)},
+        "pixel_verifier",
+        None,
+    )
+    assert bound == verifier.resolve()
+
+
+def test_case_manifest_rejects_explicit_executable_hash_mismatch(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("print('actual')\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        mod.resolve_bound_executable(
+            tmp_path,
+            {"path": "pixel_verify.py", "sha256": "0" * 64},
+            "pixel_verifier",
+            None,
+        )
+
+
+def test_case_manifest_requires_executable_to_be_in_verified_payload_manifest(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("print('verified')\n", encoding="utf-8")
+    other = tmp_path / "other.txt"
+    other.write_text("fixed", encoding="utf-8")
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "payload_file_count": 1,
+                "files": [{"path": "other.txt", "sha256": mod.sha256(other)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixity = mod.validate_payload_manifest(tmp_path, payload)
+    with pytest.raises(ValueError, match="not listed"):
+        mod.resolve_bound_executable(
+            tmp_path,
+            "pixel_verify.py",
+            "pixel_verifier",
+            fixity,
+        )
+
+
+def test_case_manifest_accepts_executable_listed_in_verified_payload_manifest(tmp_path):
+    mod = _load_case_manifest_tool()
+    verifier = tmp_path / "pixel_verify.py"
+    verifier.write_text("print('verified')\n", encoding="utf-8")
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "payload_file_count": 1,
+                "files": [{"path": "pixel_verify.py", "sha256": mod.sha256(verifier)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixity = mod.validate_payload_manifest(tmp_path, payload)
+    bound = mod.resolve_bound_executable(
+        tmp_path,
+        "pixel_verify.py",
+        "pixel_verifier",
+        fixity,
+    )
+    assert bound == verifier.resolve()
 
 
 def test_remove_target_cannot_be_protected():
@@ -308,10 +414,82 @@ def test_pil_float_mask_is_validated_before_lossy_grayscale_conversion(value):
     with pytest.raises(ValueError, match="finite"):
         validate_object_role_contract(mask, mask, mask, "REMOVE")
 
+def test_target_authority_contract_holds_when_receipt_missing():
+    qa = validate_target_authority_contract(None)
+    assert qa["hard_gate_pass"] is False
+    assert qa["hold_reason"] == "TARGET_AUTHORITY_MISSING"
+    assert "target_id" in qa["missing_fields"]
+
+
+def test_target_authority_contract_accepts_explicit_unresolved_bound_receipt():
+    qa = validate_target_authority_contract(
+        {
+            "authority_id": "CURRENT-385-IMG6984",
+            "authority_status": "PASS",
+            "canonical_source_id": "IMG6984-SOURCE",
+            "target_id": "IMG6984-UNRESOLVED-OBJECT-01",
+            "target_state": "UNRESOLVED",
+            "mask_binding_id": "MASK-BINDING-01",
+            "canonical_source_binding_sha256": "a" * 64,
+            "edit_mask_binding_sha256": "b" * 64,
+        }
+    )
+    assert qa["hard_gate_pass"] is True
+    assert qa["hold_reason"] is None
+
+
+def test_target_authority_contract_rejects_runtime_binding_mismatch():
+    receipt = {
+        "authority_id": "CURRENT-385-IMG6984",
+        "authority_status": "PASS",
+        "canonical_source_id": "IMG6984-SOURCE",
+        "target_id": "IMG6984-UNRESOLVED-OBJECT-01",
+        "target_state": "UNRESOLVED",
+        "mask_binding_id": "MASK-BINDING-01",
+        "canonical_source_binding_sha256": "a" * 64,
+        "edit_mask_binding_sha256": "b" * 64,
+    }
+    qa = validate_target_authority_contract(
+        receipt,
+        source_binding_sha256="c" * 64,
+        edit_mask_binding_sha256="b" * 64,
+    )
+    assert qa["hard_gate_pass"] is False
+    assert qa["hold_reason"] == "TARGET_AUTHORITY_BINDING_MISMATCH"
+    assert qa["binding_mismatch"] is True
+
+
+def test_runtime_binding_digests_change_with_source_icc_or_mask():
+    source = Image.new("RGB", (8, 8), "white")
+    same_pixels_new_icc = source.copy()
+    same_pixels_new_icc.info["icc_profile"] = b"different-profile"
+    mask_a = np.zeros((8, 8), dtype=bool)
+    mask_b = mask_a.copy()
+    mask_b[2, 3] = True
+    assert image_binding_sha256(source) != image_binding_sha256(same_pixels_new_icc)
+    assert mask_binding_sha256(mask_a) != mask_binding_sha256(mask_b)
+
+
+def test_promotion_contract_holds_when_target_authority_is_missing():
+    qa = validate_promotion_contract(
+        technical_preservation_pass=True,
+        target_authority_pass=False,
+        mask_minimality_pass=True,
+        target_absence_pass=True,
+        local_quality_pass=True,
+        color_profile_pass=True,
+        human_acceptance_pass=True,
+    )
+    assert qa["failed_gates"] == ["target_authority"]
+    assert qa["technical_candidate_pass"] is False
+    assert qa["promotion_allowed"] is False
+
+
 def test_promotion_contract_rejects_img6986_v5_false_pixel_lock_promotion():
     """Asset-derived regression: pixel lock alone must not promote IMG6986 v5."""
     qa = validate_promotion_contract(
         technical_preservation_pass=True,
+        target_authority_pass=True,
         mask_minimality_pass=False,
         target_absence_pass=False,
         local_quality_pass=False,
@@ -335,6 +513,7 @@ def test_promotion_contract_visual_acceptance_cannot_override_strict_failures():
     """Whole-frame visual acceptance stays non-strict when preservation fails."""
     qa = validate_promotion_contract(
         technical_preservation_pass=False,
+        target_authority_pass=True,
         mask_minimality_pass=False,
         target_absence_pass=True,
         local_quality_pass=True,
@@ -350,6 +529,7 @@ def test_promotion_contract_visual_acceptance_cannot_override_strict_failures():
 def test_promotion_contract_keeps_technical_pass_pending_until_human_acceptance():
     qa = validate_promotion_contract(
         technical_preservation_pass=True,
+        target_authority_pass=True,
         mask_minimality_pass=True,
         target_absence_pass=True,
         local_quality_pass=True,
@@ -366,6 +546,7 @@ def test_promotion_contract_keeps_technical_pass_pending_until_human_acceptance(
 def test_promotion_contract_allows_promotion_only_after_all_gates_and_human_acceptance():
     qa = validate_promotion_contract(
         technical_preservation_pass=True,
+        target_authority_pass=True,
         mask_minimality_pass=True,
         target_absence_pass=True,
         local_quality_pass=True,
@@ -383,6 +564,7 @@ def test_promotion_contract_allows_promotion_only_after_all_gates_and_human_acce
     "field,value",
     [
         ("technical_preservation_pass", 1),
+        ("target_authority_pass", "yes"),
         ("mask_minimality_pass", "yes"),
         ("target_absence_pass", None),
         ("local_quality_pass", np.bool_(True)),
@@ -393,6 +575,7 @@ def test_promotion_contract_allows_promotion_only_after_all_gates_and_human_acce
 def test_promotion_contract_rejects_ambiguous_gate_types(field, value):
     kwargs = {
         "technical_preservation_pass": True,
+        "target_authority_pass": True,
         "mask_minimality_pass": True,
         "target_absence_pass": True,
         "local_quality_pass": True,
