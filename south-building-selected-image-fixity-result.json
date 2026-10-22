@@ -1,0 +1,72 @@
+{
+  "full_archive_download_avoided": true,
+  "head_accept_ranges": "bytes",
+  "head_content_length": "419421847",
+  "head_status": 200,
+  "members": {
+    "DONOR_1": {
+      "archive_path": "south-building/images/P1180212.JPG",
+      "bytes": 1788699,
+      "compressed_bytes_transferred": 1764174,
+      "computed_crc32": "7a577ab0",
+      "filename": "P1180212.JPG",
+      "fixity_pass": true,
+      "image_id": 33,
+      "sha256": "ba4130db63c9324c1c139bf2210057954bf2ca1d1a1c028e900825b1ff2345c1",
+      "zip_crc32": "7a577ab0"
+    },
+    "DONOR_2": {
+      "archive_path": "south-building/images/P1180210.JPG",
+      "bytes": 1912229,
+      "compressed_bytes_transferred": 1886400,
+      "computed_crc32": "0f4510e8",
+      "filename": "P1180210.JPG",
+      "fixity_pass": true,
+      "image_id": 3,
+      "sha256": "69ffef30d6b1d9499870622241b023e101bd9a3512cee87d00154b8a5a5691be",
+      "zip_crc32": "0f4510e8"
+    },
+    "TARGET": {
+      "archive_path": "south-building/images/P1180211.JPG",
+      "bytes": 1775954,
+      "compressed_bytes_transferred": 1753093,
+      "computed_crc32": "3e14a7ef",
+      "filename": "P1180211.JPG",
+      "fixity_pass": true,
+      "image_id": 102,
+      "sha256": "7841c09816d5bb825c03364ab793731074c2e05f0bc0c61489bb5825d1d8e6d4",
+      "zip_crc32": "3e14a7ef"
+    }
+  },
+  "no_gate_outcome_read": true,
+  "no_unselected_image_member_read": true,
+  "range_bytes_transferred_total": 5548815,
+  "resolved_asset_host": "release-assets.githubusercontent.com",
+  "schema": "south-building-selected-image-fixity-v1",
+  "selected": [
+    {
+      "filename": "P1180211.JPG",
+      "image_id": 102,
+      "median_point_error": 0.442066,
+      "median_track_length": 7,
+      "role": "TARGET",
+      "tracked_observation_count": 4721
+    },
+    {
+      "filename": "P1180212.JPG",
+      "image_id": 33,
+      "role": "DONOR_1",
+      "shared_point_count": 3169
+    },
+    {
+      "filename": "P1180210.JPG",
+      "image_id": 3,
+      "role": "DONOR_2",
+      "shared_point_count": 3086
+    }
+  ],
+  "selection_receipt_blob_sha": "91e27fae16515a295d050147899c3e0b4415b5f7",
+  "source_authority": "COLMAP 3.11.1 south-building.zip asset_id=213120796",
+  "status": "PASS",
+  "transport": "HEAD_RESOLVE_FINAL_OBJECT_THEN_EXPLICIT_HTTP_RANGE_ONLY"
+}
