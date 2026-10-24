@@ -1,0 +1,308 @@
+name: Mip-NeRF 360 Bonsai frozen Gate-v3 heldout temp
+
+on:
+  push:
+    branches:
+      - "temp/mip360-camera-preflight-20261023"
+
+permissions:
+  contents: read
+
+jobs:
+  heldout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install frozen-run dependencies
+        run: python -m pip install -q opencv-python-headless scikit-image
+
+      - name: Build source-bound Bonsai evidence and verify PnP
+        shell: bash
+        env:
+          SCORER_GZ_B64: "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"
+          GATE_GZ_B64: "H4sIAAAAAAAC/+1WTW/cNhC951cM9lpL1ceud+2iBYIWCHIIUCC5FQVBU7MSE4lUSEq2E/i/d0aU1pJd5NhTDUNYUpw37w3nQ9/fAOy8arCTu1vYNdKm5emQjtrruxYTa9rHpKySyhrrEll12nttTTqWuyu2PDv7DY2QgY2LrLhO8izJT5+K/Jb+D9fpviyyU/5TdrrNsmiiGmlqFGTZiTFnu7dVBUG6GkOiZIdOgsNa++BkIF/wdZCtDo9Qy4AQLPQORzQBJk6grPFo/OCBEWnZoKO37SPI2iFqU8NgKnQg4R7ll9kR9NZjCn/KoJqkJbwWQuPQN7atPLnvpDZkF7lWEXrM06jAWRuEkoNHgaOu0CgkGd/pFb0cc3GWLb0iDzroEUX0yELff3gnjllWpp97rCcsMoivhTaK3BJz2Yre9GIST0ZZur/eF6fDMZ+f5WynbNdLp701IrjhlT9Bzo5Znr0AO5Wbvz1hPc03SepnWy9ogW7EStzh2ToUbjBk/lf0PMs4bmTEzfwQN2nv7wl2JhPvlWC/DjrK9M8h67R5JV+bVqNbEb8+zI48Eq0ZDx8U9pwkdGSK+kUOZxBFZu1QXO5zlXwbChX2SA8TxJRbTLG4ej7Qt9Kg8EPfWxco3jqqyLPVGd9IRw5eHCUlEyKdPq0Bnf2MKvB5TkQxUqIzOalmTVl6czkvH8RclcJRVotO4gY4L9I1kWlbXKpDUN12EXEF+PIQYTLFC5AdgqcEp33/RSzB6/UDtix87W5DjX1tuJHX/HI1tbNUkZy0oaEQKYWe6ClOM0OFRWVFMSBal26zvabeGwK+47s5bRRfFJ4OK4lREgfnQqC3rVaPXJDvuKWMJcQ2BjHZgSvLGkqDAiLXZOIKzJHkpfCHBWJKbSIMBmNzmKqtvPn5mO0zepQl/8r5UfCjBAol4aJP4e2ia+4zHpQ0la6Iy9Rvr8BQQ3Jw1ka2SYUtFbWjdkYUyP+3qSkunegH9fR/Mv8XybyZZsUyzZbxyQBAg2xQYXCyBQpJbfi2bgGlasCeaezQULu3wNkeKHpxrHnoBh+gkSNuwT5+fP8Bfvt1IpHC73FcUvoQdAuWwBzE1vejeTZnDw1YbVji6ynm7eCm9e4sXcJhAz/c1U72DXDRJGMBlZa1sT5oBZy2yyDgMU2hEIsgzrt8mXU0qPh29/N66tm0cZzX95pawr/fQE2ombh57tl0fOViyduVk+edxU02bTzNzqiEJ4Wf5jDAEoZJzi/rNjCPRfqCoPbApc9Nir9FVGPpQyJe4hLvlKff05unfwDH+t9uWwkAAA=="
+        run: |
+          cat > /tmp/build.py <<'PY'
+          import os, json, struct, urllib.request, re, zlib, binascii, hashlib, math, gzip, base64
+          from pathlib import Path
+          import numpy as np
+          import cv2
+
+          URL="https://storage.googleapis.com/gresearch/refraw360/360_v2.zip"
+          TARGET_ID=36; TARGET="DSCF5600.JPG"
+          DONORS=[(37,"DSCF5601.JPG"),(35,"DSCF5599.JPG")]
+          SELECTED=[(TARGET_ID,TARGET)]+DONORS
+          CAMERA_ID=1
+          INVALID=(1<<64)-1
+          TAIL_CAP=262144; CD_CAP=8*1024*1024
+          CAPS={"bonsai/sparse/0/cameras.bin":1024*1024,
+                "bonsai/sparse/0/images.bin":128*1024*1024,
+                "bonsai/sparse/0/points3D.bin":256*1024*1024}
+          IMG_CAP=32*1024*1024
+          root=Path("evidence"); rawdir=root/"raw"; modeldir=root/"model"; outdir=root/"out"
+          rawdir.mkdir(parents=True,exist_ok=True); modeldir.mkdir(parents=True,exist_ok=True); outdir.mkdir(parents=True,exist_ok=True)
+
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def fetch_range(spec, cap):
+              req=urllib.request.Request(URL,headers={"Range":"bytes="+spec,"User-Agent":"hao-dafeng1-385-bonsai-heldout/1.0","Accept-Encoding":"identity"})
+              with urllib.request.urlopen(req,timeout=120) as r:
+                  status=getattr(r,"status",None) or r.getcode(); cr=r.headers.get("Content-Range"); cl=r.headers.get("Content-Length")
+                  if status!=206 or not cr: raise RuntimeError(f"RANGE_REQUIRED status={status} cr={cr}")
+                  if cl and int(cl)>cap: raise RuntimeError(f"RANGE_TOO_LARGE {cl}>{cap}")
+                  b=r.read(cap+1)
+                  if len(b)>cap: raise RuntimeError(f"RANGE_BODY_TOO_LARGE {cap}")
+                  return b,cr
+
+          tail,cr=fetch_range(f"-{TAIL_CAP}",TAIL_CAP)
+          m=re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)",cr)
+          if not m: raise RuntimeError("BAD_CONTENT_RANGE")
+          total=int(m.group(3)); eocd=tail.rfind(b"PK\x05\x06")
+          if eocd<0: raise RuntimeError("EOCD_NOT_FOUND")
+          _,disk,cd_disk,nd32,nt32,cds32,cdo32,_=struct.unpack_from("<4s4H2IH",tail,eocd)
+          zip64=any(x in (0xffff,0xffffffff) for x in (nd32,nt32,cds32,cdo32))
+          if zip64:
+              loc=tail.rfind(b"PK\x06\x07",0,eocd)
+              _,_,zoff,_=struct.unpack_from("<4sIQI",tail,loc)
+              z64,_=fetch_range(f"{zoff}-{zoff+55}",56)
+              f=struct.unpack_from("<4sQ2H2I4Q",z64,0)
+              if f[0]!=b"PK\x06\x06": raise RuntimeError("BAD_ZIP64")
+              _,_,_,_,disk,cd_disk,_,ntotal,cd_size,cd_off=f
+          else:
+              ntotal,cd_size,cd_off=nt32,cds32,cdo32
+          if disk!=0 or cd_disk!=0 or cd_size>CD_CAP: raise RuntimeError("CD_CONTRACT_FAIL")
+          cd,_=fetch_range(f"{cd_off}-{cd_off+cd_size-1}",CD_CAP)
+
+          def z64extra(extra,usize,csize,loff,disk_start):
+              p=0
+              while p+4<=len(extra):
+                  hid,hlen=struct.unpack_from("<HH",extra,p); body=extra[p+4:p+4+hlen]; p+=4+hlen
+                  if hid!=1: continue
+                  q=0
+                  if usize==0xffffffff: usize=struct.unpack_from("<Q",body,q)[0]; q+=8
+                  if csize==0xffffffff: csize=struct.unpack_from("<Q",body,q)[0]; q+=8
+                  if loff==0xffffffff: loff=struct.unpack_from("<Q",body,q)[0]; q+=8
+                  if disk_start==0xffff: disk_start=struct.unpack_from("<I",body,q)[0]
+                  break
+              return usize,csize,loff,disk_start
+
+          entries={}; pos=0; nentries=0
+          while pos+46<=len(cd):
+              v=struct.unpack_from("<4s6H3I5H2I",cd,pos)
+              if v[0]!=b"PK\x01\x02": raise RuntimeError(f"BAD_CENTRAL {pos}")
+              flag,method,crc,csize,usize=v[3],v[4],v[7],v[8],v[9]
+              nlen,xlen,clen,disk_start,loff=v[10],v[11],v[12],v[13],v[16]
+              rn=cd[pos+46:pos+46+nlen]; extra=cd[pos+46+nlen:pos+46+nlen+xlen]
+              name=rn.decode("utf-8" if flag&0x800 else "cp437")
+              usize,csize,loff,disk_start=z64extra(extra,usize,csize,loff,disk_start)
+              entries[name]={"name":name,"flag":flag,"method":method,"crc":crc,"csize":csize,"usize":usize,"loff":loff}
+              nentries+=1; pos+=46+nlen+xlen+clen
+
+          sparse_names=list(CAPS)
+          for _,nm in SELECTED:
+              matches=[n for n in entries if n==f"bonsai/images/{nm}"]
+              if len(matches)!=1: raise RuntimeError(f"IMAGE_MEMBER_IDENTITY_FAIL {nm} {matches}")
+              CAPS[matches[0]]=IMG_CAP
+
+          def extract(name):
+              e=entries[name]; cap=CAPS[name]
+              if e["csize"]>cap or e["usize"]>cap: raise RuntimeError(f"MEMBER_TOO_LARGE {name} {e['csize']} {e['usize']} cap={cap}")
+              hdr,_=fetch_range(f"{e['loff']}-{e['loff']+29}",64)
+              sig,ver,flag,method,mt,md,crc_lh,cs_lh,us_lh,nlen,xlen=struct.unpack("<4s5H3I2H",hdr)
+              if sig!=b"PK\x03\x04": raise RuntimeError("BAD_LOCAL_HEADER "+name)
+              start=e["loff"]+30+nlen+xlen
+              comp,_=fetch_range(f"{start}-{start+e['csize']-1}",cap)
+              if len(comp)!=e["csize"]: raise RuntimeError("SHORT_MEMBER "+name)
+              if method==0: raw=comp
+              elif method==8: raw=zlib.decompress(comp,-15)
+              else: raise RuntimeError("UNSUPPORTED_METHOD "+name)
+              if len(raw)!=e["usize"] or (binascii.crc32(raw)&0xffffffff)!=e["crc"]: raise RuntimeError("MEMBER_INTEGRITY_FAIL "+name)
+              return raw,e
+
+          cam_raw,cam_e=extract("bonsai/sparse/0/cameras.bin")
+          img_raw,img_e=extract("bonsai/sparse/0/images.bin")
+          pts_raw,pts_e=extract("bonsai/sparse/0/points3D.bin")
+
+          # One exact PINHOLE camera.
+          o=0; nc=struct.unpack_from("<Q",cam_raw,o)[0]; o+=8
+          if nc!=1: raise RuntimeError(f"EXPECTED_ONE_CAMERA {nc}")
+          cid,mid=struct.unpack_from("<ii",cam_raw,o); o+=8
+          width,height=struct.unpack_from("<QQ",cam_raw,o); o+=16
+          if mid!=1: raise RuntimeError(f"EXPECTED_PINHOLE model_id={mid}")
+          fx,fy,cx,cy=struct.unpack_from("<4d",cam_raw,o); o+=32
+          if o!=len(cam_raw) or cid!=CAMERA_ID or fx!=fy: raise RuntimeError(f"EXACT_SINGLE_FPX_FAIL cid={cid} fx={fx} fy={fy}")
+          fpx=fx; K=np.array([[fpx,0,cx],[0,fpx,cy],[0,0,1]],np.float64)
+
+          # Parse images.bin with exact source keypoints.
+          o=0; nimg=struct.unpack_from("<Q",img_raw,o)[0]; o+=8
+          images={}
+          for _ in range(nimg):
+              iid=struct.unpack_from("<I",img_raw,o)[0]; o+=4
+              qvec=struct.unpack_from("<4d",img_raw,o); o+=32
+              tvec=struct.unpack_from("<3d",img_raw,o); o+=24
+              ccid=struct.unpack_from("<I",img_raw,o)[0]; o+=4
+              end=img_raw.index(b"\x00",o); name=img_raw[o:end].decode("utf-8"); o=end+1
+              np2=struct.unpack_from("<Q",img_raw,o)[0]; o+=8
+              p2=[]
+              for idx in range(np2):
+                  x,y,pid=struct.unpack_from("<ddQ",img_raw,o); o+=24
+                  p2.append((x,y,pid))
+              images[iid]={"id":iid,"qvec":qvec,"tvec":tvec,"camera_id":ccid,"name":name,"p2":p2}
+          if o!=len(img_raw): raise RuntimeError("IMAGES_TRAILING")
+          for iid,nm in SELECTED:
+              im=images.get(iid)
+              if not im or im["name"]!=nm or im["camera_id"]!=CAMERA_ID: raise RuntimeError(f"FROZEN_BINDING_MISMATCH {iid} {nm}")
+
+          # Parse points3D.bin and tracks.
+          o=0; npts=struct.unpack_from("<Q",pts_raw,o)[0]; o+=8
+          points={}
+          for _ in range(npts):
+              pid=struct.unpack_from("<Q",pts_raw,o)[0]; o+=8
+              xyz=struct.unpack_from("<3d",pts_raw,o); o+=24
+              rgb=struct.unpack_from("<3B",pts_raw,o); o+=3
+              err=struct.unpack_from("<d",pts_raw,o)[0]; o+=8
+              tl=struct.unpack_from("<Q",pts_raw,o)[0]; o+=8
+              tr=[]
+              for __ in range(tl):
+                  ii,idx=struct.unpack_from("<II",pts_raw,o); o+=8
+                  tr.append((ii,idx))
+              points[pid]={"xyz":xyz,"error":err,"track":tr}
+          if o!=len(pts_raw): raise RuntimeError("POINTS_TRAILING")
+
+          def q2R(q):
+              w,x,y,z=q
+              return np.array([
+                [1-2*y*y-2*z*z, 2*x*y-2*w*z, 2*x*z+2*w*y],
+                [2*x*y+2*w*z, 1-2*x*x-2*z*z, 2*y*z-2*w*x],
+                [2*x*z-2*w*y, 2*y*z+2*w*x, 1-2*x*x-2*y*y]],np.float64)
+
+          selected_ids={iid for iid,_ in SELECTED}
+          target_id=TARGET_ID; donor_ids={iid for iid,_ in DONORS}
+          core_pts=[]; all_reproj=[]
+          for pid,p in points.items():
+              trmap={ii:idx for ii,idx in p["track"] if ii in selected_ids}
+              if target_id not in trmap or not (donor_ids & set(trmap)): continue
+              obs=[]
+              X=np.asarray(p["xyz"],np.float64)
+              for iid,nm in SELECTED:
+                  if iid not in trmap: continue
+                  idx=trmap[iid]
+                  x,y,pid2=images[iid]["p2"][idx]
+                  if pid2!=pid: raise RuntimeError(f"TRACK_OBS_ID_MISMATCH pid={pid} iid={iid} idx={idx} got={pid2}")
+                  R=q2R(images[iid]["qvec"]); t=np.asarray(images[iid]["tvec"])
+                  Xc=R@X+t
+                  uv=K@Xc; uv=uv[:2]/uv[2]
+                  rp=float(np.linalg.norm(uv-np.array([x,y])))
+                  all_reproj.append(rp)
+                  obs.append({"image":nm,"keypoint_index":idx,"source_xy":[x,y],"xy":[x,y],"reproj_px":rp})
+              core_pts.append({"track_id":pid,"xyz":list(map(float,p["xyz"])),"source_point_error":float(p["error"]),"median_reproj_px":float(np.median([q["reproj_px"] for q in obs])),"observations":obs})
+
+          if not core_pts: raise RuntimeError("EMPTY_CORE_SCOPE")
+
+          # Frozen target PnP receipt from all exact target correspondences.
+          obj=[]; uv=[]
+          for x,y,pid in images[TARGET_ID]["p2"]:
+              if pid==INVALID or pid not in points: continue
+              obj.append(points[pid]["xyz"]); uv.append((x,y))
+          obj=np.asarray(obj,np.float64); uv=np.asarray(uv,np.float64)
+          cv2.setRNGSeed(0)
+          ok,rvec,tvec,inliers=cv2.solvePnPRansac(obj,uv,K,np.zeros(5),iterationsCount=600,reprojectionError=2.5,confidence=0.999,flags=cv2.SOLVEPNP_EPNP)
+          if not ok or inliers is None: raise RuntimeError("PNP_FAILED")
+          inl=int(len(inliers)); ratio=inl/len(obj)
+          Rsrc=q2R(images[TARGET_ID]["qvec"]); tsrc=np.asarray(images[TARGET_ID]["tvec"])
+          Rpnp,_=cv2.Rodrigues(rvec); tpnp=tvec.reshape(3)
+          rel=Rpnp@Rsrc.T
+          ang=float(np.degrees(np.arccos(np.clip((np.trace(rel)-1)/2,-1,1))))
+          tl2=float(np.linalg.norm(tpnp-tsrc))
+          if ratio < 0.65: raise RuntimeError(f"PNP_RATIO_FAIL {ratio}")
+
+          # Exact selected source image bytes/fixity.
+          fixity={}
+          member_meta={}
+          for iid,nm in SELECTED:
+              member=f"bonsai/images/{nm}"
+              b,e=extract(member)
+              (rawdir/nm).write_bytes(b)
+              img=cv2.imread(str(rawdir/nm))
+              if img is None or img.shape[1]!=width or img.shape[0]!=height: raise RuntimeError(f"IMAGE_DIM_FAIL {nm} shape={None if img is None else img.shape}")
+              fixity[nm]={"bytes":len(b),"crc32":f"{e['crc']:08x}","sha256":sha(b)}
+              member_meta[nm]={"member":member,"compressed_bytes":e["csize"],**fixity[nm]}
+
+          poses={}
+          for iid,nm in SELECTED:
+              R=q2R(images[iid]["qvec"]); t=np.asarray(images[iid]["tvec"]); center=(-R.T@t)
+              poses[nm]={"R":R.tolist(),"tvec":t.tolist(),"center":center.tolist()}
+
+          re=np.asarray(all_reproj,np.float64)
+          core={
+            "schema":"hao.385.core-sfm-model-v1.source-bound-colmap-adapter.v1",
+            "created_from":"Mip-NeRF 360 official Dataset Pt.1 Bonsai exact COLMAP sparse source; no reconstruction/rematching/BA",
+            "evidence_boundary":"Source-bound adapter from exact official COLMAP sparse measurements and frozen selected image bytes; no reconstruction, rematching, BA, threshold tuning, target/donor reselection or Gate-outcome-derived input.",
+            "intrinsics":{"model":"PINHOLE_EXACT_EQUAL_FOCAL_SOURCE_BOUND","width":int(width),"height":int(height),"f_px":float(fpx),"cx":float(cx),"cy":float(cy),"k1":0.0},
+            "camera_poses":poses,
+            "registered_images":[nm for _,nm in SELECTED],
+            "unregistered_images":[],
+            "points3D":core_pts,
+            "incremental_log":[{"image":TARGET,"pnp_corr":int(len(obj)),"pnp_inliers":inl,"ratio":ratio,"receipt":"source_bound_exact_colmap_correspondences_canonical_pnp_params"}],
+            "source_fixity":fixity,
+            "stats":{"requested_images":3,"registered_images":3,"points3D":len(core_pts),"observations":len(all_reproj),"all_selected_observation_reproj_median_px":float(np.median(re)),"all_selected_observation_reproj_p95_px":float(np.percentile(re,95)),"target_pnp_corr":int(len(obj)),"target_pnp_inliers":inl,"target_pnp_ratio":ratio,"target_pnp_vs_source_rotation_deg":ang,"target_pnp_vs_source_t_l2":tl2}
+          }
+          core_bytes=json.dumps(core,indent=2,sort_keys=True).encode()
+          (modeldir/"core_sfm_model_v1.json").write_bytes(core_bytes)
+
+          # Rehydrate exact frozen Gate and path/target-only adapted scorer from verified South package lineage.
+          scorer=gzip.decompress(base64.b64decode(os.environ["SCORER_GZ_B64"]))
+          gate=gzip.decompress(base64.b64decode(os.environ["GATE_GZ_B64"]))
+          if sha(scorer)!="5f967bb14b7848e4529db6232405f0f585ba01e1af1d139e30554be59da6e7a9": raise RuntimeError("SCORER_ADAPTER_HASH_FAIL")
+          if sha(gate)!="0cdc9a7ba4b5c8a214f4aeabf0620d78e2fd2825449748b7aa35c2edf0c26545": raise RuntimeError("FROZEN_GATE_HASH_FAIL")
+          (root/"run_gate_v3_bonsai_adapter.py").write_bytes(scorer)
+          (modeldir/"FROZEN_VISIBLE_ONLY_GATE_v3.json").write_bytes(gate)
+          lineage={"canonical_scorer_sha256":"4e61e3f87eb2a99dffb08417d027ac31a903c02858cce1b1d4ba1e06eec5269b","south_adapter_sha256":"40db6155894cf7a8a9f4a03811d9a300090e998f47688a26e71f020f3cf5feb0","bonsai_adapter_sha256":sha(scorer),"frozen_gate_sha256":sha(gate),"allowed_adapter_delta":["BASE/MROOT/OUT paths","single target literal P1180211.JPG -> DSCF5600.JPG"],"scoring_logic_changed":False}
+          (root/"adapter_lineage.json").write_text(json.dumps(lineage,indent=2,sort_keys=True))
+
+          preflight={"source_url":URL,"archive_total_bytes":total,"zip64":zip64,"entry_count":nentries,
+            "sparse_members":{"cameras":{"bytes":cam_e["usize"],"compressed_bytes":cam_e["csize"],"crc32":f"{cam_e['crc']:08x}"},"images":{"bytes":img_e["usize"],"compressed_bytes":img_e["csize"],"crc32":f"{img_e['crc']:08x}"},"points3D":{"bytes":pts_e["usize"],"compressed_bytes":pts_e["csize"],"crc32":f"{pts_e['crc']:08x}"}},
+            "selected_images":member_meta,"frozen_binding":{"target":{"image_id":TARGET_ID,"name":TARGET},"donors":[{"image_id":i,"name":n} for i,n in DONORS]},
+            "core_scope":{"rule":"target AND at least one frozen donor visible","points3D":len(core_pts),"observations":len(all_reproj)},
+            "pnp":{"corr":len(obj),"inliers":inl,"ratio":ratio,"min_required":0.65,"rotation_delta_deg":ang,"t_l2":tl2,"pass":ratio>=0.65},
+            "hashes":{"core_sfm_model_v1.json":sha(core_bytes),"run_gate_v3_bonsai_adapter.py":sha(scorer),"FROZEN_VISIBLE_ONLY_GATE_v3.json":sha(gate)},
+            "versions":{"opencv":cv2.__version__,"numpy":np.__version__},
+            "boundaries":{"reconstruction":False,"rematching":False,"bundle_adjustment":False,"threshold_change":False,"target_reselection":False,"donor_reselection":False,"gate_outcome_seen_before_binding":False}}
+          (root/"preflight.json").write_text(json.dumps(preflight,indent=2,sort_keys=True))
+          print(json.dumps({"PRE_GATE_PASS":True,"pnp":preflight["pnp"],"core_scope":preflight["core_scope"],"selected_images":fixity},sort_keys=True))
+          PY
+          python /tmp/build.py
+
+      - name: Run frozen Gate-v3 exactly once
+        shell: bash
+        run: |
+          cd evidence
+          python run_gate_v3_bonsai_adapter.py
+
+      - name: Finalize receipt
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,hashlib,platform
+          from pathlib import Path
+          import cv2,numpy as np,skimage
+          r=Path("evidence")
+          def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+          pre=json.loads((r/"preflight.json").read_text())
+          out=json.loads((r/"out"/"holdout_results.json").read_text())
+          t=out["targets"][0]
+          receipt={"schema":"hao.385.mipnerf360-bonsai-gate-v3-heldout.v1","preflight":pre,
+            "target":t["target"],"stats":t["stats"],"shared_tracks_by_donor":t["shared_tracks_by_donor"],
+            "hashes":{"holdout_results.json":sha(r/"out"/"holdout_results.json"),"core_sfm_model_v1.json":sha(r/"model"/"core_sfm_model_v1.json"),"frozen_gate":sha(r/"model"/"FROZEN_VISIBLE_ONLY_GATE_v3.json"),"adapter":sha(r/"run_gate_v3_bonsai_adapter.py")},
+            "runtime":{"python":platform.python_version(),"opencv":cv2.__version__,"numpy":np.__version__,"skimage":skimage.__version__},
+            "boundaries":{"threshold_change":False,"target_reselection":False,"donor_reselection":False,"runtime_promotion":False}}
+          (r/"field_receipt.json").write_text(json.dumps(receipt,indent=2,sort_keys=True))
+          print(json.dumps({"target":t["target"],"stats":t["stats"],"hashes":receipt["hashes"]},sort_keys=True))
+          PY
+
+      - name: Upload complete replay package
+        uses: actions/upload-artifact@v4
+        with:
+          name: mip360-bonsai-gatev3-heldout
+          path: evidence
+          retention-days: 1
+          compression-level: 6
