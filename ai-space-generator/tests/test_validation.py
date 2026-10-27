@@ -109,6 +109,8 @@ def test_interior_reference_normalizer_runs_with_legacy_image_stack():
     second = np.asarray(normalize_image(image, spec))
     assert first.shape == (240, 320, 3)
     assert np.array_equal(first, second)
+    edges = np.concatenate((first[0], first[-1], first[:, 0], first[:, -1]), axis=0)
+    assert int(edges.min()) > 0
 
 
 def test_interior_reference_normalizer_preserves_icc_in_legacy_gate(tmp_path):

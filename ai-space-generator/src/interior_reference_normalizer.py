@@ -6,6 +6,7 @@ photometric transforms. It never synthesizes objects or textures.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
@@ -47,16 +48,53 @@ def _image_dependencies():
     return cv2, np, Image, ImageEnhance, ImageOps
 
 
+def _largest_inscribed_rectangle(width: int, height: int, degrees: float) -> tuple[int, int]:
+    """Return a centered rectangle fully contained in the rotated source footprint."""
+    angle = abs(math.radians(degrees))
+    if angle < 1e-12:
+        return width, height
+
+    sin_a = abs(math.sin(angle))
+    cos_a = abs(math.cos(angle))
+    width_is_longer = width >= height
+    side_long = max(width, height)
+    side_short = min(width, height)
+
+    if side_short <= 2.0 * sin_a * cos_a * side_long or abs(sin_a - cos_a) < 1e-12:
+        half_short = 0.5 * side_short
+        if width_is_longer:
+            crop_w = half_short / sin_a
+            crop_h = half_short / cos_a
+        else:
+            crop_w = half_short / cos_a
+            crop_h = half_short / sin_a
+    else:
+        cos_2a = cos_a * cos_a - sin_a * sin_a
+        crop_w = (width * cos_a - height * sin_a) / cos_2a
+        crop_h = (height * cos_a - width * sin_a) / cos_2a
+
+    return max(1, math.floor(crop_w)), max(1, math.floor(crop_h))
+
+
 def _rotate_edge_safe(image: "PILImage.Image", degrees: float):
     _, _, Image, _, _ = _image_dependencies()
     if abs(degrees) < 1e-9:
         return image.copy()
-    return image.rotate(
+
+    rotated = image.rotate(
         degrees,
         resample=Image.Resampling.BICUBIC,
         expand=True,
         fillcolor=None,
     )
+    crop_w, crop_h = _largest_inscribed_rectangle(
+        image.width,
+        image.height,
+        degrees,
+    )
+    left = (rotated.width - crop_w) // 2
+    top = (rotated.height - crop_h) // 2
+    return rotated.crop((left, top, left + crop_w, top + crop_h))
 
 
 def _center_crop_aspect(image: "PILImage.Image", width: int, height: int):

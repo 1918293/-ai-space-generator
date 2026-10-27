@@ -7,7 +7,7 @@ This module standardizes a set of interior photos for design-reference review wi
 Allowed transforms are deterministic and global:
 
 - EXIF orientation normalization
-- bounded roll correction (maximum ±5°)
+- bounded roll correction (maximum ±5°), followed by a centered inscribed crop that removes rotation fill borders
 - center crop to one target aspect ratio
 - bounded neutral-pixel white balance
 - bounded exposure, contrast, and saturation correction

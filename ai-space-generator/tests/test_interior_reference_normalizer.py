@@ -43,6 +43,8 @@ def test_normalize_image_has_exact_target_size_and_is_deterministic():
     b = np.asarray(normalize_image(image, spec))
     assert a.shape == (240, 320, 3)
     assert np.array_equal(a, b)
+    edges = np.concatenate((a[0], a[-1], a[:, 0], a[:, -1]), axis=0)
+    assert int(edges.min()) > 0
 
 
 def test_normalize_file_preserves_icc_profile(tmp_path: Path):
