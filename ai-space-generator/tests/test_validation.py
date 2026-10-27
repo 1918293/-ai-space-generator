@@ -6,6 +6,11 @@ from src.validation import (
     validate_object_role_contract,
     validate_remove_target_contract,
 )
+from src.interior_reference_normalizer import (
+    NormalizationSpec,
+    normalize_file,
+    normalize_image,
+)
 
 
 def _mask(box):
@@ -88,3 +93,40 @@ def test_target_modified_ratio_supports_grayscale_arrays():
     assert qa["target_pixels_changed"] == int(np.count_nonzero(target))
     assert qa["target_modified_ratio"] == 1.0
     assert qa["semantic_removal_verified"] is False
+
+
+def test_interior_reference_normalizer_runs_with_legacy_image_stack():
+    image = Image.new("RGB", (640, 480), (218, 207, 194))
+    spec = NormalizationSpec(
+        width=320,
+        height=240,
+        roll_degrees=0.6,
+        exposure_ev=0.1,
+        saturation=0.96,
+        contrast=1.04,
+    )
+    first = np.asarray(normalize_image(image, spec))
+    second = np.asarray(normalize_image(image, spec))
+    assert first.shape == (240, 320, 3)
+    assert np.array_equal(first, second)
+
+
+def test_interior_reference_normalizer_preserves_icc_in_legacy_gate(tmp_path):
+    source = tmp_path / "source.jpg"
+    destination = tmp_path / "normalized.jpg"
+    icc = b"interior-reference-test-icc"
+    Image.new("RGB", (640, 480), (205, 200, 195)).save(
+        source,
+        quality=95,
+        icc_profile=icc,
+    )
+
+    normalize_file(
+        source,
+        destination,
+        NormalizationSpec(width=320, height=240),
+    )
+
+    with Image.open(destination) as result:
+        assert result.size == (320, 240)
+        assert result.info.get("icc_profile") == icc
