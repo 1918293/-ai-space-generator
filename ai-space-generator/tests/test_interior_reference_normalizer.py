@@ -1,32 +1,8 @@
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
+import pytest
 
-from src.interior_reference_normalizer import (
-    NormalizationSpec,
-    normalize_file,
-    normalize_image,
-    normalize_set,
-)
-
-
-def _synthetic_image(width=640, height=480):
-    x = np.linspace(20, 235, width, dtype=np.uint8)
-    y = np.linspace(15, 220, height, dtype=np.uint8)[:, None]
-    r = np.tile(x, (height, 1))
-    g = np.tile(y, (1, width))
-    b = ((r.astype(np.uint16) + g.astype(np.uint16)) // 2).astype(np.uint8)
-    return Image.fromarray(np.stack([r, g, b], axis=-1), "RGB")
-
-
-def test_normalize_image_has_exact_target_size_and_is_deterministic():
-    image = _synthetic_image()
-    spec = NormalizationSpec(width=320, height=240, roll_degrees=0.6)
-    a = np.asarray(normalize_image(image, spec))
-    b = np.asarray(normalize_image(image, spec))
-    assert a.shape == (240, 320, 3)
-    assert np.array_equal(a, b)
+from src.interior_reference_normalizer import NormalizationSpec
 
 
 def test_bounds_reject_aggressive_photometric_or_geometry_changes():
@@ -36,15 +12,43 @@ def test_bounds_reject_aggressive_photometric_or_geometry_changes():
         NormalizationSpec(saturation=1.5),
         NormalizationSpec(contrast=1.4),
     ):
-        try:
+        with pytest.raises(ValueError):
             bad.validate()
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("expected bounded spec validation to fail")
+
+
+def _image_stack():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    Image = pytest.importorskip("PIL.Image")
+    return np, Image
+
+
+def _synthetic_image(width=640, height=480):
+    np, Image = _image_stack()
+    x = np.linspace(20, 235, width, dtype=np.uint8)
+    y = np.linspace(15, 220, height, dtype=np.uint8)[:, None]
+    r = np.tile(x, (height, 1))
+    g = np.tile(y, (1, width))
+    b = ((r.astype(np.uint16) + g.astype(np.uint16)) // 2).astype(np.uint8)
+    return Image.fromarray(np.stack([r, g, b], axis=-1), "RGB")
+
+
+def test_normalize_image_has_exact_target_size_and_is_deterministic():
+    np, _ = _image_stack()
+    from src.interior_reference_normalizer import normalize_image
+
+    image = _synthetic_image()
+    spec = NormalizationSpec(width=320, height=240, roll_degrees=0.6)
+    a = np.asarray(normalize_image(image, spec))
+    b = np.asarray(normalize_image(image, spec))
+    assert a.shape == (240, 320, 3)
+    assert np.array_equal(a, b)
 
 
 def test_normalize_file_preserves_icc_profile(tmp_path: Path):
+    _, Image = _image_stack()
+    from src.interior_reference_normalizer import normalize_file
+
     src = tmp_path / "source.jpg"
     dst = tmp_path / "out.jpg"
     icc = b"test-icc-profile-bytes"
@@ -57,6 +61,9 @@ def test_normalize_file_preserves_icc_profile(tmp_path: Path):
 
 
 def test_normalize_set_uses_stable_generic_names(tmp_path: Path):
+    _image_stack()
+    from src.interior_reference_normalizer import normalize_set
+
     sources = []
     for index in range(3):
         p = tmp_path / f"source_{index}.jpg"

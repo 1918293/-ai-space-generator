@@ -8,11 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
-import cv2
-import numpy as np
-from PIL import Image, ImageEnhance, ImageOps
+if TYPE_CHECKING:
+    from PIL import Image as PILImage
 
 
 @dataclass(frozen=True)
@@ -40,7 +39,16 @@ class NormalizationSpec:
             raise ValueError("neutral clip percentile must be in [90, 100]")
 
 
-def _rotate_edge_safe(image: Image.Image, degrees: float) -> Image.Image:
+def _image_dependencies():
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageEnhance, ImageOps
+
+    return cv2, np, Image, ImageEnhance, ImageOps
+
+
+def _rotate_edge_safe(image: "PILImage.Image", degrees: float):
+    _, _, Image, _, _ = _image_dependencies()
     if abs(degrees) < 1e-9:
         return image.copy()
     return image.rotate(
@@ -51,7 +59,8 @@ def _rotate_edge_safe(image: Image.Image, degrees: float) -> Image.Image:
     )
 
 
-def _center_crop_aspect(image: Image.Image, width: int, height: int) -> Image.Image:
+def _center_crop_aspect(image: "PILImage.Image", width: int, height: int):
+    _, _, Image, _, _ = _image_dependencies()
     target_ratio = width / height
     source_ratio = image.width / image.height
     if source_ratio > target_ratio:
@@ -65,8 +74,9 @@ def _center_crop_aspect(image: Image.Image, width: int, height: int) -> Image.Im
     return image.crop(box).resize((width, height), Image.Resampling.LANCZOS)
 
 
-def _bounded_gray_world(image: Image.Image, percentile: float) -> Image.Image:
+def _bounded_gray_world(image: "PILImage.Image", percentile: float):
     """Neutralize global cast using bright, low-chroma pixels with bounded gain."""
+    cv2, np, Image, _, _ = _image_dependencies()
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
     hsv = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2HSV)
     value = hsv[..., 2].astype(np.float32)
@@ -87,8 +97,9 @@ def _bounded_gray_world(image: Image.Image, percentile: float) -> Image.Image:
     return Image.fromarray(balanced, mode="RGB")
 
 
-def normalize_image(image: Image.Image, spec: NormalizationSpec) -> Image.Image:
+def normalize_image(image: "PILImage.Image", spec: NormalizationSpec):
     """Return a deterministic, non-generative normalized interior reference frame."""
+    _, _, _, ImageEnhance, ImageOps = _image_dependencies()
     spec.validate()
     normalized = ImageOps.exif_transpose(image).convert("RGB")
     normalized = _rotate_edge_safe(normalized, spec.roll_degrees)
@@ -104,6 +115,7 @@ def normalize_image(image: Image.Image, spec: NormalizationSpec) -> Image.Image:
 
 def normalize_file(source: Path, destination: Path, spec: NormalizationSpec) -> Path:
     """Normalize one image while preserving its ICC profile when one exists."""
+    _, _, Image, _, _ = _image_dependencies()
     source = Path(source)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
