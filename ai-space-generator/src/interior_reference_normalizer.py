@@ -1,0 +1,138 @@
+"""Non-generative normalization for interior reference-photo sets.
+
+The module intentionally limits itself to deterministic geometric and global
+photometric transforms. It never synthesizes objects or textures.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+import cv2
+import numpy as np
+from PIL import Image, ImageEnhance, ImageOps
+
+
+@dataclass(frozen=True)
+class NormalizationSpec:
+    width: int = 1448
+    height: int = 1086
+    roll_degrees: float = 0.0
+    exposure_ev: float = 0.0
+    saturation: float = 0.96
+    contrast: float = 1.04
+    neutral_clip_percentile: float = 98.0
+
+    def validate(self) -> None:
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("output dimensions must be positive")
+        if abs(self.roll_degrees) > 5.0:
+            raise ValueError("roll correction is bounded to ±5 degrees")
+        if not -1.0 <= self.exposure_ev <= 1.0:
+            raise ValueError("exposure correction is bounded to ±1 EV")
+        if not 0.75 <= self.saturation <= 1.25:
+            raise ValueError("saturation is bounded to [0.75, 1.25]")
+        if not 0.8 <= self.contrast <= 1.2:
+            raise ValueError("contrast is bounded to [0.8, 1.2]")
+        if not 90.0 <= self.neutral_clip_percentile <= 100.0:
+            raise ValueError("neutral clip percentile must be in [90, 100]")
+
+
+def _rotate_edge_safe(image: Image.Image, degrees: float) -> Image.Image:
+    if abs(degrees) < 1e-9:
+        return image.copy()
+    return image.rotate(
+        degrees,
+        resample=Image.Resampling.BICUBIC,
+        expand=True,
+        fillcolor=None,
+    )
+
+
+def _center_crop_aspect(image: Image.Image, width: int, height: int) -> Image.Image:
+    target_ratio = width / height
+    source_ratio = image.width / image.height
+    if source_ratio > target_ratio:
+        crop_w = round(image.height * target_ratio)
+        left = (image.width - crop_w) // 2
+        box = (left, 0, left + crop_w, image.height)
+    else:
+        crop_h = round(image.width / target_ratio)
+        top = (image.height - crop_h) // 2
+        box = (0, top, image.width, top + crop_h)
+    return image.crop(box).resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _bounded_gray_world(image: Image.Image, percentile: float) -> Image.Image:
+    """Neutralize global cast using bright, low-chroma pixels with bounded gain."""
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
+    hsv = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2HSV)
+    value = hsv[..., 2].astype(np.float32)
+    sat = hsv[..., 1].astype(np.float32)
+
+    bright_cut = np.percentile(value, percentile)
+    sat_cut = np.percentile(sat, 40.0)
+    mask = (value >= bright_cut) & (sat <= sat_cut)
+    if mask.sum() < 64:
+        mask = value >= np.percentile(value, 85.0)
+
+    samples = rgb[mask]
+    means = samples.mean(axis=0)
+    neutral = float(means.mean())
+    gains = neutral / np.maximum(means, 1.0)
+    gains = np.clip(gains, 0.90, 1.10)
+    balanced = np.clip(rgb * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
+    return Image.fromarray(balanced, mode="RGB")
+
+
+def normalize_image(image: Image.Image, spec: NormalizationSpec) -> Image.Image:
+    """Return a deterministic, non-generative normalized interior reference frame."""
+    spec.validate()
+    normalized = ImageOps.exif_transpose(image).convert("RGB")
+    normalized = _rotate_edge_safe(normalized, spec.roll_degrees)
+    normalized = _center_crop_aspect(normalized, spec.width, spec.height)
+    normalized = _bounded_gray_world(normalized, spec.neutral_clip_percentile)
+
+    exposure_gain = 2.0 ** spec.exposure_ev
+    normalized = ImageEnhance.Brightness(normalized).enhance(exposure_gain)
+    normalized = ImageEnhance.Contrast(normalized).enhance(spec.contrast)
+    normalized = ImageEnhance.Color(normalized).enhance(spec.saturation)
+    return normalized
+
+
+def normalize_file(source: Path, destination: Path, spec: NormalizationSpec) -> Path:
+    """Normalize one image while preserving its ICC profile when one exists."""
+    source = Path(source)
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    with Image.open(source) as image:
+        icc = image.info.get("icc_profile")
+        out = normalize_image(image, spec)
+        save_kwargs = {"quality": 95, "subsampling": 0, "optimize": True}
+        if icc:
+            save_kwargs["icc_profile"] = icc
+        out.save(destination, **save_kwargs)
+    return destination
+
+
+def normalize_set(
+    sources: Sequence[Path],
+    destination_dir: Path,
+    specs: Sequence[NormalizationSpec],
+) -> list[Path]:
+    """Normalize a set using one explicit bounded spec per source image."""
+    if len(sources) != len(specs):
+        raise ValueError("sources and specs must have the same length")
+    destination_dir = Path(destination_dir)
+    outputs: list[Path] = []
+    for index, (source, spec) in enumerate(zip(sources, specs), start=1):
+        outputs.append(
+            normalize_file(source, destination_dir / f"view_{index:02d}_normalized.jpg", spec)
+        )
+    return outputs
+
+
+__all__ = ["NormalizationSpec", "normalize_image", "normalize_file", "normalize_set"]
