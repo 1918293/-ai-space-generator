@@ -152,3 +152,19 @@ def test_preserve_occluder_partial_protected_coverage_must_fail():
     qa = validate_object_role_contract(edit, protected, target, "PRESERVE_OCCLUDER")
     assert qa["expected_mask_coverage_ratio"] == 1 / 25
     assert qa["hard_gate_pass"] is False
+
+
+def test_fixed_structure_requires_protection_and_rejects_editing():
+    target = np.ones((5, 5), dtype=bool)
+    empty = np.zeros_like(target)
+    partial = empty.copy()
+    partial[0, 0] = True
+
+    protected_qa = validate_object_role_contract(empty, target, target, "FIXED_STRUCTURE")
+    partial_qa = validate_object_role_contract(empty, partial, target, "FIXED_STRUCTURE")
+    edited_qa = validate_object_role_contract(target, empty, target, "FIXED_STRUCTURE")
+
+    assert protected_qa["hard_gate_pass"] is True
+    assert partial_qa["expected_mask_coverage_ratio"] == 1 / 25
+    assert partial_qa["hard_gate_pass"] is False
+    assert edited_qa["hard_gate_pass"] is False
