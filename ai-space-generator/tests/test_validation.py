@@ -132,3 +132,23 @@ def test_interior_reference_normalizer_preserves_icc_in_legacy_gate(tmp_path):
     with Image.open(destination) as result:
         assert result.size == (320, 240)
         assert result.info.get("icc_profile") == icc
+
+
+def test_remove_target_partial_edit_coverage_must_fail():
+    target = np.ones((5, 5), dtype=bool)
+    edit = np.zeros_like(target)
+    edit[0, 0] = True
+    protected = np.zeros_like(target)
+    qa = validate_object_role_contract(edit, protected, target, "REMOVE")
+    assert qa["expected_mask_coverage_ratio"] == 1 / 25
+    assert qa["hard_gate_pass"] is False
+
+
+def test_preserve_occluder_partial_protected_coverage_must_fail():
+    target = np.ones((5, 5), dtype=bool)
+    edit = np.zeros_like(target)
+    protected = np.zeros_like(target)
+    protected[0, 0] = True
+    qa = validate_object_role_contract(edit, protected, target, "PRESERVE_OCCLUDER")
+    assert qa["expected_mask_coverage_ratio"] == 1 / 25
+    assert qa["hard_gate_pass"] is False
