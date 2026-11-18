@@ -39,7 +39,10 @@ with gr.Blocks(title="AI 空間生成器") as demo:
             )
 
         with gr.Tab("2　選取與生成"):
-            gr.Markdown("先把照片載入編輯器，再用筆刷塗選需要移除、替換或更換材質的區域。")
+            gr.Markdown(
+                "先把照片載入編輯器，用紅色筆刷塗選允許修改的區域；"
+                "若有地插、固定結構或其他不可動物件，可另外標記保護區。"
+            )
             load_editor_button = gr.Button("載入照片到編輯器")
             editor = gr.ImageEditor(
                 label="塗選修改區域",
@@ -49,7 +52,24 @@ with gr.Blocks(title="AI 空間生成器") as demo:
                 brush=gr.Brush(colors=["#ff2d55"], color_mode="fixed", default_size=35),
                 layers=gr.LayerOptions(allow_additional_layers=True),
             )
-            load_editor_button.click(lambda image: image, inputs=source_image, outputs=editor)
+            with gr.Accordion("選填：標記保護區（不得修改）", open=False):
+                protected_editor = gr.ImageEditor(
+                    label="塗選保護區",
+                    type="pil",
+                    sources=["upload"],
+                    height=420,
+                    brush=gr.Brush(colors=["#34c759"], color_mode="fixed", default_size=30),
+                    layers=gr.LayerOptions(allow_additional_layers=True),
+                )
+                gr.Markdown(
+                    "保護區不得與修改區重疊；若重疊，系統會在生成前直接拒絕。",
+                    elem_classes=["helper"],
+                )
+            load_editor_button.click(
+                lambda image: (image, image),
+                inputs=source_image,
+                outputs=[editor, protected_editor],
+            )
 
             with gr.Row():
                 action = gr.Dropdown(
@@ -83,7 +103,16 @@ with gr.Blocks(title="AI 空間生成器") as demo:
 
             generate_button.click(
                 generate_design,
-                inputs=[editor, action, material, colour, prompt, strength, use_remote_ai],
+                inputs=[
+                    editor,
+                    action,
+                    material,
+                    colour,
+                    prompt,
+                    strength,
+                    use_remote_ai,
+                    protected_editor,
+                ],
                 outputs=[result_image, comparison, status, download],
             )
 
@@ -95,7 +124,8 @@ with gr.Blocks(title="AI 空間生成器") as demo:
 - EXIF 日期、時間、裝置與 GPS 讀取（照片含資料時）
 - 離線影像特徵與主要色彩分析
 - 可選的 Hugging Face 物件偵測
-- 筆刷區域選取
+- 修改區與選填保護區的雙遮罩筆刷
+- 修改／保護區重疊時生成前拒絕
 - 物件移除、材質與顏色的本機示意
 - 可選的遠端 image-to-image 生成
 - 未選取區域保留、前後比較與 PNG 下載
