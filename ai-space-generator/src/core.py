@@ -233,6 +233,26 @@ def mask_from_editor(editor_value: dict[str, Any] | None) -> tuple[Image.Image |
     return background, mask_img
 
 
+def composite_preserving_unmasked(
+    candidate: Image.Image,
+    original: Image.Image,
+    mask: Image.Image,
+) -> Image.Image:
+    """Restore the original pixels anywhere the edit mask is fully black."""
+    original_rgb = ensure_rgb(original)
+    candidate_rgb = ensure_rgb(candidate).resize(original_rgb.size)
+    mask_l = mask.resize(original_rgb.size).convert("L")
+    return Image.composite(candidate_rgb, original_rgb, mask_l)
+
+
+def mask_to_rgba_layer(mask: Image.Image) -> Image.Image:
+    """Encode an edit mask in the alpha channel expected by Gradio ImageMask/ImageEditor."""
+    mask_l = mask.convert("L")
+    layer = Image.new("RGBA", mask_l.size, (255, 255, 255, 0))
+    layer.putalpha(mask_l)
+    return layer
+
+
 def _seed_from_text(text: str) -> int:
     value = 2166136261
     for char in text:
@@ -288,6 +308,8 @@ def local_transform(
         raise ValueError("請先用筆刷標記需要修改的區域。")
 
     action_key = action.lower()
+    if "背景" in action_key:
+        raise ValueError("更換背景需要勾選遠端 AI，才能使用真正的遮罩 inpainting。")
     if "移除" in action_key:
         bgr = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
         binary = np.where(mask_np > 8, 255, 0).astype(np.uint8)
@@ -329,6 +351,75 @@ def remote_generate(image: Image.Image, prompt: str) -> Image.Image:
     return ensure_rgb(result)
 
 
+
+def _extract_gradio_result_path(response: Any) -> str | None:
+    """Normalize ImageSlider responses across Gradio client versions."""
+    value = response
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        value = value[1]
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+
+    if isinstance(value, dict):
+        value = value.get("path") or value.get("url")
+    elif hasattr(value, "path"):
+        value = value.path
+
+    if isinstance(value, (str, Path)):
+        return str(value)
+    return None
+
+
+def remote_inpaint(image: Image.Image, mask: Image.Image, prompt: str) -> Image.Image:
+    """Call a public mask-aware Hugging Face Space without creating a paid provider secret."""
+    from gradio_client import Client, handle_file
+
+    rgb = ensure_rgb(image)
+    mask_l = mask.resize(rgb.size).convert("L")
+    if not np.any(np.asarray(mask_l, dtype=np.uint8) > 8):
+        raise ValueError("遮罩為空，無法執行 inpainting。")
+
+    space_id = (
+        os.getenv("INPAINT_SPACE", "").strip()
+        or "diffusers/stable-diffusion-xl-inpainting"
+    )
+
+    with tempfile.TemporaryDirectory(prefix="ai-space-inpaint-") as temp_dir:
+        background_path = Path(temp_dir) / "background.png"
+        mask_path = Path(temp_dir) / "mask.png"
+        rgb.save(background_path, "PNG")
+        mask_to_rgba_layer(mask_l).save(mask_path, "PNG")
+
+        client = Client(space_id, verbose=False)
+        response = client.predict(
+            input_image={
+                "background": handle_file(str(background_path)),
+                "layers": [handle_file(str(mask_path))],
+                "composite": None,
+            },
+            prompt=prompt,
+            negative_prompt=(
+                "distorted anatomy, duplicate person, extra fingers, warped furniture, "
+                "text, watermark, logo"
+            ),
+            guidance_scale=7.5,
+            steps=20,
+            strength=0.99,
+            scheduler="EulerDiscreteScheduler",
+            api_name="/predict",
+        )
+
+        # The SDXL Space exposes one ImageSlider output that contains (before, after).
+        result_path = _extract_gradio_result_path(response)
+        if not result_path:
+            raise RuntimeError("遠端 inpainting 沒有回傳可讀取的結果影像。")
+
+        with Image.open(result_path) as generated:
+            return ensure_rgb(generated)
+
+
 def generate_design(
     editor_value: dict[str, Any] | None,
     action: str,
@@ -346,14 +437,25 @@ def generate_design(
 
     try:
         if use_remote_ai:
-            full_prompt = (
-                "Architectural interior design edit. Preserve the original camera angle, geometry, "
-                "windows, walls, and all unselected areas. "
-                f"Requested action: {action}. Material: {material}. User instruction: {prompt or 'refine the selected area'}."
-            )
-            candidate = remote_generate(background, full_prompt).resize(background.size)
-            result = Image.composite(candidate, background, mask)
-            mode = "遠端 AI 生成"
+            if "背景" in action:
+                full_prompt = (
+                    "Photorealistic masked background replacement. Modify only the masked region. "
+                    "Keep the subject, face, hair, hands, clothing, tattoo, chair, camera perspective, "
+                    "crop, and all unmasked content unchanged. Match realistic lighting, depth, edges, "
+                    "and contact shadows. "
+                    f"User instruction: {prompt or 'replace the selected background naturally'}."
+                )
+                candidate = remote_inpaint(background, mask, full_prompt)
+                mode = "遠端遮罩 Inpainting（Hugging Face ZeroGPU）"
+            else:
+                full_prompt = (
+                    "Architectural interior design edit. Preserve the original camera angle, geometry, "
+                    "windows, walls, and all unselected areas. "
+                    f"Requested action: {action}. Material: {material}. User instruction: {prompt or 'refine the selected area'}."
+                )
+                candidate = remote_generate(background, full_prompt)
+                mode = "遠端 AI 生成"
+            result = composite_preserving_unmasked(candidate, background, mask)
         else:
             result = local_transform(background, mask, action, material, colour, prompt, strength)
             mode = "本機示意模式"

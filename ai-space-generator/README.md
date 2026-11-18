@@ -25,6 +25,8 @@ license: mit
 - 筆刷區域選取
 - 本機物件移除、材質與顏色示意
 - 選配 Hugging Face image-to-image 生成
+- 選配遮罩背景 inpainting：預設呼叫公開 `diffusers/stable-diffusion-xl-inpainting` ZeroGPU Space
+- 遠端背景結果再以原圖像素回貼未選取區域
 - 未選取區域保留
 - 修改前後比較
 - PNG 下載
@@ -146,6 +148,9 @@ cp .env.example .env
 
 - `DETECTION_MODEL`：物件偵測模型 ID
 - `GENERATION_MODEL`：image-to-image 模型 ID
+- `INPAINT_SPACE`：遮罩背景 inpainting 的 Gradio Space；預設 `diffusers/stable-diffusion-xl-inpainting`
+
+「更換背景（遮罩 inpainting）」預設不需要新增付費 provider Secret；它使用公開 ZeroGPU Space 的匿名路徑，因此可能排隊、受匿名每日額度限制，並會把照片與遮罩傳送到 Hugging Face 的外部服務。未取得授權的敏感／客戶照片不要使用這條遠端路徑。
 
 未設定 token 時，工具仍可使用本機示意模式；介面會明確標記它不是生成式 AI 結果。
 
@@ -171,9 +176,10 @@ docker run --rm -p 7860:7860 --env-file .env ai-space-generator
 2. 執行照片分析，確認拍攝資訊與辨識結果。
 3. 把照片載入編輯器。
 4. 用筆刷塗選要修改的物件或表面。
-5. 選擇移除、替換材質或更換顏色。
-6. 輸入設計要求並生成。
-7. 比較修改前後並下載 PNG。
+5. 選擇移除、替換材質、更換顏色或更換背景。
+6. 若使用背景 inpainting，確認照片可傳送至外部 Hugging Face 服務後再勾選遠端 AI。
+7. 輸入設計要求並生成。
+8. 比較修改前後並下載 PNG。
 
 ## 專案結構
 
@@ -200,4 +206,4 @@ ai-space-generator/
 
 ## 隱私
 
-程式本身不建立帳號或資料庫。部署平台可能保留請求日誌或暫存檔，實際公開前應依平台政策補充隱私聲明。分享輸出前，請確認是否需要移除定位與 EXIF 資訊。
+程式本身不建立帳號或資料庫。部署平台可能保留請求日誌或暫存檔，實際公開前應依平台政策補充隱私聲明。使用遠端背景 inpainting 時，原圖與遮罩會傳送到設定的 Hugging Face Space；這與本機示意模式不同。分享輸出前，請確認是否需要移除定位與 EXIF 資訊。
