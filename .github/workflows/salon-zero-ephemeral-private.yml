@@ -1,0 +1,18 @@
+name: Salon Ephemeral Encrypted Reconstruction (Deprecated)
+
+# Historical transport experiment that stored encrypted input/output chunks in Git
+# history. It is superseded by salon-private-zero-run.yml, which keeps plaintext out
+# of the repository without using Git as a binary transport channel.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deprecated:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Deprecated duplicate transport lane."
+          echo "Use .github/workflows/salon-private-zero-run.yml instead."
