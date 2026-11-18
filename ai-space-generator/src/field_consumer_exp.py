@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -24,6 +26,14 @@ from .execution_control import ActionArchetype, ActionExternality, Mode
 from .mcp_control_bridge import HaoMCPIdentityPolicy, MCPPrincipal, SCOPE_EXECUTE
 from .mcp_reasoning_ingress import AuthenticatedMCPReasoningIngress
 from .operational_state import ActiveOperationalState, CommandActor
+from .groq_free_benchmark import (
+    build_groq_free_benchmark_client,
+    run_groq_free_benchmark,
+    run_groq_free_runtime_intent_benchmark,
+    run_groq_free_shadow_reliability_benchmark,
+    summarize_groq_shadow_reliability,
+)
+from .groq_free_provider import GROQ_GPT_OSS_20B, GroqFreeOnlyStop, groq_api_key_secret_file_status, load_groq_api_key
 
 
 TASK = "Hao System｜Runtime v2 deployed field consumer"
@@ -32,6 +42,7 @@ EXISTING_REF = "PR17:CURRENT"
 REGRESSION_REF = "REG:R051-NON-BYPASSABLE"
 EXPECTED_CODE = "MODEL_INTENT_RESOLVED_TO_TRUSTED_BINDING"
 ARTIFACT_ROLE = "EXP_DEPLOYED_FIELD_CONSUMER"
+LINEAR_WEBHOOK_SHADOW_CODE = "LINEAR_WEBHOOK_VERIFIED_SHADOW_ONLY"
 
 
 class StateSource:
@@ -87,12 +98,14 @@ class SnapshotSemanticResolver:
                 summary=(
                     "No-computer Task Router is an admission selector, not Authority. "
                     "Formal mutation must re-enter ACTION_ADMISSION_BINDING and the "
-                    "existing Single Write Gateway; Render/public Actions cannot write Authority."
+                    "existing Single Write Gateway; Render/public Actions cannot write Authority. "
+                    "Registered binding formal.persist has capability formal_persistence."
                 ),
                 source_version=source_version,
                 project_scope="HAO_SYSTEM",
                 applicability="STALE" if self.stale else "APPLICABLE",
                 disposition="APPLY",
+                binding_id="formal.persist",
             ),
             AdmittedContextItem(
                 ref=EXISTING_REF,
@@ -172,6 +185,7 @@ def _catalog() -> ActionCatalog:
 class FieldRuntime:
     token: str
     expected_subject: str
+    linear_webhook_secret: str
     ingress: AuthenticatedMCPReasoningIngress
     model: DeterministicIntentModel
 
@@ -181,10 +195,12 @@ class FieldRuntime:
         *,
         token: str,
         expected_subject: str = "hao-field-exp",
+        linear_webhook_secret: str = "",
         stale: bool = False,
     ) -> "FieldRuntime":
         token = token.strip()
         expected_subject = expected_subject.strip()
+        linear_webhook_secret = linear_webhook_secret.strip()
         if not token:
             raise ValueError("FIELD_CONSUMER_TOKEN_REQUIRED")
         if not expected_subject:
@@ -209,7 +225,84 @@ class FieldRuntime:
             consumer=consumer,
             identity_policy=identity,
         )
-        return cls(token, expected_subject, ingress, model)
+        return cls(token, expected_subject, linear_webhook_secret, ingress, model)
+
+    def handle_linear_webhook(
+        self,
+        headers: Mapping[str, str],
+        raw_body: bytes,
+        *,
+        now_ms: int | None = None,
+    ) -> tuple[int, dict[str, object]]:
+        if not self.linear_webhook_secret:
+            return 503, {"ok": False, "code": "LINEAR_WEBHOOK_SECRET_REQUIRED"}
+
+        supplied = str(headers.get("linear-signature", ""))
+        if not supplied:
+            return 401, {"ok": False, "code": "LINEAR_WEBHOOK_SIGNATURE_REQUIRED"}
+        expected = hmac.new(
+            self.linear_webhook_secret.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not secrets.compare_digest(supplied, expected):
+            return 401, {"ok": False, "code": "LINEAR_WEBHOOK_SIGNATURE_INVALID"}
+
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return 400, {"ok": False, "code": "LINEAR_WEBHOOK_INVALID_JSON"}
+        if not isinstance(payload, dict):
+            return 400, {"ok": False, "code": "LINEAR_WEBHOOK_INVALID_SCHEMA"}
+
+        timestamp = payload.get("webhookTimestamp")
+        if not isinstance(timestamp, int):
+            return 400, {"ok": False, "code": "LINEAR_WEBHOOK_TIMESTAMP_REQUIRED"}
+        current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        if abs(current_ms - timestamp) > 60_000:
+            return 401, {"ok": False, "code": "LINEAR_WEBHOOK_TIMESTAMP_STALE"}
+
+        event_type = payload.get("type")
+        action = payload.get("action")
+        data = payload.get("data")
+        if event_type not in {"Issue", "Comment"}:
+            return 422, {"ok": False, "code": "LINEAR_WEBHOOK_EVENT_NOT_ADMITTED"}
+        if action not in {"create", "update", "remove"} or not isinstance(data, dict):
+            return 400, {"ok": False, "code": "LINEAR_WEBHOOK_INVALID_SCHEMA"}
+
+        header_event = str(headers.get("linear-event", ""))
+        if header_event and header_event != event_type:
+            return 400, {"ok": False, "code": "LINEAR_WEBHOOK_EVENT_MISMATCH"}
+
+        delivery_id = str(headers.get("linear-delivery", ""))
+        if not delivery_id or len(delivery_id) > 128 or not all(
+            char.isalnum() or char in "-_" for char in delivery_id
+        ):
+            return 400, {"ok": False, "code": "LINEAR_WEBHOOK_DELIVERY_REQUIRED"}
+
+        entity_id = str(data.get("id", ""))
+        if not entity_id or len(entity_id) > 128 or not all(
+            char.isalnum() or char in "-_" for char in entity_id
+        ):
+            return 400, {"ok": False, "code": "LINEAR_WEBHOOK_ENTITY_ID_REQUIRED"}
+
+        updated_from = payload.get("updatedFrom")
+        changed_fields = (
+            sorted(str(key) for key in updated_from)
+            if isinstance(updated_from, dict)
+            else []
+        )
+        return 200, {
+            "ok": True,
+            "code": LINEAR_WEBHOOK_SHADOW_CODE,
+            "event_type": event_type,
+            "event_action": action,
+            "entity_id": entity_id,
+            "delivery_id": delivery_id,
+            "changed_fields": changed_fields,
+            "action_selected": False,
+            "provider_mutation_performed": False,
+        }
 
     def handle(self, headers: Mapping[str, str], payload: object) -> tuple[int, dict[str, object]]:
         supplied = str(headers.get("authorization", ""))
@@ -280,7 +373,7 @@ def build_handler(runtime: FieldRuntime):
             )
 
         def do_POST(self):
-            if self.path != "/v1/reason":
+            if self.path not in {"/v1/reason", "/webhooks/linear"}:
                 return _json_response(self, 404, {"ok": False, "code": "NOT_FOUND"})
             try:
                 size = int(self.headers.get("content-length", "0"))
@@ -288,8 +381,21 @@ def build_handler(runtime: FieldRuntime):
                 return _json_response(self, 400, {"ok": False, "code": "INVALID_CONTENT_LENGTH"})
             if size < 1 or size > 65536:
                 return _json_response(self, 400, {"ok": False, "code": "INVALID_BODY_SIZE"})
+            raw_body = self.rfile.read(size)
+
+            if self.path == "/webhooks/linear":
+                status, body = runtime.handle_linear_webhook(
+                    {
+                        "linear-signature": self.headers.get("linear-signature", ""),
+                        "linear-delivery": self.headers.get("linear-delivery", ""),
+                        "linear-event": self.headers.get("linear-event", ""),
+                    },
+                    raw_body,
+                )
+                return _json_response(self, status, body)
+
             try:
-                payload = json.loads(self.rfile.read(size).decode("utf-8"))
+                payload = json.loads(raw_body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 return _json_response(self, 400, {"ok": False, "code": "INVALID_JSON"})
             status, body = runtime.handle(
@@ -382,10 +488,211 @@ def run_startup_selftest(port: int, runtime: FieldRuntime) -> None:
     )
 
 
+
+def run_optional_groq_free_benchmark() -> None:
+    if os.environ.get("GROQ_BENCHMARK_ON_STARTUP", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+
+    run_id = os.environ.get("GROQ_BENCHMARK_RUN_ID", "").strip()
+    if not run_id:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_free_benchmark",
+                    "result": "BLOCK",
+                    "code": "GROQ_BENCHMARK_RUN_ID_REQUIRED",
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    key, key_source = load_groq_api_key()
+    if not key:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_free_benchmark",
+                    "runId": run_id,
+                    "result": "BLOCK",
+                    "code": "GROQ_API_KEY_REQUIRED",
+                    "groqEnvKeys": sorted(name for name in os.environ if name.startswith("GROQ")),
+                    "groqApiKeySource": key_source,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    try:
+        client = build_groq_free_benchmark_client(key)
+        policy_results = run_groq_free_benchmark(client)
+        runtime_intent_results = run_groq_free_runtime_intent_benchmark(client)
+    except GroqFreeOnlyStop as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_free_benchmark",
+                    "runId": run_id,
+                    "result": "STOP",
+                    "code": str(exc),
+                    "freeOnly": True,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_free_benchmark",
+                    "runId": run_id,
+                    "result": "FAIL",
+                    "code": type(exc).__name__,
+                    "freeOnly": True,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    print(
+        json.dumps(
+            {
+                "event": "hao_groq_free_benchmark",
+                "runId": run_id,
+                "result": (
+                    "PASS"
+                    if all(item.get("quality_pass") is True for item in policy_results)
+                    and all(item.get("quality_pass") is True for item in runtime_intent_results)
+                    else "QUALITY_FAIL"
+                ),
+                "freeOnly": True,
+                "calls": len(policy_results) + len(runtime_intent_results),
+                "policy_results": policy_results,
+                "runtime_intent_results": runtime_intent_results,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
+def run_optional_groq_shadow_reliability() -> None:
+    if os.environ.get("GROQ_SHADOW_RELIABILITY_ON_STARTUP", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+
+    run_id = os.environ.get("GROQ_SHADOW_RELIABILITY_RUN_ID", "").strip()
+    if not run_id:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "result": "BLOCK",
+                    "code": "GROQ_SHADOW_RELIABILITY_RUN_ID_REQUIRED",
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    try:
+        repetitions = int(os.environ.get("GROQ_SHADOW_REPETITIONS", "2"))
+    except ValueError:
+        repetitions = 0
+
+    key, key_source = load_groq_api_key()
+    if not key:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "runId": run_id,
+                    "result": "BLOCK",
+                    "code": "GROQ_API_KEY_REQUIRED",
+                    "groqApiKeySource": key_source,
+                    "providerMutation": False,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    try:
+        client = build_groq_free_benchmark_client(key)
+        results = run_groq_free_shadow_reliability_benchmark(
+            client,
+            repetitions=repetitions,
+        )
+        summary = summarize_groq_shadow_reliability(results)
+    except GroqFreeOnlyStop as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "runId": run_id,
+                    "result": "STOP",
+                    "code": str(exc),
+                    "freeOnly": True,
+                    "providerMutation": False,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "hao_groq_shadow_reliability",
+                    "runId": run_id,
+                    "result": "FAIL",
+                    "code": type(exc).__name__,
+                    "freeOnly": True,
+                    "providerMutation": False,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    all_pass = all(item.get("quality_pass") is True for item in results)
+    print(
+        json.dumps(
+            {
+                "event": "hao_groq_shadow_reliability",
+                "runId": run_id,
+                "result": "PASS" if all_pass else "QUALITY_FAIL",
+                "freeOnly": True,
+                "providerMutation": False,
+                "calls": len(results),
+                "summary": summary,
+                "results": results,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def main() -> None:
     token = os.environ.get("HAO_FIELD_TOKEN", "").strip()
     subject = os.environ.get("HAO_FIELD_EXPECTED_SUBJECT", "hao-field-exp").strip()
-    runtime = FieldRuntime.build(token=token, expected_subject=subject)
+    linear_webhook_secret = os.environ.get("LINEAR_WEBHOOK_SECRET", "").strip()
+    runtime = FieldRuntime.build(
+        token=token,
+        expected_subject=subject,
+        linear_webhook_secret=linear_webhook_secret,
+    )
     port = int(os.environ.get("PORT", "10000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), build_handler(runtime))
     print(
@@ -399,12 +706,20 @@ def main() -> None:
                 "authorityInput": "STATIC_CANONICAL_SNAPSHOT_EXP",
                 "providerMutation": False,
                 "gcpProduction": False,
+                "linearWebhookShadowConfigured": bool(runtime.linear_webhook_secret),
+                "groqCandidateModel": GROQ_GPT_OSS_20B,
+                "groqApiKeyConfigured": bool(load_groq_api_key()[0]),
+                "groqApiKeySource": load_groq_api_key()[1],
+                "groqSecretFileStatus": groq_api_key_secret_file_status(),
+                "groqEnvKeys": sorted(name for name in os.environ if name.startswith("GROQ")),
             },
             sort_keys=True,
         ),
         flush=True,
     )
     threading.Thread(target=run_startup_selftest, args=(port, runtime), daemon=True).start()
+    threading.Thread(target=run_optional_groq_free_benchmark, daemon=True).start()
+    threading.Thread(target=run_optional_groq_shadow_reliability, daemon=True).start()
     server.serve_forever()
 
 
