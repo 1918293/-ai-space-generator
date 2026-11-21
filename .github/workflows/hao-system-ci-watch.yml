@@ -1,0 +1,96 @@
+name: Hao System - GitHub CI Watch
+
+# Read-only scheduled execution. NON_AUTHORITY: no Google Drive data, no repository mutation.
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/hao-system-ci-watch.yml]
+  schedule:
+    - cron: '23 1 * * *' # daily at 09:23 Asia/Taipei
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+concurrency:
+  group: hao-system-ci-watch
+  cancel-in-progress: false
+
+jobs:
+  check-pr31:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read PR 31 CI and save non-authority run receipt
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            if (owner + '/' + repo !== '1918293/-ai-space-generator') {
+              throw new Error('wrong repository: fail closed');
+            }
+            const expected = ['runtime-promotion-gate','legacy-app-gate','durable-receipt'];
+            const receipt = {
+              schema:'hao-repo-ci-watch-v1',
+              classification:'NON_AUTHORITY_EXECUTION_EVIDENCE',
+              repository:owner + '/' + repo, pr_number:31,
+              checked_at_utc:new Date().toISOString(),
+              google_drive_access:'NOT_ATTEMPTED',
+              provider_mutation:false, checks:{}, verdict:'UNKNOWN'
+            };
+            try {
+              const {data:pr}=await github.rest.pulls.get({owner,repo,pull_number:31});
+              receipt.pr_state=pr.state;
+              receipt.pr_draft=pr.draft;
+              receipt.pr_merged=pr.merged;
+              if (pr.state!=='open') {
+                receipt.verdict='TERMINAL_PR_CLOSED';
+              } else {
+                receipt.head_sha=pr.head.sha;
+                const {data}=await github.rest.checks.listForRef({owner,repo,ref:pr.head.sha,per_page:100});
+                const latest={};
+                for (const c of data.check_runs) {
+                  if (!expected.includes(c.name)) continue;
+                  const prev=latest[c.name];
+                  const stamp=c.completed_at||c.started_at||'';
+                  if (!prev || stamp>(prev.completed_at||prev.started_at||'')) latest[c.name]=c;
+                }
+                let stale=false;
+                for (const name of expected) {
+                  const c=latest[name];
+                  if (!c) { receipt.checks[name]={status:'ABSENT',conclusion:'UNKNOWN'}; continue; }
+                  if (c.completed_at && (Date.now()-Date.parse(c.completed_at))>=14*86400000) stale=true;
+                  receipt.checks[name]={status:c.status,conclusion:c.conclusion,completed_at:c.completed_at};
+                }
+                const checks=Object.values(receipt.checks);
+                if (checks.some(c=>c.status==='completed' && !['success','neutral','skipped'].includes(c.conclusion)))
+                  receipt.verdict='CI_FAILURE';
+                else if (checks.some(c=>c.status==='ABSENT'))
+                  receipt.verdict='CI_MISSING_UNKNOWN';
+                else if (checks.some(c=>c.status!=='completed'))
+                  receipt.verdict='CI_PENDING';
+                else receipt.verdict=stale?'HISTORICAL_PASS_STALE':'CURRENT_HEAD_CI_PASS';
+              }
+            } catch (e) {
+              receipt.verdict='PROVIDER_READ_ERROR';
+              receipt.error_type=e.name;
+            }
+            fs.mkdirSync('ci-watch',{recursive:true});
+            fs.writeFileSync('ci-watch/receipt.json',JSON.stringify(receipt,null,2)+'\n');
+            await core.summary.addHeading('Hao System GitHub CI Watch (NON_AUTHORITY)',2)
+              .addRaw('PR #31 — '+receipt.verdict+'; Drive accessed: NO; provider mutation: NO')
+              .write();
+            if (['CI_FAILURE','CI_MISSING_UNKNOWN','PROVIDER_READ_ERROR'].includes(receipt.verdict))
+              core.setFailed(receipt.verdict);
+      - name: Retain 7-day diagnostic receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned v4
+        with:
+          name: hao-ci-watch-evidence
+          path: ci-watch/receipt.json
+          if-no-files-found: warn
+          retention-days: 7
