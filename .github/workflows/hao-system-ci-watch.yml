@@ -7,6 +7,7 @@ on:
     paths: [.github/workflows/hao-system-ci-watch.yml]
   schedule:
     - cron: '23 1 * * *' # daily at 09:23 Asia/Taipei
+    - cron: '17 2 * * 1' # Monday 10:17 Asia/Taipei: real current-head PR31 gates
   workflow_dispatch:
 
 permissions:
@@ -94,3 +95,110 @@ jobs:
           path: ci-watch/receipt.json
           if-no-files-found: warn
           retention-days: 7
+
+  admit-pr31-fresh-validation:
+    name: admit-pr31-fresh-validation
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '17 2 * * 1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      eligible: ${{ steps.head.outputs.eligible }}
+      sha: ${{ steps.head.outputs.sha }}
+    steps:
+      - name: Bind exact open PR 31 head without mutation
+        id: head
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner=context.repo.owner, repo=context.repo.repo;
+            if (owner+'/'+repo !== '1918293/-ai-space-generator') throw new Error('wrong repository');
+            const {data:pr}=await github.rest.pulls.get({owner,repo,pull_number:31});
+            if (pr.state !== 'open' || pr.merged_at) {
+              core.setOutput('eligible','false');
+              core.info('PR31 closed; skip fresh tests');
+            } else if (!/^[a-f0-9]{40}$/.test(pr.head.sha)) {
+              throw new Error('invalid PR head SHA');
+            } else {
+              core.setOutput('eligible','true');
+              core.setOutput('sha',pr.head.sha);
+              core.info('Testing immutable PR31 head '+pr.head.sha);
+            }
+
+  validate-pr31-current-head:
+    name: fresh-pr31-head (${{ matrix.gate }})
+    needs: admit-pr31-fresh-validation
+    if: needs.admit-pr31-fresh-validation.outputs.eligible == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gate: runtime
+            deps: requirements-control.txt
+            pytest_args: tests -q --ignore=tests/test_core.py --ignore=tests/test_validation.py --ignore=tests/test_multiview_donor_admission.py
+          - gate: legacy
+            deps: requirements.txt
+            pytest_args: tests/test_core.py tests/test_validation.py tests/test_multiview_donor_admission.py -q
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact admitted head (not default branch)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.admit-pr31-fresh-validation.outputs.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: ai-space-generator/${{ matrix.deps }}
+      - name: Install original gate dependencies
+        working-directory: ai-space-generator
+        run: python -m pip install --upgrade pytest -r ${{ matrix.deps }}
+      - name: Execute original current-head regression gate
+        id: test
+        working-directory: ai-space-generator
+        run: python -m pytest ${{ matrix.pytest_args }}
+      - name: Write independently recoverable NON_AUTHORITY receipt
+        if: always()
+        shell: bash
+        env:
+          ADMITTED_HEAD_SHA: ${{ needs.admit-pr31-fresh-validation.outputs.sha }}
+          GATE: ${{ matrix.gate }}
+          TEST_STEP_OUTCOME: ${{ steps.test.outcome }}
+          TEST_JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p ci-watch-fresh
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = {
+              'schema':'hao-pr31-current-head-gate-v1',
+              'classification':'NON_AUTHORITY_EXECUTION_EVIDENCE',
+              'repository':os.environ['GITHUB_REPOSITORY'],
+              'pr_number':31,
+              'tested_head_sha':os.environ['ADMITTED_HEAD_SHA'],
+              'workflow_run_sha':os.environ['GITHUB_SHA'],
+              'run_id':os.environ['GITHUB_RUN_ID'],
+              'attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+              'gate':os.environ['GATE'],
+              'test_step_outcome':os.environ['TEST_STEP_OUTCOME'],
+              'job_status_at_receipt':os.environ['TEST_JOB_STATUS'],
+              'provider_mutation':False,
+              'google_drive_access':'NOT_ATTEMPTED',
+              'boundary':'CI only; no merge, deployment, runtime promotion or image admission'
+          }
+          Path('ci-watch-fresh/receipt.json').write_text(
+              json.dumps(data,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Retain current-head gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned v4
+        with:
+          name: hao-pr31-fresh-${{ matrix.gate }}-${{ github.run_id }}
+          path: ci-watch-fresh/receipt.json
+          if-no-files-found: warn
+          retention-days: 30
